@@ -1,0 +1,78 @@
+version: '3.8'
+
+services:
+  influxdb:
+    image: influxdb:2.7
+    container_name: backtrader-influxdb
+    ports:
+      - "8086:8086"
+    volumes:
+      - influxdb-data:/var/lib/influxdb2
+      - ./data/influxdb:/var/lib/influxdb2
+    environment:
+      - DOCKER_INFLUXDB_INIT_MODE=setup
+      - DOCKER_INFLUXDB_INIT_USERNAME=admin
+      - DOCKER_INFLUXDB_INIT_PASSWORD=backtrader123
+      - DOCKER_INFLUXDB_INIT_ORG=quant
+      - DOCKER_INFLUXDB_INIT_BUCKET=market_data
+      - DOCKER_INFLUXDB_INIT_ADMIN_TOKEN=supersecretadmin token
+    restart: unless-stopped
+
+  postgres:
+    image: timescale/timescaledb:latest-pg16
+    container_name: backtrader-postgres
+    ports:
+      - "15432:5432"   # 修改主机端口，避免与现有 postgres-db 冲突
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    environment:
+      - POSTGRES_USER=quant
+      - POSTGRES_PASSWORD=backtrader123
+      - POSTGRES_DB=backtrader
+    command: postgres -c shared_preload_libraries=timescaledb
+    restart: unless-stopped
+
+  redis:
+    image: redis:7-alpine
+    container_name: backtrader-redis
+    ports:
+      - "16379:6379"   # 修改主机端口，避免与现有 tradingagents-redis 冲突
+    volumes:
+      - redis-data:/data
+    command: redis-server --appendonly yes
+    restart: unless-stopped
+
+  minio:
+    image: minio/minio
+    container_name: backtrader-minio
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    volumes:
+      - minio-data:/data
+    environment:
+      - MINIO_ROOT_USER=quant
+      - MINIO_ROOT_PASSWORD=backtrader123
+    command: server /data --console-address ":9001"
+    restart: unless-stopped
+
+  clickhouse:
+    image: clickhouse/clickhouse-server:latest
+    container_name: backtrader-clickhouse
+    ports:
+      - "18123:8123"
+      - "19000:9000"   # 修改端口，避免与现有服务冲突
+    volumes:
+      - clickhouse-data:/var/lib/clickhouse
+    ulimits:
+      nofile:
+        soft: 262144
+        hard: 262144
+    restart: unless-stopped
+
+volumes:
+  influxdb-data:
+  postgres-data:
+  redis-data:
+  minio-data:
+  clickhouse-data:
