@@ -4,10 +4,10 @@
     <div class="w-72 bg-zinc-900 border-r border-zinc-800 flex flex-col">
       <div class="p-6 border-b border-zinc-800 flex items-center gap-3">
         <div class="w-9 h-9 bg-gradient-to-br from-blue-500 to-purple-600 rounded-2xl flex items-center justify-center">
-          <span class="text-white font-bold text-xl">Y</span>
+          <span class="text-white font-bold text-xl">A</span>
         </div>
         <div>
-          <h1 class="title-font text-3xl font-semibold tracking-tighter">语析</h1>
+          <h1 class="title-font text-3xl font-semibold tracking-tighter">AIquant</h1>
           <p class="text-xs text-zinc-500 -mt-1">Backtrader Agent Platform</p>
         </div>
       </div>
@@ -39,7 +39,7 @@
       </div>
 
       <div class="p-6 border-t border-zinc-800 text-xs text-zinc-500">
-        仿造 <a href="https://github.com/xerrors/Yuxi" target="_blank" class="hover:text-blue-400">Yuxi</a> 项目<br>
+        仿造 Yuxi 风格 | AIquant Backtrader Agent Platform<br>
         Powered by Vue3 + FastAPI
       </div>
     </div>
@@ -246,7 +246,7 @@ const testAll = () => {
 }
 
 onMounted(() => {
-  addMessage('assistant', '欢迎使用语析 · Yuxi Backtrader Agent Platform\n\n左侧可切换不同功能面板。\n点击「一键测试全部」开始测试。')
+  addMessage('assistant', '欢迎使用 AIquant Backtrader Agent Platform\n\n左侧可切换不同功能面板。\n点击「一键测试全部」开始测试。')
 })
 </script>
 

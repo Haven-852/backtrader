@@ -12,9 +12,10 @@ Backtrader 存储层包
 
 from .config import config, DatabaseConfig
 from .db_manager import storage_manager, StorageManager
+from .data_loader import AShareDataLoader
 
-__all__ = ['config', 'storage_manager', 'DatabaseConfig', 'StorageManager']
+__all__ = ['config', 'storage_manager', 'DatabaseConfig', 'StorageManager', 'AShareDataLoader']
 
 # 版本信息
-__version__ = "0.1.0"
-__description__ = "完整存储层架构实现 - 支持 InfluxDB, TimescaleDB, Redis, MinIO, ClickHouse"
+__version__ = "0.2.0"
+__description__ = "完整存储层架构实现 - 支持10年A股数据加载 + 分钟级实时数据 (遵循02-agent-data-access.md)"
