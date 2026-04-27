@@ -72,6 +72,3 @@ datas/*.py
 
 # Local InfluxDB engine data (runtime, do not version)
 data/influxdb/
-
-# 本地 InfluxDB 数据目录中由引擎新产生的文件（已跟踪的基线文件仍随仓库版本管理）
-data/influxdb/
