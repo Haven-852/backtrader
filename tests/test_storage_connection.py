@@ -30,12 +30,12 @@ def test_all_connections():
         client = storage_manager.get_influx_client()
         if client:
             health = client.health()
-            results['influxdb'] = "✅ 连接成功"
+            results['influxdb'] = "[OK] 连接成功"
             print("   InfluxDB 健康检查通过")
         else:
-            results['influxdb'] = "❌ 连接失败"
+            results['influxdb'] = "[ERROR] 连接失败"
     except Exception as e:
-        results['influxdb'] = f"❌ 异常: {str(e)[:80]}"
+        results['influxdb'] = f"[ERROR] 异常: {str(e)[:80]}"
         print(f"   InfluxDB 连接异常: {e}")
     
     # 2. 测试 PostgreSQL + TimescaleDB
@@ -62,12 +62,12 @@ def test_all_connections():
         redis_client = storage_manager.get_redis_client()
         if redis_client:
             redis_client.ping()
-            results['redis'] = "✅ 连接成功"
+            results['redis'] = "[OK] 连接成功"
             print("   Redis 连接成功")
         else:
-            results['redis'] = "❌ 连接失败"
+            results['redis'] = "[ERROR] 连接失败"
     except Exception as e:
-        results['redis'] = f"❌ 异常: {str(e)[:80]}"
+        results['redis'] = f"[ERROR] 异常: {str(e)[:80]}"
         print(f"   Redis 连接异常: {e}")
     
     # 4. 测试 MinIO
@@ -81,13 +81,13 @@ def test_all_connections():
             secure=config.minio["secure"]
         )
         if minio_client.bucket_exists("backtrader-data"):
-            results['minio'] = "✅ 连接成功 (Bucket 存在)"
+            results['minio'] = "[OK] 连接成功 (Bucket 存在)"
         else:
             minio_client.make_bucket("backtrader-data")
-            results['minio'] = "✅ 连接成功 (已创建 Bucket)"
+            results['minio'] = "[OK] 连接成功 (已创建 Bucket)"
         print("   MinIO 连接成功")
     except Exception as e:
-        results['minio'] = f"❌ 异常: {str(e)[:80]}"
+        results['minio'] = f"[ERROR] 异常: {str(e)[:80]}"
         print(f"   MinIO 连接异常: {e}")
     
     # 总结报告
