@@ -1,142 +1,158 @@
 <template>
   <div class="min-h-screen bg-zinc-950 text-zinc-100 flex">
     <!-- Sidebar -->
-    <div class="w-72 bg-zinc-900 border-r border-zinc-800 flex flex-col">
-      <div class="p-6 border-b border-zinc-800 flex items-center gap-3">
+    <div class="w-64 bg-zinc-900 border-r border-zinc-800 flex flex-col">
+      <div class="p-5 border-b border-zinc-800 flex items-center gap-3">
         <div class="w-9 h-9 bg-gradient-to-br from-blue-500 to-purple-600 rounded-2xl flex items-center justify-center">
-          <span class="text-white font-bold text-xl">A</span>
+          <span class="text-white font-bold text-lg">A</span>
         </div>
         <div>
-          <h1 class="title-font text-3xl font-semibold tracking-tighter">AIquant</h1>
-          <p class="text-xs text-zinc-500 -mt-1">Backtrader Agent Platform</p>
+          <h1 class="font-semibold text-lg tracking-tight">AIquant</h1>
+          <p class="text-xs text-zinc-500 -mt-0.5">Backtrader Agent Platform</p>
         </div>
       </div>
 
-      <div class="p-3 flex-1">
-        <div 
-          @click="currentTab = 0" 
-          :class="{ 'bg-zinc-800 text-white': currentTab === 0 }"
-          class="flex items-center gap-3 px-4 py-3 rounded-2xl mb-1 cursor-pointer hover:bg-zinc-800 transition-colors">
-          <i class="fa-solid fa-comments w-5"></i>
-          <span class="font-medium">大模型对话</span>
+      <div class="p-3 flex-1 space-y-1">
+        <!-- 大模型对话 -->
+        <div
+          @click="currentTab = 0"
+          :class="{ 'bg-zinc-800 text-white': currentTab === 0, 'text-zinc-400 hover:text-white hover:bg-zinc-800/50': currentTab !== 0 }"
+          class="flex items-center gap-3 px-4 py-3 rounded-xl cursor-pointer transition-all"
+        >
+          <i class="fa-solid fa-comments w-5 text-center"></i>
+          <div>
+            <div class="font-medium text-sm">大模型对话</div>
+            <div class="text-xs text-zinc-500">多模型 AI 分析</div>
+          </div>
         </div>
-        
-        <div 
-          @click="currentTab = 1" 
-          :class="{ 'bg-zinc-800 text-white': currentTab === 1 }"
-          class="flex items-center gap-3 px-4 py-3 rounded-2xl mb-1 cursor-pointer hover:bg-zinc-800 transition-colors">
-          <i class="fa-solid fa-plug w-5"></i>
-          <span class="font-medium">连通性测试</span>
+
+        <!-- 行情看板 -->
+        <div
+          @click="currentTab = 1"
+          :class="{ 'bg-zinc-800 text-white': currentTab === 1, 'text-zinc-400 hover:text-white hover:bg-zinc-800/50': currentTab !== 1 }"
+          class="flex items-center gap-3 px-4 py-3 rounded-xl cursor-pointer transition-all"
+        >
+          <i class="fa-solid fa-chart-line w-5 text-center"></i>
+          <div>
+            <div class="font-medium text-sm">行情看板</div>
+            <div class="text-xs text-zinc-500">K线 · 指标 · 多周期</div>
+          </div>
         </div>
-        
-        <div 
-          @click="currentTab = 2" 
-          :class="{ 'bg-zinc-800 text-white': currentTab === 2 }"
-          class="flex items-center gap-3 px-4 py-3 rounded-2xl cursor-pointer hover:bg-zinc-800 transition-colors">
-          <i class="fa-solid fa-database w-5"></i>
-          <span class="font-medium">存储层状态</span>
+
+        <!-- 连通性测试 -->
+        <div
+          @click="currentTab = 2"
+          :class="{ 'bg-zinc-800 text-white': currentTab === 2, 'text-zinc-400 hover:text-white hover:bg-zinc-800/50': currentTab !== 2 }"
+          class="flex items-center gap-3 px-4 py-3 rounded-xl cursor-pointer transition-all"
+        >
+          <i class="fa-solid fa-plug w-5 text-center"></i>
+          <div>
+            <div class="font-medium text-sm">连通性测试</div>
+            <div class="text-xs text-zinc-500">模型 · 数据库</div>
+          </div>
+        </div>
+
+        <!-- 存储层状态 -->
+        <div
+          @click="currentTab = 3"
+          :class="{ 'bg-zinc-800 text-white': currentTab === 3, 'text-zinc-400 hover:text-white hover:bg-zinc-800/50': currentTab !== 3 }"
+          class="flex items-center gap-3 px-4 py-3 rounded-xl cursor-pointer transition-all"
+        >
+          <i class="fa-solid fa-database w-5 text-center"></i>
+          <div>
+            <div class="font-medium text-sm">存储层状态</div>
+            <div class="text-xs text-zinc-500">基础设施监控</div>
+          </div>
         </div>
       </div>
 
-      <div class="p-6 border-t border-zinc-800 text-xs text-zinc-500">
-        仿造 Yuxi 风格 | AIquant Backtrader Agent Platform<br>
-        Powered by Vue3 + FastAPI
+      <div class="p-5 border-t border-zinc-800 text-xs text-zinc-600">
+        <div class="mb-1">v3.0 · Yuxi 风格架构</div>
+        <div>web → routers → server → data</div>
       </div>
     </div>
 
     <!-- Main Content -->
-    <div class="flex-1 flex flex-col">
-      <header class="h-14 border-b border-zinc-800 bg-zinc-900 px-8 flex items-center justify-between">
-        <div class="flex items-center gap-4">
-          <h2 class="text-xl font-semibold">{{ tabTitles[currentTab] }}</h2>
+    <div class="flex-1 flex flex-col min-w-0">
+      <!-- Header -->
+      <header class="h-12 border-b border-zinc-800 bg-zinc-900 px-6 flex items-center justify-between flex-shrink-0">
+        <div class="flex items-center gap-3">
+          <h2 class="text-sm font-semibold text-zinc-300">{{ tabTitles[currentTab] }}</h2>
+          <span class="text-xs text-zinc-600">{{ tabSubtitles[currentTab] }}</span>
         </div>
-        <div class="flex items-center gap-4 text-sm">
-          <div class="px-4 py-1 bg-emerald-500/10 text-emerald-400 rounded-3xl flex items-center gap-2">
-            <div class="w-2 h-2 bg-emerald-500 rounded-full animate-pulse"></div>
+        <div class="flex items-center gap-3 text-xs">
+          <div class="flex items-center gap-1.5 px-3 py-1 bg-emerald-500/10 text-emerald-400 rounded-full">
+            <div class="w-1.5 h-1.5 bg-emerald-500 rounded-full animate-pulse"></div>
             已连接
           </div>
-          <button @click="testAll" 
-                  class="px-5 py-2 bg-blue-600 hover:bg-blue-500 rounded-3xl text-sm font-medium transition-colors">
-            一键测试全部
-          </button>
         </div>
       </header>
 
       <!-- Tab Content -->
-      <div class="flex-1 p-8 overflow-auto">
+      <div class="flex-1 overflow-hidden">
         <!-- Chat Tab -->
-        <div v-if="currentTab === 0" class="max-w-4xl mx-auto">
-          <div id="chat-messages" class="space-y-6 mb-8 h-[calc(100vh-220px)] overflow-auto pr-4">
-            <div v-for="(msg, i) in messages" :key="i" 
-                 :class="msg.role === 'user' ? 'flex justify-end' : 'flex justify-start'">
-              <div :class="msg.role === 'user' 
-                ? 'bg-blue-600 text-white max-w-[70%] px-5 py-3 rounded-3xl rounded-tr-none' 
-                : 'bg-zinc-800 max-w-[70%] px-5 py-3 rounded-3xl rounded-tl-none'">
-                {{ msg.content }}
-              </div>
-            </div>
-          </div>
-          
-          <div class="flex gap-3 max-w-4xl">
-            <input 
-              v-model="inputMessage"
-              @keyup.enter="sendMessage"
-              placeholder="输入消息... 支持 DeepSeek 大模型对话" 
-              class="flex-1 bg-zinc-900 border border-zinc-700 focus:border-blue-500 rounded-3xl px-6 py-4 outline-none text-sm"
-            >
-            <button @click="sendMessage" 
-                    class="px-8 bg-blue-600 hover:bg-blue-500 rounded-3xl font-medium transition-colors">
-              发送
-            </button>
-          </div>
+        <div v-if="currentTab === 0" class="h-full flex flex-col">
+          <ChatView />
+        </div>
+
+        <!-- Dash Tab -->
+        <div v-if="currentTab === 1" class="h-full">
+          <DashView />
         </div>
 
         <!-- Test Tab -->
-        <div v-if="currentTab === 1" class="max-w-5xl mx-auto">
-          <h3 class="text-2xl font-semibold mb-8">连通性测试中心</h3>
-          <div class="grid grid-cols-2 gap-8">
-            <div class="bg-zinc-900 rounded-3xl p-8">
-              <h4 class="font-semibold mb-6 text-lg flex items-center gap-3">
-                <i class="fa-solid fa-brain text-blue-400"></i> 大模型测试
+        <div v-if="currentTab === 2" class="h-full overflow-auto p-6">
+          <h3 class="text-xl font-semibold mb-6">连通性测试中心</h3>
+          <div class="grid grid-cols-2 gap-6 max-w-5xl">
+            <!-- 大模型测试 -->
+            <div class="bg-zinc-900 rounded-2xl p-6">
+              <h4 class="font-semibold mb-4 flex items-center gap-2">
+                <i class="fa-solid fa-brain text-blue-400"></i> 大模型连通测试
               </h4>
-              <div @click="testModel('deepseek')" 
-                   class="test-item mb-4 p-5 rounded-2xl hover:bg-zinc-800 cursor-pointer flex justify-between items-center border border-transparent hover:border-blue-500">
-                <div>
-                  <div class="font-medium">DeepSeek R1</div>
-                  <div class="text-sm text-zinc-500">deepseek-r1:8b • 本地模型</div>
-                </div>
-                <div :class="testResults.deepseek ? 'text-emerald-400' : 'text-zinc-500'" class="font-medium">
-                  {{ testResults.deepseek || '未测试' }}
-                </div>
-              </div>
-              <div @click="testModel('openai')" 
-                   class="test-item p-5 rounded-2xl hover:bg-zinc-800 cursor-pointer flex justify-between items-center border border-transparent hover:border-blue-500">
-                <div>
-                  <div class="font-medium">OpenAI GPT-4o</div>
-                  <div class="text-sm text-zinc-500">gpt-4o-mini • 云端模型</div>
-                </div>
-                <div :class="testResults.openai ? 'text-emerald-400' : 'text-zinc-500'" class="font-medium">
-                  {{ testResults.openai || '未测试' }}
+              <div class="space-y-3">
+                <div v-for="model in testModels" :key="model.id"
+                  @click="testModel(model.id)"
+                  class="p-4 rounded-xl bg-zinc-800/50 hover:bg-zinc-800 cursor-pointer border border-transparent hover:border-zinc-700 transition-all"
+                >
+                  <div class="flex justify-between items-center">
+                    <div>
+                      <div class="font-medium text-sm">{{ model.name }}</div>
+                      <div class="text-xs text-zinc-500 mt-0.5">{{ model.provider }}</div>
+                    </div>
+                    <div :class="modelResults[model.id] ? 'text-emerald-400' : 'text-zinc-500'" class="text-sm font-medium">
+                      {{ modelResults[model.id] || '点击测试' }}
+                    </div>
+                  </div>
                 </div>
               </div>
             </div>
 
-            <div class="bg-zinc-900 rounded-3xl p-8">
-              <h4 class="font-semibold mb-6 text-lg flex items-center gap-3">
-                <i class="fa-solid fa-database text-emerald-400"></i> 数据库测试
+            <!-- 数据库测试 -->
+            <div class="bg-zinc-900 rounded-2xl p-6">
+              <h4 class="font-semibold mb-4 flex items-center gap-2">
+                <i class="fa-solid fa-database text-emerald-400"></i> 存储层测试
               </h4>
-              <div @click="testDatabase()" 
-                   class="test-item p-6 rounded-2xl hover:bg-zinc-800 cursor-pointer border border-transparent hover:border-emerald-500">
-                <div class="flex justify-between items-start">
+              <div
+                @click="testAllDatabases()"
+                class="p-5 rounded-xl bg-zinc-800/50 hover:bg-zinc-800 cursor-pointer border border-transparent hover:border-emerald-500/30 transition-all mb-3"
+              >
+                <div class="flex justify-between items-center">
                   <div>
-                    <div class="font-medium text-lg">存储层全链路测试</div>
-                    <div class="text-zinc-400 text-sm mt-1">InfluxDB · PostgreSQL · Redis · MinIO</div>
+                    <div class="font-medium text-sm">全链路存储测试</div>
+                    <div class="text-xs text-zinc-500 mt-0.5">PostgreSQL · TimescaleDB · InfluxDB · Redis</div>
                   </div>
                   <div class="text-right">
-                    <div :class="testResults.database ? 'text-emerald-400' : 'text-amber-400'" class="text-2xl font-semibold">
-                      {{ testResults.database || '点击测试' }}
+                    <div :class="dbStatus === 'connected' ? 'text-emerald-400' : dbStatus === 'testing' ? 'text-amber-400' : 'text-zinc-500'"
+                      class="text-lg font-semibold">
+                      {{ dbStatus === 'connected' ? '✅' : dbStatus === 'testing' ? '⏳' : '测试' }}
                     </div>
                   </div>
+                </div>
+              </div>
+              <div v-if="dbResults.length" class="space-y-2">
+                <div v-for="r in dbResults" :key="r.name" class="flex justify-between items-center text-sm py-1.5 border-b border-zinc-800 last:border-0">
+                  <span class="text-zinc-400">{{ r.name }}</span>
+                  <span :class="r.ok ? 'text-emerald-400' : 'text-red-400'">{{ r.ok ? '✅' : '❌' }} {{ r.msg }}</span>
                 </div>
               </div>
             </div>
@@ -144,28 +160,17 @@
         </div>
 
         <!-- Status Tab -->
-        <div v-if="currentTab === 2" class="max-w-4xl mx-auto">
-          <h3 class="text-2xl font-semibold mb-6">存储层实时状态</h3>
-          <div class="grid grid-cols-2 gap-6">
-            <div class="bg-zinc-900 rounded-3xl p-8">
-              <div class="text-emerald-400 text-sm mb-2">● 运行中</div>
-              <div class="text-2xl font-semibold">InfluxDB</div>
-              <div class="text-zinc-500">高频行情存储 • 端口 8086</div>
-            </div>
-            <div class="bg-zinc-900 rounded-3xl p-8">
-              <div class="text-emerald-400 text-sm mb-2">● 运行中</div>
-              <div class="text-2xl font-semibold">PostgreSQL + TimescaleDB</div>
-              <div class="text-zinc-500">结构化数据 • 端口 15432</div>
-            </div>
-            <div class="bg-zinc-900 rounded-3xl p-8">
-              <div class="text-emerald-400 text-sm mb-2">● 运行中</div>
-              <div class="text-2xl font-semibold">Redis</div>
-              <div class="text-zinc-500">实时缓存 • 端口 16379</div>
-            </div>
-            <div class="bg-zinc-900 rounded-3xl p-8">
-              <div class="text-emerald-400 text-sm mb-2">● 运行中</div>
-              <div class="text-2xl font-semibold">MinIO</div>
-              <div class="text-zinc-500">数据湖 • 端口 9000</div>
+        <div v-if="currentTab === 3" class="h-full overflow-auto p-6">
+          <h3 class="text-xl font-semibold mb-6">存储层实时状态</h3>
+          <div class="grid grid-cols-2 gap-6 max-w-4xl">
+            <div v-for="svc in storageServices" :key="svc.name"
+              class="bg-zinc-900 rounded-2xl p-6 border border-zinc-800">
+              <div :class="svc.status === 'online' ? 'text-emerald-400' : 'text-amber-400'" class="text-sm mb-2">
+                ● {{ svc.status === 'online' ? '运行中' : '待确认' }}
+              </div>
+              <div class="text-xl font-semibold">{{ svc.name }}</div>
+              <div class="text-sm text-zinc-500 mt-1">{{ svc.desc }}</div>
+              <div class="text-xs text-zinc-600 mt-2">端口: {{ svc.port }}</div>
             </div>
           </div>
         </div>
@@ -177,81 +182,53 @@
 <script setup lang="ts">
 import { ref, onMounted } from 'vue'
 import axios from 'axios'
+import ChatView from './ChatView.vue'
+import DashView from './DashView.vue'
 
-const currentTab = ref(0)
-const messages = ref<any[]>([])
-const inputMessage = ref('')
-const testResults = ref({
-  deepseek: '',
-  openai: '',
-  database: ''
-})
+const currentTab = ref(1)
 
-const tabTitles = [
-  '大模型对话',
-  '连通性测试',
-  '存储层状态'
+const tabTitles = ['大模型对话', '行情看板', '连通性测试', '存储层状态']
+const tabSubtitles = ['DeepSeek · GPT · Claude', 'K线 · MA · MACD · RSI', '模型 & 数据库', 'InfluxDB · PG · Redis']
+
+const testModels = [
+  { id: 'deepseek-chat', name: 'DeepSeek Chat', provider: 'deepseek' },
+  { id: 'deepseek-reasoner', name: 'DeepSeek Reasoner', provider: 'deepseek' },
+  { id: 'gpt-4o-mini', name: 'GPT-4o Mini', provider: 'openai' },
+  { id: 'claude-3-sonnet', name: 'Claude 3 Sonnet', provider: 'anthropic' },
+]
+const modelResults = ref<Record<string, string>>({})
+const dbStatus = ref('idle')
+const dbResults = ref<any[]>([])
+
+const storageServices = [
+  { name: 'PostgreSQL + TimescaleDB', status: 'online', port: 15432, desc: '结构化数据 & 时序K线' },
+  { name: 'InfluxDB', status: 'online', port: 8086, desc: '高频行情 & 分钟线' },
+  { name: 'Redis', status: 'online', port: 16379, desc: '实时缓存' },
+  { name: 'MinIO', status: 'online', port: 9000, desc: '数据湖 (S3兼容)' },
 ]
 
-const addMessage = (role: string, content: string) => {
-  messages.value.push({ role, content, time: new Date() })
-}
-
-const sendMessage = async () => {
-  if (!inputMessage.value.trim()) return
-  
-  const msg = inputMessage.value
-  addMessage('user', msg)
-  inputMessage.value = ''
-
-  const loadingMsg = addMessage('assistant', '思考中...')
-
+const testModel = async (modelId: string) => {
   try {
-    const res = await axios.post('/api/chat', {
-      message: msg,
-      model: 'deepseek'
-    })
-    messages.value.pop()
-    addMessage('assistant', res.data.response || '收到回复')
-  } catch (err) {
-    messages.value.pop()
-    addMessage('assistant', '后端服务未响应，请确保 backend 已启动')
+    const res = await axios.post(`/models/test/${modelId}`)
+    modelResults.value[modelId] = res.data.status === 'success' ? '✅ 已联通' : '⚠️ ' + res.data.message
+  } catch {
+    modelResults.value[modelId] = '❌ 连接失败'
   }
 }
 
-const testModel = async (model: string) => {
+const testAllDatabases = async () => {
+  dbStatus.value = 'testing'
   try {
-    const res = await axios.get(`/api/test/model/${model}`)
-    testResults.value[model as keyof typeof testResults.value] = '✅ 已联通'
-  } catch (e) {
-    testResults.value[model as keyof typeof testResults.value] = '❌ 连接失败'
+    const res = await axios.get('/models/test/database')
+    const details = res.data.details || {}
+    dbResults.value = Object.entries(details).map(([name, info]: [string, any]) => ({
+      name,
+      ok: info.status === 'connected',
+      msg: info.message?.replace(/^[✅❌⚠️]\s*/, '') || info.status,
+    }))
+    dbStatus.value = dbResults.value.every((r: any) => r.ok) ? 'connected' : 'partial'
+  } catch {
+    dbStatus.value = 'error'
   }
 }
-
-const testDatabase = async () => {
-  try {
-    const res = await axios.get('/api/test/database')
-    testResults.value.database = '✅ 全部联通'
-    console.log('数据库测试结果:', res.data)
-  } catch (e) {
-    testResults.value.database = '❌ 部分失败'
-  }
-}
-
-const testAll = () => {
-  testModel('deepseek')
-  testModel('openai')
-  testDatabase()
-  addMessage('assistant', '所有测试已发起，请查看测试面板结果。')
-}
-
-onMounted(() => {
-  addMessage('assistant', '欢迎使用 AIquant Backtrader Agent Platform\n\n左侧可切换不同功能面板。\n点击「一键测试全部」开始测试。')
-})
 </script>
-
-<style scoped>
-.test-item {
-  transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
-}
-</style>

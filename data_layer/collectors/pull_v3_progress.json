@@ -1,0 +1,33 @@
+{
+  "completed_steps": [
+    "daily_all",
+    "daily_basic_all",
+    "adj_factor_all",
+    "stk_limit_all",
+    "monthly_all",
+    "weekly_all",
+    "moneyflow_all",
+    "fin_income_all",
+    "fin_balancesheet_all",
+    "fin_cashflow_all",
+    "fin_fina_indicator_all",
+    "fin_dividend_all"
+  ],
+  "stock_index": {
+    "daily_all": 5500,
+    "daily_basic_all": 5500,
+    "adj_factor_all": 5500,
+    "stk_limit_all": 5500,
+    "monthly_all": 5500,
+    "weekly_all": 5500,
+    "moneyflow_all": 5500,
+    "fin_income_all": 5500,
+    "fin_balancesheet_all": 5500,
+    "fin_cashflow_all": 5500,
+    "fin_fina_indicator_all": 5500,
+    "fin_dividend_all": 5500,
+    "fin_forecast_all": 2100
+  },
+  "started": "2026-05-11T12:38:34.388591",
+  "last_update": "2026-05-12T12:38:19.155977"
+}

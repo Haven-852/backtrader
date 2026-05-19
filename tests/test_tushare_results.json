@@ -1,0 +1,172 @@
+{
+  "daily": {
+    "status": "OK",
+    "rows": 3,
+    "columns": [
+      "ts_code",
+      "trade_date",
+      "open",
+      "high",
+      "low",
+      "close",
+      "pre_close",
+      "change"
+    ]
+  },
+  "daily_basic": {
+    "status": "NONE"
+  },
+  "adj_factor": {
+    "status": "NONE"
+  },
+  "stk_limit": {
+    "status": "NONE"
+  },
+  "suspend_d": {
+    "status": "OK",
+    "rows": 222,
+    "columns": [
+      "ts_code",
+      "trade_date",
+      "suspend_timing",
+      "suspend_type"
+    ]
+  },
+  "fina_indicator": {
+    "status": "OK",
+    "rows": 2,
+    "columns": [
+      "ts_code",
+      "ann_date",
+      "end_date",
+      "eps",
+      "dt_eps",
+      "total_revenue_ps",
+      "revenue_ps",
+      "capital_rese_ps"
+    ]
+  },
+  "income": {
+    "status": "OK",
+    "rows": 2,
+    "columns": [
+      "ts_code",
+      "ann_date",
+      "f_ann_date",
+      "end_date",
+      "report_type",
+      "comp_type",
+      "end_type",
+      "basic_eps"
+    ]
+  },
+  "balancesheet": {
+    "status": "OK",
+    "rows": 2,
+    "columns": [
+      "ts_code",
+      "ann_date",
+      "f_ann_date",
+      "end_date",
+      "report_type",
+      "comp_type",
+      "end_type",
+      "total_share"
+    ]
+  },
+  "cashflow": {
+    "status": "OK",
+    "rows": 3,
+    "columns": [
+      "ts_code",
+      "ann_date",
+      "f_ann_date",
+      "end_date",
+      "comp_type",
+      "report_type",
+      "end_type",
+      "net_profit"
+    ]
+  },
+  "forecast": {
+    "status": "NONE"
+  },
+  "express": {
+    "status": "NONE"
+  },
+  "dividend": {
+    "status": "NONE"
+  },
+  "moneyflow": {
+    "status": "OK",
+    "rows": 3,
+    "columns": [
+      "ts_code",
+      "trade_date",
+      "buy_sm_vol",
+      "buy_sm_amount",
+      "sell_sm_vol",
+      "sell_sm_amount",
+      "buy_md_vol",
+      "buy_md_amount"
+    ]
+  },
+  "moneyflow_hsgt": {
+    "status": "OK",
+    "rows": 3,
+    "columns": [
+      "trade_date",
+      "ggt_ss",
+      "ggt_sz",
+      "hgt",
+      "sgt",
+      "north_money",
+      "south_money"
+    ]
+  },
+  "stk_mins_1min": {
+    "status": "NONE"
+  },
+  "stk_mins_auction": {
+    "status": "NONE"
+  },
+  "index_basic": {
+    "status": "OK",
+    "rows": 594
+  },
+  "fund_basic": {
+    "status": "OK",
+    "rows": 15000
+  },
+  "fund_nav": {
+    "status": "OK",
+    "rows": 3
+  },
+  "adv_get_news": {
+    "status": "NONE"
+  },
+  "adv_get_announcements": {
+    "status": "NONE"
+  },
+  "adv_get_broker_reports": {
+    "status": "NONE"
+  },
+  "adv_get_top_list": {
+    "status": "NONE"
+  },
+  "adv_get_margin": {
+    "status": "OK",
+    "rows": 7
+  },
+  "adv_get_block_trade": {
+    "status": "NONE"
+  },
+  "adv_get_fund_nav": {
+    "status": "OK",
+    "rows": 3
+  },
+  "adv_get_index_daily": {
+    "status": "OK",
+    "rows": 3
+  }
+}

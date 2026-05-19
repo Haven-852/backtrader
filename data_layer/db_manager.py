@@ -12,6 +12,8 @@ import numpy as np
 from datetime import datetime
 import os
 
+from sqlalchemy import text as sa_text
+
 from .config import config
 
 

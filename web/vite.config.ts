@@ -16,6 +16,26 @@ export default defineConfig({
         target: 'http://localhost:8000',
         changeOrigin: true,
       },
+      '/dash': {
+        target: 'http://localhost:8000',
+        changeOrigin: true,
+      },
+      '/chat': {
+        target: 'http://localhost:8000',
+        changeOrigin: true,
+      },
+      '/models': {
+        target: 'http://localhost:8000',
+        changeOrigin: true,
+      },
+      '/agents': {
+        target: 'http://localhost:8000',
+        changeOrigin: true,
+      },
+      '/health': {
+        target: 'http://localhost:8000',
+        changeOrigin: true,
+      },
     },
   },
 })
