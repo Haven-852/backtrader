@@ -85,14 +85,38 @@ class StorageManager:
                     host=config.redis["host"],
                     port=config.redis["port"],
                     password=config.redis["password"],
-                    decode_responses=True
+                    decode_responses=True,
+                    socket_connect_timeout=3,
+                    socket_timeout=3,
                 )
+                # 测试连接
+                client.ping()
                 self._connections['redis'] = client
                 self.logger.info("Redis 客户端初始化成功")
             except Exception as e:
-                self.logger.error(f"Redis 连接失败: {e}")
+                self.logger.warning(f"Redis 连接失败: {e}")
                 return None
         return self._connections['redis']
+
+    def get_minio_client(self):
+        """获取 MinIO 客户端"""
+        if 'minio' not in self._connections:
+            try:
+                from minio import Minio
+                client = Minio(
+                    endpoint=config.minio["endpoint"],
+                    access_key=config.minio["access_key"],
+                    secret_key=config.minio["secret_key"],
+                    secure=config.minio["secure"],
+                )
+                # 测试连接：列出 buckets
+                client.list_buckets()
+                self._connections['minio'] = client
+                self.logger.info("MinIO 客户端初始化成功")
+            except Exception as e:
+                self.logger.warning(f"MinIO 连接失败: {e}")
+                return None
+        return self._connections['minio']
     
     def save_market_data(self, symbol: str, df: pd.DataFrame, timeframe: str = "1m") -> bool:
         """按照 architecture/02-agent-data-access.md 保存市场数据

@@ -5,6 +5,8 @@ GET  /dash/stock/{code}     - 获取股票信息
 GET  /dash/kline            - 获取K线数据
 GET  /dash/timeframes       - 获取可用周期
 GET  /dash/indicators       - 获取可用指标
+GET  /dash/indices          - 获取大盘指数快照
+GET  /dash/etfs             - 获取热门ETF列表
 """
 
 from fastapi import APIRouter, HTTPException, Query
@@ -167,3 +169,40 @@ async def get_index_kline(
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"获取指数K线失败: {str(e)}")
+
+
+@router.get("/etfs")
+async def get_etfs():
+    """获取热门ETF列表及最新行情（同花顺风格）"""
+    try:
+        etfs = await dash_service.get_etf_list()
+        return {"etfs": etfs, "total": len(etfs)}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"获取ETF列表失败: {str(e)}")
+
+
+@router.get("/etf-kline")
+async def get_etf_kline(
+    ts_code: str = Query(..., description="ETF代码（如 510050.SH）"),
+    timeframe: str = Query(default="day", description="周期"),
+    limit: int = Query(default=500, ge=1, le=5000),
+    indicators: Optional[str] = Query(None, description="技术指标"),
+):
+    """获取ETF K线数据"""
+    try:
+        ind_list = None
+        if indicators:
+            ind_list = [i.strip() for i in indicators.split(",") if i.strip()]
+        result = await dash_service.get_kline_data(
+            ts_code=ts_code,
+            timeframe=timeframe,
+            limit=limit,
+            indicators=ind_list,
+        )
+        if "error" in result:
+            raise HTTPException(status_code=400, detail=result["error"])
+        return result
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"获取ETF K线失败: {str(e)}")
