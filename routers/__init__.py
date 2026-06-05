@@ -8,5 +8,6 @@ from .chat_router import router as chat_router
 from .model_router import router as model_router
 from .system_router import router as system_router
 from .dash_router import router as dash_router
+from .market_data_router import router as market_data_router
 
-__all__ = ["chat_router", "model_router", "system_router", "dash_router"]
+__all__ = ["chat_router", "model_router", "system_router", "dash_router", "market_data_router"]

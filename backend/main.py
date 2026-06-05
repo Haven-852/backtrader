@@ -63,6 +63,7 @@ from routers.system_router import router as system_router
 from routers.dash_router import router as dash_router
 from routers.storage_router import router as storage_router
 from routers.skill_router import router as skill_router
+from routers.market_data_router import router as market_data_router
 
 app.include_router(system_router)          # /, /health, /agents
 app.include_router(chat_router)            # /chat/*
@@ -70,6 +71,7 @@ app.include_router(model_router)           # /models/*
 app.include_router(dash_router)            # /dash/*
 app.include_router(storage_router)         # /storage/*
 app.include_router(skill_router)           # /skills/*
+app.include_router(market_data_router)     # /market/*
 
 # ─── 启动日志 ─────────────────────────────────────────
 
@@ -85,7 +87,7 @@ async def startup_event():
     from server.chat_service import chat_service
     models = await chat_service.get_available_models()
     providers = await chat_service.get_available_providers()
-    logger.info(f"已注册路由: /, /health, /agents, /chat/*, /models/*, /storage/*, /skills/*")
+    logger.info(f"已注册路由: /, /health, /agents, /chat/*, /models/*, /dash/*, /storage/*, /skills/*, /market/*")
     logger.info(f"可用模型: {len(models)} 个 ({sum(1 for m in models if m.get('available'))} 个已配置)")
     logger.info(f"可用提供商: {[p['id'] for p in providers]}")
     logger.info("=" * 60)
