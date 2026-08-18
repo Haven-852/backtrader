@@ -1,5 +1,5 @@
 <template>
-  <div class="h-full flex flex-col bg-zinc-950">
+  <div class="absolute inset-0 flex flex-col min-h-0 bg-zinc-950 overflow-hidden">
     <!-- ===== 顶部指数栏 (同花顺风格) ===== -->
     <div class="flex-shrink-0 bg-zinc-900 border-b border-zinc-800">
       <div class="flex items-stretch overflow-x-auto scrollbar-thin">
@@ -7,6 +7,7 @@
           v-for="idx in indices"
           :key="idx.ts_code"
           @click="selectIndex(idx)"
+          @contextmenu.prevent="openCtxMenu($event, { ts_code: idx.ts_code, name: idx.name || idx.short_name, short_name: idx.short_name, kind: 'index' })"
           :class="[
             'flex-shrink-0 cursor-pointer px-4 py-2.5 min-w-[140px] border-r border-zinc-800 transition-colors hover:bg-zinc-800/50',
             selectedTab === 'index' && currentIndex?.ts_code === idx.ts_code
@@ -28,13 +29,13 @@
               :class="idx.pct_chg >= 0 ? 'text-red-400' : 'text-green-400'"
               class="text-xs tabular-nums"
             >
-              {{ idx.pct_chg >= 0 ? '+' : '' }}{{ idx.pct_chg.toFixed(2) }}%
+              {{ (idx.pct_chg ?? 0) >= 0 ? '+' : '' }}{{ Number(idx.pct_chg ?? 0).toFixed(2) }}%
             </span>
             <span
               :class="idx.pct_chg >= 0 ? 'text-red-400/70' : 'text-green-400/70'"
               class="text-xs tabular-nums"
             >
-              {{ idx.change >= 0 ? '+' : '' }}{{ idx.change.toFixed(2) }}
+              {{ (idx.change ?? 0) >= 0 ? '+' : '' }}{{ Number(idx.change ?? 0).toFixed(2) }}
             </span>
           </div>
         </div>
@@ -42,48 +43,6 @@
         <!-- 指数加载指示 -->
         <div v-if="!indices.length" class="flex-shrink-0 flex items-center px-4 text-xs text-zinc-500">
           <i class="fa-solid fa-spinner animate-spin mr-2"></i> 加载指数...
-        </div>
-      </div>
-    </div>
-
-    <!-- ===== ETF 行情栏 ===== -->
-    <div class="flex-shrink-0 bg-zinc-900/70 border-b border-zinc-800">
-      <div class="flex items-stretch overflow-x-auto scrollbar-thin">
-        <div class="flex-shrink-0 flex items-center px-3 text-xs text-zinc-500 font-medium border-r border-zinc-800">
-          ETF <i class="fa-solid fa-chart-simple ml-1.5"></i>
-        </div>
-        <div
-          v-for="etf in etfs"
-          :key="etf.ts_code"
-          @click="selectETF(etf)"
-          :class="[
-            'flex-shrink-0 cursor-pointer px-3 py-2 min-w-[120px] border-r border-zinc-800 transition-colors hover:bg-zinc-800/50',
-            selectedTab === 'etf' && currentTsCode === etf.ts_code
-              ? 'bg-zinc-800/80 border-b-2 border-b-amber-500'
-              : 'border-b-2 border-b-transparent'
-          ]"
-        >
-          <div class="text-xs text-zinc-400 mb-0.5 truncate">{{ etf.short_name }}</div>
-          <div class="flex items-baseline gap-1.5">
-            <span
-              :class="etf.pct_chg >= 0 ? 'text-red-400' : 'text-green-400'"
-              class="text-sm font-bold tabular-nums"
-            >
-              {{ etf.close > 0 ? formatPrice(etf.close) : '--' }}
-            </span>
-          </div>
-          <div class="flex items-center gap-1 mt-0.5" v-if="etf.close > 0">
-            <span
-              :class="etf.pct_chg >= 0 ? 'text-red-400' : 'text-green-400'"
-              class="text-xs tabular-nums"
-            >
-              {{ etf.pct_chg >= 0 ? '+' : '' }}{{ etf.pct_chg.toFixed(2) }}%
-            </span>
-          </div>
-          <div class="text-xs text-zinc-500 mt-0.5" v-else>无数据</div>
-        </div>
-        <div v-if="!etfs.length" class="flex-shrink-0 flex items-center px-4 text-xs text-zinc-500">
-          <i class="fa-solid fa-spinner animate-spin mr-2"></i> 加载ETF...
         </div>
       </div>
     </div>
@@ -97,7 +56,7 @@
             v-model="searchText"
             @input="onSearchInput"
             @focus="showDropdown = true"
-            placeholder="搜索股票代码或名称..."
+            placeholder="搜索股票名称或代码..."
             class="w-full bg-zinc-800 border border-zinc-700 focus:border-blue-500 rounded-lg pl-9 pr-3 py-1.5 text-sm outline-none transition-colors"
           />
           <i class="fa-solid fa-search absolute left-3 top-2 text-zinc-500 text-xs"></i>
@@ -109,7 +68,8 @@
           <div
             v-for="stock in searchResults"
             :key="stock.ts_code"
-            @click="selectStock(stock)"
+            @mousedown.prevent="selectStock(stock)"
+            @contextmenu.prevent="openCtxMenu($event, { ts_code: stock.ts_code, name: stock.name, short_name: stock.name, industry: stock.industry, kind: 'stock' })"
             class="flex items-center justify-between px-4 py-2.5 hover:bg-zinc-700 cursor-pointer transition-colors border-b border-zinc-700/50 last:border-0"
           >
             <div>
@@ -136,10 +96,10 @@
         </button>
       </div>
 
-      <!-- 技术指标 -->
+      <!-- 技术指标（成交量固定显示在下方，不作为切换项） -->
       <div class="flex gap-1">
         <button
-          v-for="ind in indicators"
+          v-for="ind in chartIndicators"
           :key="ind.id"
           @click="toggleIndicator(ind.id)"
           :class="activeIndicators.includes(ind.id)
@@ -147,7 +107,7 @@
             : 'bg-zinc-800 text-zinc-400 hover:text-white'"
           class="px-2.5 py-1 rounded-md text-xs font-medium transition-all"
         >
-          {{ ind.id.toUpperCase() }}
+          {{ ind.label }}
         </button>
       </div>
 
@@ -160,12 +120,86 @@
       </button>
     </div>
 
-    <!-- ===== 主内容区 ===== -->
-    <div class="flex-1 flex min-h-0">
+    <!-- ===== 主内容区（可下滑） ===== -->
+    <div class="flex-1 overflow-y-auto min-h-0 scrollbar-thin">
+      <div class="flex min-h-[68vh]">
+      <!-- ===== 自选股侧栏（可折叠，同花顺风格） ===== -->
+      <aside
+        class="relative flex-shrink-0 border-r border-zinc-800 bg-zinc-900/90 flex flex-col min-h-[68vh] transition-[width] duration-300 ease-out overflow-hidden"
+        :style="{ width: watchlistOpen ? '200px' : '28px' }"
+      >
+        <!-- 折叠态：竖条触发 -->
+        <button
+          v-if="!watchlistOpen"
+          @click="watchlistOpen = true"
+          class="h-full w-full flex flex-col items-center justify-start pt-3 gap-2 hover:bg-zinc-800/80 transition-colors"
+          title="展开自选股"
+        >
+          <i class="fa-solid fa-star text-amber-400 text-xs"></i>
+          <span class="text-[11px] text-zinc-300 writing-vertical tracking-widest">自选股</span>
+          <span class="text-[10px] text-zinc-600 tabular-nums">{{ watchlist.length }}</span>
+          <i class="fa-solid fa-chevron-right text-[10px] text-zinc-500 mt-2"></i>
+        </button>
+
+        <!-- 展开态 -->
+        <template v-else>
+          <div class="flex items-center justify-between px-2.5 py-2 border-b border-zinc-800 flex-shrink-0">
+            <div class="flex items-center gap-1.5 min-w-0">
+              <i class="fa-solid fa-star text-amber-400 text-xs"></i>
+              <span class="text-xs font-semibold text-zinc-200">自选股</span>
+              <span class="text-[10px] text-zinc-500 tabular-nums">{{ watchlist.length }}</span>
+            </div>
+            <button
+              @click="watchlistOpen = false"
+              class="w-6 h-6 rounded hover:bg-zinc-800 text-zinc-400 hover:text-white flex items-center justify-center"
+              title="收起"
+            >
+              <i class="fa-solid fa-chevron-left text-[10px]"></i>
+            </button>
+          </div>
+
+          <div class="flex-1 overflow-y-auto scrollbar-thin">
+            <div v-if="!watchlist.length" class="px-3 py-8 text-center text-[11px] text-zinc-500 leading-relaxed">
+              暂无自选<br/>右键股票名称<br/>「添加到自选股」
+            </div>
+            <div
+              v-for="item in watchlist"
+              :key="item.ts_code"
+              @click="selectWatchlistItem(item)"
+              @contextmenu.prevent="openCtxMenu($event, item, true)"
+              :class="[
+                'px-2.5 py-2 border-b border-zinc-800/70 cursor-pointer transition-colors',
+                currentTsCode === item.ts_code ? 'bg-zinc-800/90' : 'hover:bg-zinc-800/50'
+              ]"
+            >
+              <div class="flex items-start justify-between gap-1">
+                <div class="min-w-0">
+                  <div class="text-xs text-zinc-100 truncate font-medium">{{ item.short_name || item.name }}</div>
+                  <div class="text-[10px] text-zinc-500 font-mono truncate">{{ item.ts_code }}</div>
+                </div>
+                <button
+                  @click.stop="removeFromWatchlist(item.ts_code)"
+                  class="text-zinc-600 hover:text-red-400 text-[10px] p-0.5 flex-shrink-0"
+                  title="移除自选"
+                >
+                  <i class="fa-solid fa-xmark"></i>
+                </button>
+              </div>
+              <div v-if="item.kind" class="mt-0.5 text-[9px] text-zinc-600">
+                {{ item.kind === 'index' ? '指数' : item.kind === 'etf' ? 'ETF' : '股票' }}
+              </div>
+            </div>
+          </div>
+        </template>
+      </aside>
+
       <!-- 图表区域 -->
-      <div class="flex-1 flex flex-col min-w-0">
+      <div class="flex-1 flex flex-col min-w-0 min-h-[68vh]">
         <!-- 标题栏 -->
-        <div class="flex items-center gap-3 px-4 py-2 bg-zinc-900/50 border-b border-zinc-800 flex-shrink-0">
+        <div
+          class="flex items-center gap-3 px-4 py-2 bg-zinc-900/50 border-b border-zinc-800 flex-shrink-0"
+          @contextmenu.prevent="openCtxMenuForCurrent($event)"
+        >
           <template v-if="selectedTab === 'index' && currentIndex">
             <span class="text-base font-bold">{{ currentIndex.name }}</span>
             <span class="text-xs text-zinc-500">{{ currentIndex.ts_code }}</span>
@@ -183,31 +217,35 @@
               </span>
             </div>
           </template>
+          <template v-else-if="selectedTab === 'etf' && currentETF">
+            <span class="text-base font-bold">{{ currentETF.name }}</span>
+            <span class="text-xs text-zinc-500">{{ currentETF.ts_code }}</span>
+            <span class="text-xs px-1.5 py-0.5 rounded bg-amber-600/20 text-amber-400">{{ currentETF.fund_type || 'ETF' }}</span>
+            <span class="text-xs text-zinc-600">{{ currentETF.trade_date }}</span>
+            <div v-if="latestBar" class="ml-auto flex items-center gap-4 text-sm">
+              <span class="text-zinc-500">最新</span>
+              <span :class="Number(changePercent) >= 0 ? 'text-red-400' : 'text-green-400'" class="text-lg font-bold tabular-nums">
+                {{ formatPrice(latestBar.close) }}
+              </span>
+              <span v-if="changePercent !== null" :class="Number(changePercent) >= 0 ? 'text-red-400' : 'text-green-400'" class="tabular-nums">
+                {{ Number(changePercent) >= 0 ? '+' : '' }}{{ changePercent }}%
+              </span>
+            </div>
+          </template>
           <template v-else-if="selectedTab === 'stock' && currentStock">
             <span class="text-base font-bold">{{ currentStock.name }}</span>
             <span class="text-xs text-zinc-500">{{ currentStock.ts_code }}</span>
             <span class="text-xs px-1.5 py-0.5 rounded bg-zinc-800 text-zinc-400">{{ currentStock.industry }}</span>
             <div v-if="latestBar" class="ml-auto flex items-center gap-4 text-sm">
               <span class="text-zinc-500">最新</span>
-              <span :class="latestBar.close >= latestBar.open ? 'text-red-400' : 'text-green-400'" class="text-lg font-bold tabular-nums">
-                {{ latestBar.close }}
+              <span :class="Number(changePercent) >= 0 ? 'text-red-400' : 'text-green-400'" class="text-lg font-bold tabular-nums">
+                {{ formatPrice(latestBar.close) }}
               </span>
-              <span v-if="changePercent !== null" :class="changePercent >= 0 ? 'text-red-400' : 'text-green-400'" class="tabular-nums">
-                {{ changePercent >= 0 ? '+' : '' }}{{ changePercent }}%
+              <span v-if="changePercent !== null" :class="Number(changePercent) >= 0 ? 'text-red-400' : 'text-green-400'" class="tabular-nums">
+                {{ Number(changePercent) >= 0 ? '+' : '' }}{{ changePercent }}%
               </span>
-            </div>
-          </template>
-          <template v-else-if="selectedTab === 'etf' && currentETF">
-            <span class="text-base font-bold">{{ currentETF.name }}</span>
-            <span class="text-xs text-zinc-500">{{ currentETF.ts_code }}</span>
-            <span class="text-xs px-1.5 py-0.5 rounded bg-amber-600/20 text-amber-400">{{ currentETF.fund_type || 'ETF' }}</span>
-            <div v-if="latestBar" class="ml-auto flex items-center gap-4 text-sm">
-              <span class="text-zinc-500">最新</span>
-              <span :class="latestBar.close >= latestBar.open ? 'text-red-400' : 'text-green-400'" class="text-lg font-bold tabular-nums">
-                {{ latestBar.close }}
-              </span>
-              <span v-if="changePercent !== null" :class="changePercent >= 0 ? 'text-red-400' : 'text-green-400'" class="tabular-nums">
-                {{ changePercent >= 0 ? '+' : '' }}{{ changePercent }}%
+              <span v-if="changeAmount !== null" :class="Number(changeAmount) >= 0 ? 'text-red-400/70' : 'text-green-400/70'" class="tabular-nums">
+                {{ Number(changeAmount) >= 0 ? '+' : '' }}{{ changeAmount }}
               </span>
             </div>
           </template>
@@ -222,20 +260,41 @@
         </div>
 
         <!-- 初始态（无选中） -->
-        <div v-else-if="!loading && !chartData.bars.length && !currentIndex && !currentStock && !currentETF" class="flex-1 flex items-center justify-center">
+        <div v-else-if="!loading && !chartData.bars.length" class="flex-1 flex items-center justify-center">
           <div class="text-center text-zinc-500">
             <i class="fa-solid fa-chart-line text-5xl mb-4 block opacity-40"></i>
             <p class="text-lg mb-2">实时行情看板</p>
-            <p class="text-sm">点击上方指数查看大盘走势，或搜索个股代码</p>
+            <p class="text-sm">点击上方大盘指数查看走势，或搜索个股名称查看K线</p>
+            <p v-if="chartData.message" class="text-xs text-amber-500/80 mt-2">{{ chartData.message }}</p>
           </div>
         </div>
 
         <!-- 图表 -->
-        <div v-else class="flex-1 flex flex-col min-h-0">
-          <div ref="mainChart" class="flex-1 min-h-0"></div>
-          <div v-if="showVolume || selectedTab === 'index' || selectedTab === 'etf'" ref="volumeChart" class="h-32 border-t border-zinc-800 flex-shrink-0"></div>
-          <div v-if="showMACD" ref="macdChart" class="h-32 border-t border-zinc-800 flex-shrink-0"></div>
-          <div v-if="showRSI" ref="rsiChart" class="h-32 border-t border-zinc-800 flex-shrink-0"></div>
+        <div v-else class="flex-1 flex flex-col min-h-0 overflow-y-auto">
+          <!-- K 线主图（MA / EMA / BOLL 叠加于此） -->
+          <div ref="mainChart" :class="hasSubIndicators ? 'h-[42vh] min-h-[260px]' : 'flex-1 min-h-[300px]'" class="flex-shrink-0"></div>
+
+          <!-- 成交量（固定显示） -->
+          <div v-show="hasBars" ref="volumeChart" class="h-28 flex-shrink-0 border-t border-zinc-800"></div>
+
+          <!-- MACD / RSI / KDJ 独立子图窗口 -->
+          <div v-show="hasBars && hasSubIndicators" class="flex-shrink-0 border-t border-zinc-800 bg-zinc-950/50">
+            <div class="px-3 py-1.5 text-[10px] text-zinc-500 border-b border-zinc-800/80 tracking-wide">
+              技术指标子图
+            </div>
+            <div v-show="showMACD" class="relative h-32 border-b border-zinc-800/60">
+              <span class="absolute left-3 top-1.5 text-[10px] font-medium text-amber-400/80 z-10">MACD</span>
+              <div ref="macdChart" class="w-full h-full"></div>
+            </div>
+            <div v-show="showRSI" class="relative h-32 border-b border-zinc-800/60">
+              <span class="absolute left-3 top-1.5 text-[10px] font-medium text-indigo-400/80 z-10">RSI (14)</span>
+              <div ref="rsiChart" class="w-full h-full"></div>
+            </div>
+            <div v-show="showKDJ" class="relative h-32">
+              <span class="absolute left-3 top-1.5 text-[10px] font-medium text-purple-400/80 z-10">KDJ</span>
+              <div ref="kdjChart" class="w-full h-full"></div>
+            </div>
+          </div>
         </div>
       </div>
 
@@ -258,7 +317,7 @@
           </div>
           <div class="flex justify-between py-1.5 border-b border-zinc-800/50">
             <span class="text-zinc-500">昨收</span>
-            <span class="tabular-nums">{{ currentIndex?.pre_close ?? '-' }}</span>
+            <span class="tabular-nums">{{ prevClose ?? '-' }}</span>
           </div>
           <div class="flex justify-between py-1.5 border-b border-zinc-800/50">
             <span class="text-zinc-500">成交量</span>
@@ -275,14 +334,14 @@
         <div class="space-y-1.5 text-sm">
           <div class="flex justify-between py-1.5 border-b border-zinc-800/50">
             <span class="text-zinc-500">涨跌额</span>
-            <span :class="(currentIndex?.change ?? 0) >= 0 ? 'text-red-400' : 'text-green-400'" class="tabular-nums">
-              {{ currentIndex?.change ?? '-' }}
+            <span :class="Number(changeAmount ?? 0) >= 0 ? 'text-red-400' : 'text-green-400'" class="tabular-nums">
+              {{ changeAmount != null ? (Number(changeAmount) >= 0 ? '+' : '') + changeAmount : '-' }}
             </span>
           </div>
           <div class="flex justify-between py-1.5 border-b border-zinc-800/50">
             <span class="text-zinc-500">涨跌幅</span>
-            <span :class="(currentIndex?.pct_chg ?? 0) >= 0 ? 'text-red-400' : 'text-green-400'" class="tabular-nums">
-              {{ currentIndex?.pct_chg != null ? (currentIndex.pct_chg >= 0 ? '+' : '') + currentIndex.pct_chg.toFixed(2) + '%' : '-' }}
+            <span :class="Number(changePercent ?? 0) >= 0 ? 'text-red-400' : 'text-green-400'" class="tabular-nums">
+              {{ changePercent != null ? (Number(changePercent) >= 0 ? '+' : '') + changePercent + '%' : '-' }}
             </span>
           </div>
           <div class="flex justify-between py-1.5 border-b border-zinc-800/50">
@@ -313,6 +372,124 @@
         </div>
         <div v-else class="text-xs text-zinc-500">未选择</div>
       </div>
+      </div>
+
+      <!-- ===== ETF 板块（下滑可见） ===== -->
+      <div class="border-t-2 border-zinc-700 bg-zinc-950">
+        <div class="sticky top-0 z-20 px-4 py-3 bg-zinc-900/95 backdrop-blur border-b border-zinc-800 flex items-center justify-between">
+          <div>
+            <h2 class="text-sm font-semibold text-white flex items-center gap-2">
+              <i class="fa-solid fa-layer-group text-amber-400/80"></i>
+              ETF 板块行情
+            </h2>
+            <p class="text-xs text-zinc-500 mt-0.5">
+              {{ etfBoard.status_message || '加载中...' }}
+              <span v-if="etfBoard.trade_date"> · 行情日期 {{ etfBoard.trade_date }}</span>
+            </p>
+          </div>
+          <div class="flex items-center gap-3">
+            <span
+              :class="etfBoard.is_trading ? 'text-emerald-400 bg-emerald-500/10 border-emerald-500/30' : 'text-zinc-400 bg-zinc-800 border-zinc-700'"
+              class="text-xs px-2.5 py-1 rounded-full border flex items-center gap-1.5"
+            >
+              <span class="w-1.5 h-1.5 rounded-full" :class="etfBoard.is_trading ? 'bg-emerald-400 animate-pulse' : 'bg-zinc-500'"></span>
+              {{ etfBoard.is_trading ? '交易中' : '已休市' }}
+            </span>
+            <button @click="loadEtfBoard()" class="text-xs text-zinc-400 hover:text-white px-2 py-1">
+              <i class="fa-solid fa-rotate" :class="{ 'animate-spin': etfLoading }"></i>
+            </button>
+          </div>
+        </div>
+
+        <div v-if="etfLoading && !etfBoard.primary_market" class="py-12 text-center text-zinc-500 text-sm">
+          <i class="fa-solid fa-spinner animate-spin mr-2"></i>加载 ETF 行情...
+        </div>
+
+        <template v-else>
+          <!-- 市场切换 + 统计 -->
+          <div class="flex items-center justify-between px-4 py-2 border-b border-zinc-800 bg-zinc-900/50">
+            <div class="flex gap-1 bg-zinc-800 rounded-lg p-0.5">
+              <button
+                @click="etfActiveMarket = 'primary'"
+                :class="etfActiveMarket === 'primary' ? 'bg-amber-600/30 text-amber-300' : 'text-zinc-400 hover:text-white'"
+                class="px-3 py-1.5 rounded-md text-xs font-medium transition-all"
+              >一级市场 · 上交所</button>
+              <button
+                @click="etfActiveMarket = 'secondary'"
+                :class="etfActiveMarket === 'secondary' ? 'bg-blue-600/30 text-blue-300' : 'text-zinc-400 hover:text-white'"
+                class="px-3 py-1.5 rounded-md text-xs font-medium transition-all"
+              >二级市场 · 深交所</button>
+            </div>
+            <div v-if="activeEtfMarket?.summary" class="text-[10px] text-zinc-500 tabular-nums">
+              展示 {{ activeEtfMarket.summary.count }} 只
+              <span class="text-red-400 ml-2">↑{{ activeEtfMarket.summary.up_count }}</span>
+              <span class="text-green-400 ml-1">↓{{ activeEtfMarket.summary.down_count }}</span>
+              <span class="ml-2">均{{ activeEtfMarket.summary.avg_pct_chg >= 0 ? '+' : '' }}{{ activeEtfMarket.summary.avg_pct_chg }}%</span>
+            </div>
+          </div>
+
+          <!-- 气泡图说明 -->
+          <div class="px-4 py-2 text-[10px] text-zinc-500 border-b border-zinc-800/60">
+            ETF 涨跌归因 · 气泡越大表示涨跌幅越大 · X轴=成交额(亿) · Y轴=涨跌幅(%) · 点击气泡查看K线
+          </div>
+
+          <!-- 气泡散点图 -->
+          <div class="relative bg-zinc-950">
+            <div v-if="!activeEtfList.length" class="h-[420px] flex items-center justify-center text-zinc-500 text-sm">
+              暂无 {{ etfActiveMarket === 'primary' ? '一级' : '二级' }}市场 ETF 数据
+            </div>
+            <div v-show="activeEtfList.length" ref="etfBubbleChart" class="h-[420px] w-full" @contextmenu.prevent></div>
+          </div>
+
+          <div class="px-4 py-3 text-[10px] text-zinc-600 text-center border-t border-zinc-800">
+            数据来源 PostgreSQL · etf_daily · 全市场按成交额取前 {{ etfBoard.limit || 100 }} 只
+            <span v-if="!etfBoard.is_trading" class="text-zinc-500"> · 非交易时段显示最近收盘</span>
+          </div>
+        </template>
+      </div>
+    </div>
+
+    <!-- 右键菜单 -->
+    <div
+      v-if="ctxMenu.visible"
+      class="fixed z-[100] min-w-[160px] bg-zinc-800 border border-zinc-700 rounded-lg shadow-2xl py-1 text-sm"
+      :style="{ left: ctxMenu.x + 'px', top: ctxMenu.y + 'px' }"
+      @click.stop
+    >
+      <div class="px-3 py-1.5 text-[10px] text-zinc-500 border-b border-zinc-700 truncate max-w-[200px]">
+        {{ ctxMenu.item?.short_name || ctxMenu.item?.name || ctxMenu.item?.ts_code }}
+      </div>
+      <button
+        v-if="!isInWatchlist(ctxMenu.item?.ts_code)"
+        @click="ctxAddToWatchlist"
+        class="w-full text-left px-3 py-2 hover:bg-zinc-700 text-zinc-100 flex items-center gap-2"
+      >
+        <i class="fa-solid fa-star text-amber-400 text-xs"></i>
+        添加到自选股
+      </button>
+      <button
+        v-if="isInWatchlist(ctxMenu.item?.ts_code)"
+        @click="ctxRemoveFromWatchlist"
+        class="w-full text-left px-3 py-2 hover:bg-zinc-700 text-zinc-100 flex items-center gap-2"
+      >
+        <i class="fa-solid fa-star-half-stroke text-zinc-400 text-xs"></i>
+        从自选股移除
+      </button>
+      <button
+        @click="ctxOpenChart"
+        class="w-full text-left px-3 py-2 hover:bg-zinc-700 text-zinc-100 flex items-center gap-2 border-t border-zinc-700/60"
+      >
+        <i class="fa-solid fa-chart-line text-blue-400 text-xs"></i>
+        查看 K 线
+      </button>
+    </div>
+
+    <!-- 轻提示 -->
+    <div
+      v-if="toastMsg"
+      class="fixed bottom-6 left-1/2 -translate-x-1/2 z-[110] px-4 py-2 rounded-lg bg-zinc-800 border border-zinc-600 text-sm text-zinc-100 shadow-xl"
+    >
+      {{ toastMsg }}
     </div>
   </div>
 </template>
@@ -320,6 +497,9 @@
 <script setup lang="ts">
 import { ref, computed, onMounted, onUnmounted, watch, nextTick } from 'vue'
 import axios from 'axios'
+import * as echarts from 'echarts'
+
+const props = withDefaults(defineProps<{ active?: boolean }>(), { active: true })
 
 // ─── 状态 ────────────────────────────────────────────
 
@@ -335,29 +515,214 @@ const timeframe = ref('day')
 const activeIndicators = ref<string[]>(['ma'])
 const loading = ref(false)
 const indices = ref<any[]>([])
-const etfs = ref<any[]>([])
+const etfBoard = ref<any>({})
+const etfLoading = ref(false)
+const etfActiveMarket = ref<'primary' | 'secondary'>('primary')
+const etfBubbleChart = ref<HTMLDivElement>()
+
+let etfBubbleInst: any = null
+
+// ─── 自选股 ──────────────────────────────────────────
+const WATCHLIST_KEY = 'dash_watchlist_v1'
+const WATCHLIST_OPEN_KEY = 'dash_watchlist_open_v1'
+
+function loadWatchlistFromStorage(): any[] {
+  try {
+    const raw = localStorage.getItem(WATCHLIST_KEY)
+    const list = raw ? JSON.parse(raw) : []
+    return Array.isArray(list) ? list : []
+  } catch {
+    return []
+  }
+}
+
+const watchlist = ref<any[]>(loadWatchlistFromStorage())
+const watchlistOpen = ref(localStorage.getItem(WATCHLIST_OPEN_KEY) !== '0')
+
+watch(watchlist, (list) => {
+  localStorage.setItem(WATCHLIST_KEY, JSON.stringify(list))
+}, { deep: true })
+
+watch(watchlistOpen, (open) => {
+  localStorage.setItem(WATCHLIST_OPEN_KEY, open ? '1' : '0')
+  nextTick(() => handleResize())
+})
+
+const ctxMenu = ref<{ visible: boolean; x: number; y: number; item: any; isWatchlist: boolean }>({
+  visible: false, x: 0, y: 0, item: null, isWatchlist: false,
+})
+const toastMsg = ref('')
+let toastTimer: any = null
+let ctxJustOpened = false
+
+function showToast(msg: string) {
+  toastMsg.value = msg
+  clearTimeout(toastTimer)
+  toastTimer = setTimeout(() => { toastMsg.value = '' }, 1800)
+}
+
+function isInWatchlist(tsCode?: string) {
+  if (!tsCode) return false
+  return watchlist.value.some(w => w.ts_code === tsCode)
+}
+
+function openCtxMenu(e: MouseEvent, item: any, isWatchlist = false) {
+  if (!item?.ts_code) return
+  const pad = 8
+  const menuW = 180
+  const menuH = 120
+  let x = e.clientX
+  let y = e.clientY
+  if (x + menuW > window.innerWidth) x = window.innerWidth - menuW - pad
+  if (y + menuH > window.innerHeight) y = window.innerHeight - menuH - pad
+  ctxMenu.value = { visible: true, x, y, item: { ...item }, isWatchlist }
+  ctxJustOpened = true
+  setTimeout(() => { ctxJustOpened = false }, 50)
+}
+
+function openCtxMenuForCurrent(e: MouseEvent) {
+  if (selectedTab.value === 'index' && currentIndex.value) {
+    openCtxMenu(e, {
+      ts_code: currentIndex.value.ts_code,
+      name: currentIndex.value.name,
+      short_name: currentIndex.value.short_name,
+      kind: 'index',
+    })
+  } else if (selectedTab.value === 'stock' && currentStock.value) {
+    openCtxMenu(e, {
+      ts_code: currentStock.value.ts_code,
+      name: currentStock.value.name,
+      short_name: currentStock.value.name,
+      industry: currentStock.value.industry,
+      kind: 'stock',
+    })
+  } else if (selectedTab.value === 'etf' && currentETF.value) {
+    openCtxMenu(e, {
+      ts_code: currentETF.value.ts_code,
+      name: currentETF.value.name,
+      short_name: currentETF.value.short_name || currentETF.value.name,
+      kind: 'etf',
+    })
+  }
+}
+
+function closeCtxMenu() {
+  ctxMenu.value.visible = false
+}
+
+function addToWatchlist(item: any) {
+  if (!item?.ts_code) return
+  if (isInWatchlist(item.ts_code)) {
+    showToast('已在自选股中')
+    return
+  }
+  watchlist.value = [
+    {
+      ts_code: item.ts_code,
+      name: item.name || item.short_name || item.ts_code,
+      short_name: item.short_name || item.name || item.ts_code,
+      kind: item.kind || 'stock',
+      industry: item.industry || '',
+      added_at: new Date().toISOString(),
+    },
+    ...watchlist.value,
+  ]
+  if (!watchlistOpen.value) watchlistOpen.value = true
+  showToast(`已添加：${item.short_name || item.name || item.ts_code}`)
+}
+
+function removeFromWatchlist(tsCode: string) {
+  watchlist.value = watchlist.value.filter(w => w.ts_code !== tsCode)
+  showToast('已移出自选股')
+}
+
+function ctxAddToWatchlist() {
+  addToWatchlist(ctxMenu.value.item)
+  closeCtxMenu()
+}
+
+function ctxRemoveFromWatchlist() {
+  const code = ctxMenu.value.item?.ts_code
+  if (code) removeFromWatchlist(code)
+  closeCtxMenu()
+}
+
+function ctxOpenChart() {
+  const item = ctxMenu.value.item
+  closeCtxMenu()
+  if (item) selectWatchlistItem(item)
+}
+
+function selectWatchlistItem(item: any) {
+  if (!item?.ts_code) return
+  const kind = item.kind || 'stock'
+  if (kind === 'index') {
+    const found = indices.value.find((i: any) => i.ts_code === item.ts_code)
+    selectIndex(found || {
+      ts_code: item.ts_code,
+      name: item.name,
+      short_name: item.short_name || item.name,
+      close: 0, pct_chg: 0, change: 0, pre_close: 0,
+    })
+  } else if (kind === 'etf') {
+    const allEtfs = [
+      ...(etfBoard.value.primary_market?.etfs || []),
+      ...(etfBoard.value.secondary_market?.etfs || []),
+    ]
+    const found = allEtfs.find((e: any) => e.ts_code === item.ts_code)
+    selectETF(found || {
+      ts_code: item.ts_code,
+      name: item.name,
+      short_name: item.short_name || item.name,
+      fund_type: 'ETF',
+    })
+  } else {
+    selectStock({
+      ts_code: item.ts_code,
+      name: item.name || item.short_name,
+      industry: item.industry || '',
+    })
+  }
+}
+
+function onGlobalClick() {
+  if (ctxJustOpened) return
+  if (ctxMenu.value.visible) closeCtxMenu()
+}
 
 const chartData = ref<any>({ bars: [], indicators: {}, count: 0 })
-const indicators = ref<any[]>([])
+
+const SUB_CHART_INDICATORS = ['macd', 'rsi', 'kdj']
+
+const chartIndicators = [
+  { id: 'ma', label: 'MA', type: 'overlay' },
+  { id: 'ema', label: 'EMA', type: 'overlay' },
+  { id: 'boll', label: 'BOLL', type: 'overlay' },
+  { id: 'macd', label: 'MACD', type: 'sub' },
+  { id: 'rsi', label: 'RSI', type: 'sub' },
+  { id: 'kdj', label: 'KDJ', type: 'sub' },
+]
 
 const mainChart = ref<HTMLDivElement>()
 const volumeChart = ref<HTMLDivElement>()
 const macdChart = ref<HTMLDivElement>()
 const rsiChart = ref<HTMLDivElement>()
+const kdjChart = ref<HTMLDivElement>()
 
 let mainChartInst: any = null
 let volumeChartInst: any = null
 let macdChartInst: any = null
 let rsiChartInst: any = null
+let kdjChartInst: any = null
 let searchTimer: any = null
 let resizeHandler: any = null
+let etfRefreshTimer: any = null
 
 // ─── 计算属性 ────────────────────────────────────────
 
 const timeframeName = computed(() => {
   const map: Record<string, string> = {
-    '1m': '1分钟', '5m': '5分钟', '15m': '15分钟', '30m': '30分钟', '60m': '60分钟',
-    'day': '日线', 'week': '周线', 'month': '月线',
+    day: '日线', week: '周线', month: '月线',
   }
   return map[timeframe.value] || timeframe.value
 })
@@ -366,8 +731,6 @@ const quickTimeframes = [
   { id: 'day', name: '日K' },
   { id: 'week', name: '周K' },
   { id: 'month', name: '月K' },
-  { id: '60m', name: '60分' },
-  { id: '30m', name: '30分' },
 ]
 
 const latestBar = computed(() => {
@@ -376,27 +739,282 @@ const latestBar = computed(() => {
 })
 
 const changePercent = computed(() => {
-  if (!latestBar.value) return null
-  const close = latestBar.value.close
-  const open = latestBar.value.open
+  const bars = chartData.value.bars
+  if (!bars.length) return null
+  const last = bars[bars.length - 1]
+  if (selectedTab.value === 'index' && currentIndex.value?.pct_chg != null) {
+    return currentIndex.value.pct_chg.toFixed(2)
+  }
+  if (selectedTab.value === 'etf' && currentETF.value?.pct_chg != null) {
+    return Number(currentETF.value.pct_chg).toFixed(2)
+  }
+  if (bars.length >= 2) {
+    const prev = bars[bars.length - 2]
+    if (prev.close && prev.close !== 0) {
+      return (((last.close - prev.close) / prev.close) * 100).toFixed(2)
+    }
+  }
+  const open = last.open
   if (!open || open === 0) return null
-  return ((close - open) / open * 100).toFixed(2)
+  return (((last.close - open) / open) * 100).toFixed(2)
+})
+
+const changeAmount = computed(() => {
+  const bars = chartData.value.bars
+  if (!bars.length) return null
+  if (selectedTab.value === 'index' && currentIndex.value?.change != null) {
+    return currentIndex.value.change
+  }
+  if (selectedTab.value === 'etf' && currentETF.value?.change != null) {
+    return currentETF.value.change
+  }
+  if (bars.length >= 2) {
+    return +(bars[bars.length - 1].close - bars[bars.length - 2].close).toFixed(2)
+  }
+  return null
+})
+
+const prevClose = computed(() => {
+  const bars = chartData.value.bars
+  if (selectedTab.value === 'index' && currentIndex.value?.pre_close) {
+    return currentIndex.value.pre_close
+  }
+  if (bars.length >= 2) return bars[bars.length - 2].close
+  return latestBar.value?.open ?? null
 })
 
 const amplitude = computed(() => {
   if (!latestBar.value) return '-'
   const h = latestBar.value.high
   const l = latestBar.value.low
-  const pre = currentIndex.value?.pre_close || latestBar.value.open
+  const pre = prevClose.value || latestBar.value.open
   if (!pre || pre === 0) return '-'
   return ((h - l) / pre * 100).toFixed(2)
 })
 
-const showVolume = computed(() => activeIndicators.value.includes('volume') || selectedTab.value === 'index' || selectedTab.value === 'etf')
+const hasBars = computed(() => chartData.value.bars.length > 0)
 const showMACD = computed(() => activeIndicators.value.includes('macd'))
 const showRSI = computed(() => activeIndicators.value.includes('rsi'))
+const showKDJ = computed(() => activeIndicators.value.includes('kdj'))
+const hasSubIndicators = computed(() => showMACD.value || showRSI.value || showKDJ.value)
+
+const activeEtfMarket = computed(() =>
+  etfActiveMarket.value === 'primary' ? etfBoard.value.primary_market : etfBoard.value.secondary_market
+)
+const activeEtfList = computed(() => activeEtfMarket.value?.etfs || [])
 
 // ─── 数据加载 ────────────────────────────────────────
+
+function summarizeEtfs(etfs: any[]) {
+  if (!etfs.length) return { count: 0, up_count: 0, down_count: 0, flat_count: 0, avg_pct_chg: 0 }
+  const ups = etfs.filter(e => (e.pct_chg ?? 0) > 0).length
+  const downs = etfs.filter(e => (e.pct_chg ?? 0) < 0).length
+  const avg = etfs.reduce((s, e) => s + (e.pct_chg ?? 0), 0) / etfs.length
+  return { count: etfs.length, up_count: ups, down_count: downs, flat_count: etfs.length - ups - downs, avg_pct_chg: +avg.toFixed(2) }
+}
+
+async function loadEtfBoardFallback() {
+  const res = await axios.get('/dash/etfs')
+  const all: any[] = res.data.etfs || []
+  const primary = all.filter(e => String(e.ts_code).endsWith('.SH'))
+  const secondary = all.filter(e => String(e.ts_code).endsWith('.SZ'))
+  const tradeDate = primary[0]?.trade_date || secondary[0]?.trade_date || ''
+  etfBoard.value = {
+    is_trading: false,
+    status: 'halted',
+    status_message: '已休市 · 显示最近交易日收盘',
+    trade_date: tradeDate,
+    primary_market: {
+      id: 'primary', label: '一级市场（上交所）', exchange: 'SSE',
+      etfs: primary, summary: summarizeEtfs(primary),
+    },
+    secondary_market: {
+      id: 'secondary', label: '二级市场（深交所）', exchange: 'SZSE',
+      etfs: secondary, summary: summarizeEtfs(secondary),
+    },
+    _fallback: true,
+  }
+}
+
+function etfBubbleSize(absPct: number): number {
+  const v = Math.abs(absPct || 0)
+  return Math.max(10, Math.min(80, 8 + v * 7))
+}
+
+function renderEtfBubbleChart() {
+  if (!etfBubbleChart.value || !activeEtfList.value.length) return
+
+  if (!etfBubbleInst) {
+    etfBubbleInst = echarts.init(etfBubbleChart.value, 'dark')
+    etfBubbleInst.on('click', (params: any) => {
+      const etf = params?.data?.etf
+      if (etf) selectETF(etf)
+    })
+    etfBubbleInst.getZr().on('contextmenu', (params: any) => {
+      params?.event?.preventDefault?.()
+      const pointInPixel = [params.offsetX, params.offsetY]
+      if (!etfBubbleInst.containPixel('grid', pointInPixel)) return
+      // 找最近气泡
+      let nearest: any = null
+      let best = Infinity
+      for (const d of (activeEtfList.value || [])) {
+        const amountYi = d.amount_yi ?? (d.amount ? d.amount / 100000 : 0)
+        const px = etfBubbleInst.convertToPixel({ seriesIndex: 0 }, [amountYi, d.pct_chg ?? 0])
+        if (!px) continue
+        const dist = Math.hypot(px[0] - params.offsetX, px[1] - params.offsetY)
+        if (dist < best) { best = dist; nearest = d }
+      }
+      if (nearest && best < 40) {
+        openCtxMenu(
+          { clientX: params.event.clientX, clientY: params.event.clientY } as MouseEvent,
+          {
+            ts_code: nearest.ts_code,
+            name: nearest.name,
+            short_name: nearest.short_name || nearest.name,
+            kind: 'etf',
+          }
+        )
+      }
+    })
+  }
+
+  const etfs = activeEtfList.value
+  const pctValues = etfs.map((e: any) => e.pct_chg ?? 0)
+  const pctMin = Math.min(...pctValues, -1)
+  const pctMax = Math.max(...pctValues, 1)
+
+  const scatterData = etfs.map((e: any) => {
+    const amountYi = e.amount_yi ?? (e.amount ? e.amount / 100000 : 0)
+    const absPct = e.abs_pct_chg ?? Math.abs(e.pct_chg ?? 0)
+    const label = e.short_name && e.short_name !== e.ts_code ? e.short_name : (e.name || e.ts_code)
+    return {
+      name: label,
+      value: [amountYi, e.pct_chg ?? 0],
+      symbolSize: etfBubbleSize(absPct),
+      etf: e,
+      absPct,
+      label: Math.abs(e.pct_chg ?? 0) >= 1.5 ? label : '',
+    }
+  })
+
+  const marketTitle = etfActiveMarket.value === 'primary' ? '一级市场（上交所）' : '二级市场（深交所）'
+
+  etfBubbleInst.setOption({
+    backgroundColor: '#09090b',
+    title: {
+      text: `ETF 涨跌气泡图 · ${marketTitle}`,
+      subtext: `气泡大小 = |涨跌幅| · 共 ${etfs.length} 只`,
+      left: 'center',
+      top: 4,
+      textStyle: { color: '#e4e4e7', fontSize: 13, fontWeight: 600 },
+      subtextStyle: { color: '#71717a', fontSize: 10 },
+    },
+    grid: { left: 56, right: 72, top: 52, bottom: 48 },
+    tooltip: {
+      trigger: 'item',
+      formatter: (p: any) => {
+        const e = p.data?.etf
+        if (!e) return ''
+        return [
+          `<b>${e.name || e.ts_code}</b>`,
+          `代码: ${e.ts_code}`,
+          `收盘: ${e.close}`,
+          `涨跌幅: ${e.pct_chg >= 0 ? '+' : ''}${e.pct_chg}%`,
+          `涨跌额: ${e.change}`,
+          `成交额: ${e.amount_yi ?? '-'} 亿`,
+          `成交量: ${e.vol ?? '-'}`,
+        ].join('<br/>')
+      },
+    },
+    xAxis: {
+      name: '成交额(亿)',
+      nameLocation: 'middle',
+      nameGap: 28,
+      nameTextStyle: { color: '#71717a', fontSize: 10 },
+      axisLine: { lineStyle: { color: '#3f3f46' } },
+      axisLabel: { color: '#a1a1aa', fontSize: 10 },
+      splitLine: { lineStyle: { color: '#27272a' } },
+    },
+    yAxis: {
+      name: '涨跌幅(%)',
+      nameTextStyle: { color: '#71717a', fontSize: 10 },
+      axisLine: { lineStyle: { color: '#3f3f46' } },
+      axisLabel: { color: '#a1a1aa', fontSize: 10, formatter: (v: number) => `${v}%` },
+      splitLine: { lineStyle: { color: '#27272a' } },
+    },
+    visualMap: {
+      show: true,
+      dimension: 1,
+      min: pctMin,
+      max: pctMax,
+      calculable: false,
+      orient: 'vertical',
+      right: 8,
+      top: 'center',
+      itemHeight: 120,
+      text: ['涨', '跌'],
+      textStyle: { color: '#a1a1aa', fontSize: 9 },
+      inRange: {
+        color: ['#22c55e', '#fbbf24', '#ef4444'],
+      },
+    },
+    series: [{
+      type: 'scatter',
+      data: scatterData,
+      label: {
+        show: true,
+        formatter: (p: any) => p.data.label || '',
+        fontSize: 9,
+        color: '#d4d4d8',
+        position: 'top',
+      },
+      emphasis: {
+        scale: 1.15,
+        label: { show: true, formatter: (p: any) => p.data.name },
+      },
+      markLine: {
+        silent: true,
+        symbol: 'none',
+        lineStyle: { color: '#52525b', type: 'dashed' },
+        data: [{ yAxis: 0 }],
+      },
+    }],
+  }, true)
+  etfBubbleInst.resize()
+}
+
+async function loadEtfBoard() {
+  etfLoading.value = true
+  try {
+    const res = await axios.get('/dash/etf-board', { params: { limit: 100 } })
+    etfBoard.value = { ...res.data, limit: 100 }
+  } catch (e) {
+    console.warn('etf-board 不可用，降级到 /dash/etfs:', e)
+    try {
+      await loadEtfBoardFallback()
+    } catch (e2) {
+      console.warn('ETF 降级加载也失败:', e2)
+      etfBoard.value = {
+        status_message: 'ETF 数据加载失败，请重启后端后刷新',
+        is_trading: false,
+        primary_market: { etfs: [], summary: summarizeEtfs([]) },
+        secondary_market: { etfs: [], summary: summarizeEtfs([]) },
+      }
+    }
+  } finally {
+    etfLoading.value = false
+    setupEtfAutoRefresh()
+    await nextTick()
+    renderEtfBubbleChart()
+  }
+}
+
+function setupEtfAutoRefresh() {
+  if (etfRefreshTimer) clearInterval(etfRefreshTimer)
+  if (etfBoard.value?.is_trading) {
+    etfRefreshTimer = setInterval(() => loadEtfBoard(), 60000)
+  }
+}
 
 async function loadIndices() {
   try {
@@ -412,46 +1030,26 @@ async function loadIndices() {
   }
 }
 
-async function loadEtfs() {
-  try {
-    const res = await axios.get('/dash/etfs')
-    etfs.value = res.data.etfs || []
-  } catch (e) {
-    console.warn('获取ETF列表失败:', e)
-    // fallback: 即使后端失败也保留空列表，UI会显示加载状态
-    etfs.value = []
-  }
-}
-
-async function loadIndicators() {
-  try {
-    const res = await axios.get('/dash/indicators')
-    indicators.value = res.data.indicators || []
-  } catch (e) {
-    console.warn('获取指标列表失败:', e)
-  }
-}
-
 async function loadData() {
   if (!currentTsCode.value) return
   loading.value = true
   try {
+    const inds = [...activeIndicators.value]
+    if (!inds.includes('volume')) inds.push('volume')
+
     const params: any = {
       ts_code: currentTsCode.value,
       timeframe: timeframe.value,
-      limit: 1000,  // 覆盖约4年日线，支持缩放回看3年+
-    }
-    if (activeIndicators.value.length) {
-      params.indicators = activeIndicators.value.join(',')
+      limit: 500,
+      indicators: inds.join(','),
     }
 
-    // 指数、股票、ETF 统一用 kline 接口（后端已自动路由到对应数据表）
     const res = await axios.get('/dash/kline', { params })
     chartData.value = res.data
-    await nextTick()
-    renderCharts()
+    await renderAllCharts()
   } catch (e: any) {
     console.error('加载K线失败:', e)
+    chartData.value = { bars: [], indicators: {}, count: 0, message: '加载K线失败，请检查后端是否启动' }
   } finally {
     loading.value = false
   }
@@ -464,6 +1062,7 @@ function selectIndex(idx: any) {
   currentETF.value = null
   currentTsCode.value = idx.ts_code
   searchText.value = ''
+  timeframe.value = 'day'
   loadData()
 }
 
@@ -476,6 +1075,7 @@ function selectStock(stock: any) {
   searchText.value = stock.name
   showDropdown.value = false
   searchResults.value = []
+  timeframe.value = 'day'
   loadData()
 }
 
@@ -486,7 +1086,9 @@ function selectETF(etf: any) {
   currentStock.value = null
   currentTsCode.value = etf.ts_code
   searchText.value = ''
+  timeframe.value = 'day'
   loadData()
+  window.scrollTo({ top: 0, behavior: 'smooth' })
 }
 
 async function onSearchInput() {
@@ -507,19 +1109,51 @@ async function onSearchInput() {
   }, 300)
 }
 
-function toggleIndicator(id: string) {
+function indicatorDataReady(id: string): boolean {
+  const ind = chartData.value.indicators || {}
+  if (id === 'macd') return !!(ind.macd_DIF?.length)
+  if (id === 'rsi') return !!(ind.rsi?.length)
+  if (id === 'kdj') return !!(ind.kdj_K?.length)
+  if (id === 'ma') return !!ind.ma
+  if (id === 'ema') return !!ind.ema
+  if (id === 'boll') return !!ind.boll_BOLL_MID
+  return false
+}
+
+function disposeSubChart(id: string) {
+  if (id === 'macd') { macdChartInst?.dispose(); macdChartInst = null }
+  if (id === 'rsi') { rsiChartInst?.dispose(); rsiChartInst = null }
+  if (id === 'kdj') { kdjChartInst?.dispose(); kdjChartInst = null }
+}
+
+async function toggleIndicator(id: string) {
   const idx = activeIndicators.value.indexOf(id)
   if (idx >= 0) {
     activeIndicators.value.splice(idx, 1)
-  } else {
-    activeIndicators.value.push(id)
+    if (SUB_CHART_INDICATORS.includes(id)) {
+      disposeSubChart(id)
+      await nextTick()
+      handleResize()
+    } else {
+      renderMainChart()
+    }
+    return
   }
-  loadData()
+
+  activeIndicators.value.push(id)
+  if (!indicatorDataReady(id)) {
+    await loadData()
+  } else if (SUB_CHART_INDICATORS.includes(id)) {
+    await renderSubCharts()
+  } else {
+    renderMainChart()
+  }
 }
 
 function formatPrice(v: number | null): string {
   if (v == null) return '-'
-  return v.toFixed(2)
+  if (Math.abs(v) < 10) return Number(v).toFixed(3)
+  return Number(v).toFixed(2)
 }
 
 function formatVolume(vol: number | null): string {
@@ -538,17 +1172,51 @@ function formatAmount(amount: number | null): string {
 
 // ─── 图表渲染（同花顺红涨绿跌配色） ──────────────────
 
-function renderCharts() {
-  renderMainChart()
-  if (showVolume.value) renderVolumeChart()
-  if (showMACD.value) renderMACDChart()
-  if (showRSI.value) renderRSIChart()
+function getChartDates(): string[] {
+  return chartData.value.bars.map((b: any) => String(b.time).substring(0, 10))
+}
 
-  // 将所有图表分组联动：dataZoom、tooltip 自动同步
-  const ec = (window as any).echarts
-  const allCharts = [mainChartInst, volumeChartInst, macdChartInst, rsiChartInst].filter(Boolean)
+function initChart(el: HTMLElement | undefined, inst: any): any {
+  if (!el) return inst
+  if (!inst) {
+    return echarts.init(el, 'dark', { renderer: 'canvas' })
+  }
+  return inst
+}
+
+async function renderAllCharts() {
+  await nextTick()
+  renderMainChart()
+  if (hasBars.value) renderVolumeChart()
+  await renderSubCharts()
+  await nextTick()
+  handleResize()
+}
+
+async function renderSubCharts() {
+  await nextTick()
+  if (!hasBars.value) return
+
+  if (showMACD.value) {
+    renderMACDChart()
+    macdChartInst?.resize()
+  }
+  if (showRSI.value) {
+    renderRSIChart()
+    rsiChartInst?.resize()
+  }
+  if (showKDJ.value) {
+    renderKDJChart()
+    kdjChartInst?.resize()
+  }
+
+  connectChartGroup()
+}
+
+function connectChartGroup() {
+  const allCharts = [mainChartInst, volumeChartInst, macdChartInst, rsiChartInst, kdjChartInst].filter(Boolean)
   if (allCharts.length >= 2) {
-    ec.connect('dash-group')
+    echarts.connect(allCharts)
   }
 }
 
@@ -616,9 +1284,8 @@ function renderMainChart() {
   if (!mainChart.value) return
   const c = getThemeColors()
 
-  if (!mainChartInst) {
-    mainChartInst = (window as any).echarts.init(mainChart.value, 'dark', { group: 'dash-group' })
-  }
+  mainChartInst = initChart(mainChart.value, mainChartInst)
+  if (!mainChartInst) return
 
   const bars = chartData.value.bars
   const barCount = bars.length
@@ -688,7 +1355,7 @@ function renderMainChart() {
     )
   }
 
-  const hasSubChart = showVolume.value || showMACD.value || showRSI.value
+  const hasSubChart = hasBars.value || showMACD.value || showRSI.value || showKDJ.value
   mainChartInst.setOption({
     backgroundColor: c.bg,
     animation: false,
@@ -710,15 +1377,15 @@ function renderMainChart() {
     dataZoom: makeDataZoom(barCount, !hasSubChart),
     series,
   }, true)
+  connectChartGroup()
 }
 
 function renderVolumeChart() {
   if (!volumeChart.value) return
   const c = getThemeColors()
 
-  if (!volumeChartInst) {
-    volumeChartInst = (window as any).echarts.init(volumeChart.value, 'dark', { group: 'dash-group' })
-  }
+  volumeChartInst = initChart(volumeChart.value, volumeChartInst)
+  if (!volumeChartInst) return
 
   const bars = chartData.value.bars
   const barCount = bars.length
@@ -764,48 +1431,57 @@ function renderVolumeChart() {
 }
 
 function renderMACDChart() {
-  if (!macdChart.value) return
+  if (!showMACD.value || !macdChart.value) return
   const c = getThemeColors()
-  if (!macdChartInst) macdChartInst = (window as any).echarts.init(macdChart.value, 'dark', { group: 'dash-group' })
+  macdChartInst = initChart(macdChart.value, macdChartInst)
+  if (!macdChartInst) return
 
-  const ind = chartData.value.indicators
+  const ind = chartData.value.indicators || {}
   const dif = ind.macd_DIF || []
   const dea = ind.macd_DEA || []
   const macdHist = ind.macd_MACD || []
-  const histColors = macdHist.map((v: number) => v >= 0 ? c.up : c.down)
-  const dataLen = dif.length
+  if (!dif.length) return
+
+  const dates = getChartDates()
+  const histColors = macdHist.map((v: number) => (v ?? 0) >= 0 ? c.up : c.down)
 
   macdChartInst.setOption({
     backgroundColor: c.bg,
     animation: false,
-    grid: { left: '8%', right: '3%', top: 10, bottom: 5 },
-    xAxis: { type: 'category', data: dif.map((_: any, i: number) => i), axisLabel: { show: false }, axisLine: { show: false }, axisTick: { show: false } },
-    yAxis: { type: 'value', axisLabel: { color: c.text, fontSize: 9 }, splitLine: { lineStyle: { color: c.grid } } },
-    dataZoom: makeDataZoom(dataLen, false),
+    legend: { data: ['DIF', 'DEA', 'MACD'], textStyle: { color: c.text, fontSize: 9 }, top: 0, right: 8 },
+    grid: { left: '8%', right: '3%', top: 22, bottom: 5 },
+    xAxis: { type: 'category', data: dates, axisLabel: { show: false }, axisLine: { show: false }, axisTick: { show: false } },
+    yAxis: { type: 'value', scale: true, axisLabel: { color: c.text, fontSize: 9 }, splitLine: { lineStyle: { color: c.grid } } },
+    tooltip: { trigger: 'axis', axisPointer: { type: 'line' } },
+    dataZoom: makeDataZoom(dates.length, false),
     series: [
-      { name: 'MACD', type: 'bar', data: macdHist.map((v: number, i: number) => ({ value: v, itemStyle: { color: histColors[i] } })), progressive: dataLen > 200 ? 100 : 0, progressiveThreshold: 200 },
-      { name: 'DIF', type: 'line', data: dif, symbol: 'none', large: dataLen > 200, largeThreshold: 200, lineStyle: { width: 1, color: '#fbbf24' } },
-      { name: 'DEA', type: 'line', data: dea, symbol: 'none', large: dataLen > 200, largeThreshold: 200, lineStyle: { width: 1, color: '#60a5fa' } },
+      { name: 'MACD', type: 'bar', data: macdHist.map((v: number, i: number) => ({ value: v, itemStyle: { color: histColors[i] } })) },
+      { name: 'DIF', type: 'line', data: dif, symbol: 'none', lineStyle: { width: 1.2, color: '#fbbf24' } },
+      { name: 'DEA', type: 'line', data: dea, symbol: 'none', lineStyle: { width: 1.2, color: '#60a5fa' } },
     ],
   }, true)
 }
 
 function renderRSIChart() {
-  if (!rsiChart.value) return
+  if (!showRSI.value || !rsiChart.value) return
   const c = getThemeColors()
-  if (!rsiChartInst) rsiChartInst = (window as any).echarts.init(rsiChart.value, 'dark', { group: 'dash-group' })
+  rsiChartInst = initChart(rsiChart.value, rsiChartInst)
+  if (!rsiChartInst) return
 
-  const rsiData = chartData.value.indicators.rsi || []
+  const rsiData = chartData.value.indicators?.rsi || []
+  if (!rsiData.length) return
+
+  const dates = getChartDates()
   rsiChartInst.setOption({
     backgroundColor: c.bg,
     animation: false,
-    grid: { left: '8%', right: '3%', top: 10, bottom: 5 },
-    xAxis: { type: 'category', data: rsiData.map((_: any, i: number) => i), axisLabel: { show: false }, axisLine: { show: false }, axisTick: { show: false } },
+    grid: { left: '8%', right: '3%', top: 18, bottom: 5 },
+    xAxis: { type: 'category', data: dates, axisLabel: { show: false }, axisLine: { show: false }, axisTick: { show: false } },
     yAxis: { type: 'value', min: 0, max: 100, axisLabel: { color: c.text, fontSize: 9 }, splitLine: { lineStyle: { color: c.grid } } },
-    dataZoom: makeDataZoom(rsiData.length, false),
+    tooltip: { trigger: 'axis', axisPointer: { type: 'line' } },
+    dataZoom: makeDataZoom(dates.length, false),
     series: [{
       name: 'RSI', type: 'line', data: rsiData, symbol: 'none',
-      large: rsiData.length > 200, largeThreshold: 200,
       lineStyle: { width: 1.5, color: '#818cf8' },
       markLine: { silent: true, data: [
         { yAxis: 70, lineStyle: { color: c.up, width: 1, type: 'dashed' } },
@@ -815,28 +1491,102 @@ function renderRSIChart() {
   }, true)
 }
 
+function renderKDJChart() {
+  if (!showKDJ.value || !kdjChart.value) return
+  const c = getThemeColors()
+  kdjChartInst = initChart(kdjChart.value, kdjChartInst)
+  if (!kdjChartInst) return
+
+  const ind = chartData.value.indicators || {}
+  const kData = ind.kdj_K || []
+  const dData = ind.kdj_D || []
+  const jData = ind.kdj_J || []
+  if (!kData.length) return
+
+  const dates = getChartDates()
+  kdjChartInst.setOption({
+    backgroundColor: c.bg,
+    animation: false,
+    legend: { data: ['K', 'D', 'J'], textStyle: { color: c.text, fontSize: 9 }, top: 0, right: 8 },
+    grid: { left: '8%', right: '3%', top: 22, bottom: 5 },
+    xAxis: { type: 'category', data: dates, axisLabel: { show: false }, axisLine: { show: false }, axisTick: { show: false } },
+    yAxis: { type: 'value', min: 0, max: 100, axisLabel: { color: c.text, fontSize: 9 }, splitLine: { lineStyle: { color: c.grid } } },
+    tooltip: { trigger: 'axis', axisPointer: { type: 'line' } },
+    dataZoom: makeDataZoom(dates.length, false),
+    series: [
+      { name: 'K', type: 'line', data: kData, symbol: 'none', lineStyle: { width: 1.2, color: '#fbbf24' } },
+      { name: 'D', type: 'line', data: dData, symbol: 'none', lineStyle: { width: 1.2, color: '#60a5fa' } },
+      { name: 'J', type: 'line', data: jData, symbol: 'none', lineStyle: { width: 1.2, color: '#c084fc' } },
+    ],
+  }, true)
+}
+
 function handleResize() {
   mainChartInst?.resize()
   volumeChartInst?.resize()
   macdChartInst?.resize()
   rsiChartInst?.resize()
+  kdjChartInst?.resize()
+  etfBubbleInst?.resize()
 }
 
 // ─── 生命周期 ────────────────────────────────────────
 
-onMounted(async () => {
-  await Promise.all([loadIndices(), loadEtfs(), loadIndicators()])
+watch([showMACD, showRSI, showKDJ], async () => {
+  if (!hasBars.value) return
+  await renderSubCharts()
+})
+
+watch(etfActiveMarket, async () => {
+  await nextTick()
+  renderEtfBubbleChart()
+})
+
+// Tab 从隐藏切回显示时，容器刚恢复尺寸，ECharts 需要 resize，否则会空白或卡顿感
+watch(
+  () => props.active,
+  async (visible) => {
+    if (!visible) return
+    await nextTick()
+    handleResize()
+    if (hasBars.value) {
+      await renderAllCharts()
+    }
+    if (activeEtfList.value.length) {
+      renderEtfBubbleChart()
+    }
+  }
+)
+
+onMounted(() => {
+  loadIndices()
+  loadEtfBoard()
   resizeHandler = () => handleResize()
   window.addEventListener('resize', resizeHandler)
+  document.addEventListener('click', onGlobalClick)
 })
 
 onUnmounted(() => {
   clearTimeout(searchTimer)
+  clearTimeout(toastTimer)
+  if (etfRefreshTimer) clearInterval(etfRefreshTimer)
   window.removeEventListener('resize', resizeHandler)
-  ;(window as any).echarts?.disconnect('dash-group')
+  document.removeEventListener('click', onGlobalClick)
   mainChartInst?.dispose()
   volumeChartInst?.dispose()
   macdChartInst?.dispose()
   rsiChartInst?.dispose()
+  kdjChartInst?.dispose()
+  etfBubbleInst?.dispose()
 })
 </script>
+
+<style scoped>
+.scrollbar-thin::-webkit-scrollbar { height: 4px; width: 4px; }
+.scrollbar-thin::-webkit-scrollbar-track { background: transparent; }
+.scrollbar-thin::-webkit-scrollbar-thumb { background: #374151; border-radius: 2px; }
+.writing-vertical {
+  writing-mode: vertical-rl;
+  text-orientation: mixed;
+}
+</style>

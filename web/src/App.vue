@@ -1,5 +1,5 @@
 <template>
-  <div class="min-h-screen bg-zinc-950 text-zinc-100 flex">
+  <div class="h-screen bg-zinc-950 text-zinc-100 flex overflow-hidden">
     <!-- Sidebar -->
     <div class="w-64 bg-zinc-900 border-r border-zinc-800 flex flex-col">
       <div class="p-5 border-b border-zinc-800 flex items-center gap-3">
@@ -86,7 +86,7 @@
     </div>
 
     <!-- Main Content -->
-    <div class="flex-1 flex flex-col min-w-0">
+    <div class="flex-1 flex flex-col min-w-0 min-h-0 overflow-hidden">
       <!-- Header -->
       <header class="h-12 border-b border-zinc-800 bg-zinc-900 px-6 flex items-center justify-between flex-shrink-0">
         <div class="flex items-center gap-3">
@@ -102,15 +102,14 @@
       </header>
 
       <!-- Tab Content -->
-      <div class="flex-1 overflow-hidden">
-        <!-- Chat Tab -->
-        <div v-if="currentTab === 0" class="h-full flex flex-col">
+      <div class="flex-1 min-h-0 overflow-hidden flex flex-col">
+        <!-- Chat / Dash 用 v-show 保活，避免来回切换时整页销毁重建、反复拉数 -->
+        <div v-show="currentTab === 0" class="h-full flex flex-col">
           <ChatView />
         </div>
 
-        <!-- Dash Tab -->
-        <div v-if="currentTab === 1" class="h-full">
-          <DashView />
+        <div v-show="currentTab === 1" class="flex-1 min-h-0 flex flex-col overflow-hidden relative">
+          <DashView :active="currentTab === 1" />
         </div>
 
         <!-- Test Tab -->

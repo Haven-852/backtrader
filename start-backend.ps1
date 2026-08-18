@@ -48,4 +48,7 @@ Write-Host "[START] uvicorn ..." -ForegroundColor Cyan
 & $PythonExe -m uvicorn main:app `
     --host 0.0.0.0 --port 8000 --reload `
     --app-dir $BackendDir `
-    --reload-dir $BackendDir
+    --reload-dir $BackendDir `
+    --reload-dir (Join-Path $ProjectRoot "routers") `
+    --reload-dir (Join-Path $ProjectRoot "server") `
+    --reload-dir (Join-Path $ProjectRoot "data_layer")

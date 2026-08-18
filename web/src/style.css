@@ -4,8 +4,16 @@
 @tailwind components;
 @tailwind utilities;
 
+html,
+body,
+#app {
+  height: 100%;
+  margin: 0;
+}
+
 body {
   font-family: 'Inter', system_ui, sans-serif;
+  overflow: hidden;
 }
 
 .title-font {

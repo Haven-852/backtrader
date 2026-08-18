@@ -12,13 +12,6 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from sqlalchemy import create_engine, text as sa_text
 from sqlalchemy.engine import Engine
-from langchain_community.utilities.sql_database import SQLDatabase
-from langchain_community.tools.sql_database.tool import (
-    QuerySQLDataBaseTool,
-    InfoSQLDatabaseTool,
-    ListSQLDatabaseTool,
-    QuerySQLCheckerTool,
-)
 
 from data_layer.db_manager import storage_manager
 
@@ -30,6 +23,19 @@ FORBIDDEN_KEYWORDS = (
     "INSERT", "UPDATE", "DELETE", "DROP", "ALTER",
     "CREATE", "TRUNCATE", "GRANT", "REVOKE", "VACUUM",
 )
+
+
+def _try_import_langchain():
+    """延迟导入，避免未安装 langchain 时整模块不可用"""
+    from langchain_community.utilities.sql_database import SQLDatabase
+    from langchain_community.tools.sql_database.tool import (
+        QuerySQLDataBaseTool,
+        InfoSQLDatabaseTool,
+        ListSQLDatabaseTool,
+        QuerySQLCheckerTool,
+    )
+    return SQLDatabase, QuerySQLDataBaseTool, InfoSQLDatabaseTool, ListSQLDatabaseTool, QuerySQLCheckerTool
+
 
 
 class SQLToolkitManager:
@@ -45,8 +51,9 @@ class SQLToolkitManager:
     """
 
     def __init__(self):
-        self._db: SQLDatabase | None = None
+        self._db: Any = None
         self._engine: Engine | None = None
+        self._lc_ready: bool | None = None
 
     @property
     def engine(self) -> Engine | None:
@@ -61,14 +68,17 @@ class SQLToolkitManager:
         return self._engine
 
     @property
-    def db(self) -> SQLDatabase | None:
-        """懒加载 LangChain SQLDatabase"""
+    def db(self) -> Any:
+        """懒加载 LangChain SQLDatabase（可选依赖）"""
         if self._db is None and self.engine is not None:
             try:
+                SQLDatabase, *_ = _try_import_langchain()
                 self._db = SQLDatabase(engine=self.engine)
+                self._lc_ready = True
                 logger.info("LangChain SQLDatabase 初始化成功")
             except Exception as e:
-                logger.error(f"SQLDatabase 初始化失败: {e}")
+                self._lc_ready = False
+                logger.warning(f"SQLDatabase/LangChain 不可用，将使用原生 SQL 回退: {e}")
         return self._db
 
     @staticmethod
@@ -106,12 +116,12 @@ class SQLToolkitManager:
 
         try:
             sql = """
-            SELECT tablename, 
-                   pg_size_pretty(pg_total_relation_size(quote_ident(tablename))) AS size,
+            SELECT relname AS tablename,
+                   pg_size_pretty(pg_total_relation_size(quote_ident(relname))) AS size,
                    n_live_tup AS approx_rows
             FROM pg_stat_user_tables
             WHERE schemaname = 'public'
-            ORDER BY n_live_tup DESC, tablename
+            ORDER BY n_live_tup DESC, relname
             """
             import pandas as pd
             df = pd.read_sql(sa_text(sql), self.engine)
@@ -126,9 +136,25 @@ class SQLToolkitManager:
         except Exception as e:
             logger.error(f"列出表失败: {e}")
 
+            # 再降级：information_schema
+            try:
+                import pandas as pd
+                df = pd.read_sql(
+                    sa_text(
+                        "SELECT table_name AS tablename FROM information_schema.tables "
+                        "WHERE table_schema='public' AND table_type='BASE TABLE' ORDER BY table_name"
+                    ),
+                    self.engine,
+                )
+                tables = df.to_dict(orient="records")
+                return {"ok": True, "tables": tables, "count": len(tables), "fallback": True}
+            except Exception as e0:
+                logger.warning(f"information_schema 列表示败: {e0}")
+
             # 降级：用 LangChain 的 ListSQLDatabaseTool
             if self.db:
                 try:
+                    _, _, _, ListSQLDatabaseTool, _ = _try_import_langchain()
                     tool = ListSQLDatabaseTool(db=self.db)
                     result = await tool.arun(tool_input="")
                     tables = [t.strip() for t in result.split(",") if t.strip()]
@@ -144,41 +170,45 @@ class SQLToolkitManager:
 
     async def info_table(self, table_names: str) -> dict:
         """获取指定表的 schema 信息"""
-        if not self.db:
+        if not self.engine and not self.db:
             return {"ok": False, "error": "数据库未连接"}
 
-        try:
-            tool = InfoSQLDatabaseTool(db=self.db)
-            result = await tool.arun(table_names=table_names)
-            return {"ok": True, "schema_ddl": result, "tables": [t.strip() for t in table_names.split(",")]}
-        except Exception as e:
-            logger.error(f"获取表信息失败: {e}")
+        # 优先原生 information_schema（不依赖 langchain）
+        if self.engine:
+            try:
+                tnames = [t.strip() for t in table_names.split(",") if t.strip()]
+                all_cols = []
+                for tname in tnames:
+                    sql = """
+                    SELECT column_name, data_type, is_nullable,
+                           column_default, ordinal_position
+                    FROM information_schema.columns
+                    WHERE table_schema = 'public' AND table_name = :tname
+                    ORDER BY ordinal_position
+                    """
+                    import pandas as pd
+                    df = pd.read_sql(sa_text(sql), self.engine, params={"tname": tname})
+                    cols = df.to_dict(orient="records")
+                    for c in cols:
+                        c["table"] = tname
+                        for k, v in list(c.items()):
+                            if hasattr(v, "item"):
+                                c[k] = v.item()
+                    all_cols.extend(cols)
+                return {"ok": True, "columns": all_cols, "tables": tnames, "fallback": True}
+            except Exception as e:
+                logger.warning(f"information_schema 查询失败: {e}")
 
-            # 降级：直接用 information_schema
-            if self.engine:
-                try:
-                    tnames = [t.strip() for t in table_names.split(",")]
-                    all_cols = []
-                    for tname in tnames:
-                        sql = """
-                        SELECT column_name, data_type, is_nullable, 
-                               column_default, ordinal_position
-                        FROM information_schema.columns
-                        WHERE table_schema = 'public' AND table_name = :tname
-                        ORDER BY ordinal_position
-                        """
-                        import pandas as pd
-                        df = pd.read_sql(sa_text(sql), self.engine, params={"tname": tname})
-                        cols = df.to_dict(orient="records")
-                        for c in cols:
-                            c["table"] = tname
-                        all_cols.extend(cols)
+        if self.db:
+            try:
+                _, _, InfoSQLDatabaseTool, _, _ = _try_import_langchain()
+                tool = InfoSQLDatabaseTool(db=self.db)
+                result = await tool.arun(table_names=table_names)
+                return {"ok": True, "schema_ddl": result, "tables": [t.strip() for t in table_names.split(",")]}
+            except Exception as e:
+                return {"ok": False, "error": str(e)}
 
-                    return {"ok": True, "columns": all_cols, "tables": tnames, "fallback": True}
-                except Exception as e2:
-                    return {"ok": False, "error": str(e2)}
-
-            return {"ok": False, "error": str(e)}
+        return {"ok": False, "error": "数据库未连接"}
 
     # ─────────────────────────────────────────────────
     # Tool 3: SQL 校验
@@ -186,21 +216,21 @@ class SQLToolkitManager:
 
     async def check_sql(self, query: str) -> dict:
         """校验 SQL 语句语法"""
-        if not self.db:
-            return {"ok": False, "error": "数据库未连接"}
-
-        # 先做安全校验
         safety_err = self._validate_readonly_sql(query)
         if safety_err:
             return {"ok": False, "error": safety_err, "valid": False}
 
-        try:
-            tool = QuerySQLCheckerTool(db=self.db, llm=None)  # 不传 LLM 时会做基本语法校验
-            result = await tool.arun(query=query)
-            return {"ok": True, "valid": True, "message": result}
-        except Exception as e:
-            # 校验失败反而是正常的——返回失败原因
-            return {"ok": True, "valid": False, "message": str(e)}
+        if self.db:
+            try:
+                _, _, _, _, QuerySQLCheckerTool = _try_import_langchain()
+                tool = QuerySQLCheckerTool(db=self.db, llm=None)
+                result = await tool.arun(query=query)
+                return {"ok": True, "valid": True, "message": result}
+            except Exception as e:
+                return {"ok": True, "valid": False, "message": str(e)}
+
+        # 无 langchain：仅返回安全校验通过
+        return {"ok": True, "valid": True, "message": "只读安全校验通过（未启用 LangChain 语法检查）"}
 
     # ─────────────────────────────────────────────────
     # Tool 4: 执行 SQL 查询

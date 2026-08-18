@@ -118,6 +118,25 @@ class DashService:
 
     def __init__(self):
         self._storage = None
+        self._pg = None
+
+    @property
+    def pg(self):
+        """PostgreSQL 异步管理器（data_layer.storage）"""
+        if self._pg is None:
+            from data_layer.storage import pg_manager
+            self._pg = pg_manager
+        return self._pg
+
+    async def _ensure_pg(self) -> bool:
+        try:
+            if not self.pg._initialized:
+                self.pg.initialize()
+            self.pg._check_initialized()
+            return True
+        except Exception as e:
+            logger.warning(f"pg_manager 不可用，将使用 storage 回退: {e}")
+            return False
 
     @property
     def storage(self):
@@ -131,16 +150,11 @@ class DashService:
         return self._storage
 
     def get_available_timeframes(self) -> List[Dict]:
-        """获取可用周期列表"""
+        """获取可用周期列表（行情看板仅日/周/月）"""
         return [
-            {"id": "1m",   "name": "1分钟",   "group": "分钟"},
-            {"id": "5m",   "name": "5分钟",   "group": "分钟"},
-            {"id": "15m",  "name": "15分钟",  "group": "分钟"},
-            {"id": "30m",  "name": "30分钟",  "group": "分钟"},
-            {"id": "60m",  "name": "60分钟",  "group": "分钟"},
-            {"id": "day",  "name": "日线",    "group": "日线"},
-            {"id": "week", "name": "周线",    "group": "周线"},
-            {"id": "month","name": "月线",    "group": "月线"},
+            {"id": "day",   "name": "日线", "group": "日线"},
+            {"id": "week",  "name": "周线", "group": "周线"},
+            {"id": "month", "name": "月线", "group": "月线"},
         ]
 
     def get_available_indicators(self) -> List[Dict]:
@@ -148,45 +162,51 @@ class DashService:
         return self.AVAILABLE_INDICATORS
 
     async def search_stocks(self, keyword: str, limit: int = 20) -> List[Dict]:
-        """搜索股票"""
-        if not self.storage:
-            return self._mock_stock_search(keyword)
-
-        engine = self.storage.get_postgres_engine()
-        if not engine:
+        """搜索股票（ref_stock_basic via pg_manager）"""
+        if not await self._ensure_pg():
             return self._mock_stock_search(keyword)
 
         try:
             sql = """
-            SELECT ts_code, symbol, name, area, industry, market, list_status
+            SELECT ts_code, symbol, name, area, industry, list_date
             FROM ref_stock_basic
             WHERE (ts_code ILIKE :kw OR name ILIKE :kw OR symbol ILIKE :kw)
-              AND list_status = 'L'
             ORDER BY ts_code
             LIMIT :limit
             """
-            df = pd.read_sql(sa_text(sql), engine, params={"kw": f"%{keyword}%", "limit": limit})
+            df = await self.pg.query_sql(sql, {"kw": f"%{keyword}%", "limit": limit})
+            if df is None or df.empty:
+                return []
             return df.to_dict("records")
         except Exception as e:
-            logger.warning(f"搜索股票失败: {e}")
+            logger.warning(f"pg 搜索股票失败，尝试 storage 回退: {e}")
+            engine = self.storage.get_postgres_engine() if self.storage else None
+            if engine:
+                try:
+                    sql = """
+                    SELECT ts_code, symbol, name, area, industry, list_date
+                    FROM ref_stock_basic
+                    WHERE (ts_code ILIKE :kw OR name ILIKE :kw OR symbol ILIKE :kw)
+                    ORDER BY ts_code LIMIT :limit
+                    """
+                    df = pd.read_sql(sa_text(sql), engine, params={"kw": f"%{keyword}%", "limit": limit})
+                    return df.to_dict("records")
+                except Exception:
+                    pass
             return self._mock_stock_search(keyword)
 
     async def get_stock_info(self, ts_code: str) -> Optional[Dict]:
-        """获取股票基本信息"""
-        if not self.storage:
-            return None
-
-        engine = self.storage.get_postgres_engine()
-        if not engine:
+        """获取股票基本信息（ref_stock_basic via pg_manager）"""
+        if not await self._ensure_pg():
             return None
 
         try:
-            sql = """
-            SELECT ts_code, symbol, name, area, industry, market, list_status, list_date
-            FROM ref_stock_basic WHERE ts_code = :code LIMIT 1
-            """
-            df = pd.read_sql(sa_text(sql), engine, params={"code": ts_code})
-            if df.empty:
+            df = await self.pg.query_sql(
+                "SELECT ts_code, symbol, name, area, industry, list_date "
+                "FROM ref_stock_basic WHERE ts_code = :code LIMIT 1",
+                {"code": ts_code},
+            )
+            if df is None or df.empty:
                 return None
             return df.iloc[0].to_dict()
         except Exception as e:
@@ -235,73 +255,56 @@ class DashService:
     ]
 
     async def get_index_snapshots(self) -> List[Dict]:
-        """获取核心指数最新快照（Redis 缓存 60 秒）"""
-        if not self.storage:
+        """获取核心指数最新快照（index_daily via pg_manager）"""
+        if not await self._ensure_pg():
             return self._mock_index_snapshots()
 
-        # 尝试从 Redis 读取缓存
-        cache_key = "dash:index_snapshots"
-        redis_client = self.storage.get_redis_client() if hasattr(self.storage, 'get_redis_client') else None
-        if redis_client:
-            try:
-                import json
-                cached = redis_client.get(cache_key)
-                if cached:
-                    return json.loads(cached)
-            except Exception:
-                pass
-
-        engine = self.storage.get_postgres_engine()
-        if not engine:
-            return self._mock_index_snapshots()
-
+        results = []
         try:
-            codes = [idx["ts_code"] for idx in self.CORE_INDICES]
-            sql = """
-            SELECT DISTINCT ON (ts_code) ts_code, trade_date, open, high, low, close,
-                   pre_close, change, pct_chg, vol, amount
-            FROM index_daily
-            WHERE ts_code IN :codes
-            ORDER BY ts_code, trade_date DESC
-            """
-            df = pd.read_sql(sa_text(sql), engine, params={"codes": tuple(codes)})
+            for idx_info in self.CORE_INDICES:
+                code = idx_info["ts_code"]
+                df = await self.pg.query(
+                    table="index_daily",
+                    ts_code=code,
+                    limit=1,
+                    order_by="trade_date",
+                    order_desc=True,
+                )
+                if df is None or df.empty:
+                    results.append({
+                        "ts_code": code,
+                        "name": idx_info["name"],
+                        "short_name": idx_info["short_name"],
+                        "trade_date": "",
+                        "close": 0,
+                        "pre_close": 0,
+                        "change": 0,
+                        "pct_chg": 0,
+                        "vol": 0,
+                        "amount": 0,
+                    })
+                    continue
 
-            name_map = {idx["ts_code"]: idx for idx in self.CORE_INDICES}
-            results = []
-            for _, row in df.iterrows():
-                code = row["ts_code"]
-                idx_info = name_map.get(code, {"name": code, "short_name": code})
-                close_val = float(row["close"]) if pd.notna(row["close"]) else 0
-                pre_close_val = float(row["pre_close"]) if pd.notna(row["pre_close"]) else close_val
-                change_val = float(row["change"]) if pd.notna(row["change"]) else 0
-                pct_val = float(row["pct_chg"]) if pd.notna(row["pct_chg"]) else 0
+                row = df.iloc[0]
+                close_val = float(row["close"]) if pd.notna(row.get("close")) else 0
+                pre_close_val = float(row["pre_close"]) if pd.notna(row.get("pre_close")) else close_val
+                change_val = float(row["change"]) if pd.notna(row.get("change")) else 0
+                pct_val = float(row["pct_chg"]) if pd.notna(row.get("pct_chg")) else 0
                 results.append({
                     "ts_code": code,
                     "name": idx_info["name"],
                     "short_name": idx_info["short_name"],
-                    "trade_date": str(row["trade_date"])[:10] if pd.notna(row["trade_date"]) else "",
+                    "trade_date": str(row["trade_date"])[:10] if pd.notna(row.get("trade_date")) else "",
                     "close": round(close_val, 2),
-                    "open": round(float(row["open"]), 2) if pd.notna(row["open"]) else None,
-                    "high": round(float(row["high"]), 2) if pd.notna(row["high"]) else None,
-                    "low": round(float(row["low"]), 2) if pd.notna(row["low"]) else None,
+                    "open": round(float(row["open"]), 2) if pd.notna(row.get("open")) else None,
+                    "high": round(float(row["high"]), 2) if pd.notna(row.get("high")) else None,
+                    "low": round(float(row["low"]), 2) if pd.notna(row.get("low")) else None,
                     "pre_close": round(pre_close_val, 2),
                     "change": round(change_val, 2),
                     "pct_chg": round(pct_val, 2),
-                    "vol": int(row["vol"]) if pd.notna(row["vol"]) else 0,
-                    "amount": float(row["amount"]) if pd.notna(row["amount"]) else 0,
+                    "vol": int(row["vol"]) if pd.notna(row.get("vol")) else 0,
+                    "amount": float(row["amount"]) if pd.notna(row.get("amount")) else 0,
                 })
-
-            # 保持 CORE_INDICES 的顺序
-            results.sort(key=lambda x: codes.index(x["ts_code"]) if x["ts_code"] in codes else 999)
-
-            # 写入 Redis 缓存（60 秒过期）
-            if redis_client:
-                try:
-                    import json
-                    redis_client.setex(cache_key, 60, json.dumps(results, default=str))
-                except Exception:
-                    pass
-
             return results
         except Exception as e:
             logger.warning(f"获取指数快照失败: {e}")
@@ -391,11 +394,335 @@ class DashService:
             for e in self.POPULAR_ETFS
         ]
 
+    # ─── ETF 一级/二级市场看板 ───────────────────────────
+
+    ETF_MARKET_META = {
+        "primary": {
+            "id": "primary",
+            "label": "一级市场（上交所）",
+            "exchange": "SSE",
+            "suffix": ".SH",
+        },
+        "secondary": {
+            "id": "secondary",
+            "label": "二级市场（深交所）",
+            "exchange": "SZSE",
+            "suffix": ".SZ",
+        },
+    }
+
+    async def _is_trade_day(self, date_str: str) -> bool:
+        """判断是否为交易日（ref_trade_cal via pg_manager）"""
+        if not await self._ensure_pg():
+            dt = datetime.strptime(date_str, "%Y-%m-%d")
+            return dt.weekday() < 5
+        try:
+            df = await self.pg.query_sql(
+                "SELECT is_open FROM ref_trade_cal WHERE cal_date = :d AND exchange = 'SSE' LIMIT 1",
+                {"d": date_str},
+            )
+            if df is not None and not df.empty:
+                return int(df.iloc[0]["is_open"]) == 1
+        except Exception as e:
+            logger.warning(f"查询交易日历失败: {e}")
+        dt = datetime.strptime(date_str, "%Y-%m-%d")
+        return dt.weekday() < 5
+
+    def _query_latest_etf_trade_date_sync(self) -> Optional[str]:
+        """通过 storage SQLAlchemy 查询 etf_daily 最新交易日"""
+        if not self.storage:
+            return None
+        engine = self.storage.get_postgres_engine()
+        if not engine:
+            return None
+        try:
+            df = pd.read_sql(sa_text("SELECT MAX(trade_date) AS td FROM etf_daily"), engine)
+            if not df.empty and pd.notna(df.iloc[0]["td"]):
+                return str(df.iloc[0]["td"])[:10]
+        except Exception as e:
+            logger.warning(f"storage 查询 etf_daily 最新日期失败: {e}")
+        return None
+
+    async def _get_latest_etf_trade_date(self) -> str:
+        if await self._ensure_pg():
+            try:
+                df = await self.pg.query_sql("SELECT MAX(trade_date) AS td FROM etf_daily", {})
+                if df is not None and not df.empty and pd.notna(df.iloc[0]["td"]):
+                    return str(df.iloc[0]["td"])[:10]
+            except Exception as e:
+                logger.warning(f"pg 查询 etf_daily 最新日期失败: {e}")
+
+        latest = self._query_latest_etf_trade_date_sync()
+        if latest:
+            return latest
+        return datetime.now().strftime("%Y-%m-%d")
+
+    async def _get_market_trading_status(self) -> Dict[str, Any]:
+        """A股交易时段判断 + 最近行情日期"""
+        from datetime import time as dt_time
+        try:
+            from zoneinfo import ZoneInfo
+            now = datetime.now(ZoneInfo("Asia/Shanghai"))
+        except Exception:
+            now = datetime.now()
+
+        today = now.strftime("%Y-%m-%d")
+        is_trade_day = await self._is_trade_day(today)
+        t = now.time()
+        in_morning = dt_time(9, 30) <= t <= dt_time(11, 30)
+        in_afternoon = dt_time(13, 0) <= t <= dt_time(15, 0)
+        is_trading = is_trade_day and (in_morning or in_afternoon)
+
+        latest_date = await self._get_latest_etf_trade_date()
+        if is_trading:
+            has_today = False
+            try:
+                if await self._ensure_pg():
+                    df = await self.pg.query_sql(
+                        "SELECT COUNT(*) AS cnt FROM etf_daily WHERE trade_date = :d",
+                        {"d": today},
+                    )
+                    has_today = df is not None and not df.empty and int(df.iloc[0]["cnt"]) > 0
+            except Exception:
+                pass
+            if not has_today and self.storage:
+                engine = self.storage.get_postgres_engine()
+                if engine:
+                    try:
+                        df = pd.read_sql(
+                            sa_text("SELECT COUNT(*) AS cnt FROM etf_daily WHERE trade_date = :d"),
+                            engine, params={"d": today},
+                        )
+                        has_today = not df.empty and int(df.iloc[0]["cnt"]) > 0
+                    except Exception:
+                        pass
+            if has_today:
+                latest_date = today
+
+        if is_trading:
+            status, message = "trading", "交易中 · 显示最新行情"
+        elif is_trade_day and t < dt_time(9, 30):
+            status, message = "pre_market", "开市前 · 显示上一交易日收盘"
+        elif is_trade_day and dt_time(11, 30) < t < dt_time(13, 0):
+            status, message = "lunch_break", "午间休市 · 显示上午收盘"
+        elif is_trade_day and t > dt_time(15, 0):
+            status, message = "closed", "已收盘 · 显示当日收盘"
+        else:
+            status, message = "halted", "非交易时段 · 显示最近交易日收盘"
+
+        return {
+            "is_trading": is_trading,
+            "is_trade_day": is_trade_day,
+            "status": status,
+            "status_message": message,
+            "trade_date": latest_date,
+            "server_time": now.strftime("%Y-%m-%d %H:%M:%S"),
+        }
+
+    def _etf_meta(self, ts_code: str) -> Dict[str, str]:
+        for e in self.POPULAR_ETFS:
+            if e["ts_code"] == ts_code:
+                return e
+        symbol = ts_code.split(".")[0] if "." in ts_code else ts_code
+        return {
+            "ts_code": ts_code,
+            "name": ts_code,
+            "short_name": symbol[-6:] if len(symbol) > 6 else symbol,
+            "fund_type": "其他",
+        }
+
+    def _format_etf_row(self, row: pd.Series) -> Dict[str, Any]:
+        code = str(row["ts_code"])
+        meta = self._etf_meta(code)
+        close_val = float(row["close"]) if pd.notna(row.get("close")) else 0
+        pre_close_val = float(row["pre_close"]) if pd.notna(row.get("pre_close")) else close_val
+        change_val = float(row["change"]) if pd.notna(row.get("change")) else 0
+        pct_val = float(row["pct_chg"]) if pd.notna(row.get("pct_chg")) else 0
+        amount_val = float(row["amount"]) if pd.notna(row.get("amount")) else 0
+        # Tushare amount 单位为千元 → 亿元
+        amount_yi = round(amount_val / 100000.0, 2)
+        abs_pct = round(abs(pct_val), 2)
+        return {
+            "ts_code": code,
+            "name": meta["name"],
+            "short_name": meta["short_name"],
+            "fund_type": meta.get("fund_type", "其他"),
+            "trade_date": str(row["trade_date"])[:10] if pd.notna(row.get("trade_date")) else "",
+            "close": round(close_val, 4 if close_val < 10 else 2),
+            "pre_close": round(pre_close_val, 4 if pre_close_val < 10 else 2),
+            "change": round(change_val, 4 if abs(change_val) < 10 else 2),
+            "pct_chg": round(pct_val, 2),
+            "abs_pct_chg": abs_pct,
+            "amount": amount_val,
+            "amount_yi": amount_yi,
+            "vol": int(row["vol"]) if pd.notna(row.get("vol")) else 0,
+        }
+
+    def _summarize_etfs(self, etfs: List[Dict]) -> Dict[str, Any]:
+        if not etfs:
+            return {"count": 0, "up_count": 0, "down_count": 0, "flat_count": 0, "avg_pct_chg": 0}
+        ups = sum(1 for e in etfs if e.get("pct_chg", 0) > 0)
+        downs = sum(1 for e in etfs if e.get("pct_chg", 0) < 0)
+        flats = len(etfs) - ups - downs
+        avg = sum(e.get("pct_chg", 0) for e in etfs) / len(etfs)
+        return {
+            "count": len(etfs),
+            "up_count": ups,
+            "down_count": downs,
+            "flat_count": flats,
+            "avg_pct_chg": round(avg, 2),
+        }
+
+    def _query_market_etfs_sync(
+        self, trade_date: str, suffix: str, limit: int
+    ) -> List[Dict]:
+        """从 etf_daily 拉取指定交易所当日全部活跃 ETF（按成交额排序）"""
+        if not self.storage:
+            return []
+        engine = self.storage.get_postgres_engine()
+        if not engine:
+            return []
+        try:
+            sql = """
+            SELECT ts_code, trade_date, open, high, low, close, pre_close,
+                   change, pct_chg, vol, amount
+            FROM etf_daily
+            WHERE trade_date = :td AND ts_code LIKE :pattern
+              AND close IS NOT NULL AND close > 0
+            ORDER BY amount DESC NULLS LAST
+            LIMIT :lim
+            """
+            df = pd.read_sql(
+                sa_text(sql), engine,
+                params={"td": trade_date, "pattern": f"%{suffix}", "lim": limit},
+            )
+            if df.empty:
+                return []
+            return [self._format_etf_row(row) for _, row in df.iterrows()]
+        except Exception as e:
+            logger.warning(f"storage 查询 ETF ({suffix}) 失败: {e}")
+            return []
+
+    async def _fetch_market_etfs(
+        self, market_id: str, trade_date: str, limit: int = 100
+    ) -> List[Dict]:
+        """按交易所后缀拉取 ETF 最新行情（etf_daily 全市场，非仅热门白名单）"""
+        suffix = self.ETF_MARKET_META[market_id]["suffix"]
+        results = self._query_market_etfs_sync(trade_date, suffix, limit)
+
+        if not results and await self._ensure_pg():
+            try:
+                sql = """
+                SELECT ts_code, trade_date, open, high, low, close, pre_close,
+                       change, pct_chg, vol, amount
+                FROM etf_daily
+                WHERE trade_date = :td AND ts_code LIKE :pattern
+                  AND close IS NOT NULL AND close > 0
+                ORDER BY amount DESC NULLS LAST
+                LIMIT :lim
+                """
+                df = await self.pg.query_sql(
+                    sql, {"td": trade_date, "pattern": f"%{suffix}", "lim": limit}
+                )
+                if df is not None and not df.empty:
+                    results = [self._format_etf_row(row) for _, row in df.iterrows()]
+            except Exception as e:
+                logger.warning(f"pg 查询 {market_id} ETF 失败: {e}")
+
+        if not results:
+            etf_map = {e["ts_code"]: e for e in self.POPULAR_ETFS if e["ts_code"].endswith(suffix)}
+            import random
+            random.seed(hash(market_id) % 2**32)
+            for code, info in list(etf_map.items())[:limit]:
+                base = random.uniform(0.8, 5.0)
+                chg = random.uniform(-0.15, 0.15)
+                pct = round(chg / base * 100, 2)
+                results.append({
+                    "ts_code": code,
+                    "name": info["name"],
+                    "short_name": info["short_name"],
+                    "fund_type": info.get("fund_type", ""),
+                    "trade_date": trade_date,
+                    "close": round(base, 3),
+                    "pre_close": round(base - chg, 3),
+                    "change": round(chg, 3),
+                    "pct_chg": pct,
+                    "abs_pct_chg": abs(pct),
+                    "amount_yi": round(random.uniform(0.5, 50), 2),
+                    "vol": random.randint(100000, 5000000),
+                    "amount": random.uniform(1e6, 1e8),
+                })
+
+        return results[:limit]
+
+    async def get_etf_board(self, limit_per_market: int = 100) -> Dict[str, Any]:
+        """
+        ETF 看板：一级市场（上交所 .SH）与二级市场（深交所 .SZ）
+        数据来源：data_layer.storage → etf_daily
+        """
+        status = await self._get_market_trading_status()
+        trade_date = status["trade_date"]
+
+        primary_etfs = await self._fetch_market_etfs("primary", trade_date, limit_per_market)
+        secondary_etfs = await self._fetch_market_etfs("secondary", trade_date, limit_per_market)
+
+        return {
+            **status,
+            "primary_market": {
+                **self.ETF_MARKET_META["primary"],
+                "etfs": primary_etfs,
+                "summary": self._summarize_etfs(primary_etfs),
+            },
+            "secondary_market": {
+                **self.ETF_MARKET_META["secondary"],
+                "etfs": secondary_etfs,
+                "summary": self._summarize_etfs(secondary_etfs),
+            },
+        }
+
     # ─── 周K/月K 自动推导（表为空时从日K聚合） ─────────
 
-    def _derive_weekly_from_daily(self, ts_code: str, limit: int) -> Optional[pd.DataFrame]:
+    async def _query_bars_pg(
+        self, ts_code: str, table: str,
+        start: Optional[str], end: Optional[str], limit: int
+    ) -> Optional[pd.DataFrame]:
+        """从 PostgreSQL 查询K线（data_layer.storage.pg_manager）"""
+        if not await self._ensure_pg():
+            return None
+
+        try:
+            actual_table = table
+            if self._is_etf_code(ts_code):
+                actual_table = "etf_daily"
+            elif self._is_index_code(ts_code) and table in ("stock_daily", "stock_weekly", "stock_monthly", "index_daily"):
+                actual_table = "index_daily"
+            elif table in ("stock_daily", "stock_weekly", "stock_monthly", "etf_daily"):
+                actual_table = table
+
+            df = await self.pg.query(
+                table=actual_table,
+                ts_code=ts_code,
+                start_date=start,
+                end_date=end,
+                limit=limit,
+                order_by="trade_date",
+                order_desc=True,
+            )
+            if df is None or df.empty:
+                return None
+            if "trade_date" in df.columns:
+                df["time"] = pd.to_datetime(df["trade_date"])
+            return df
+        except Exception as e:
+            logger.warning(f"pg 查询 {table} 失败 ({ts_code}): {e}")
+
+        if self.storage:
+            return self._query_timescale_bars(ts_code, table, start, end, limit)
+        return None
+
+    async def _derive_weekly_from_daily(self, ts_code: str, limit: int, daily_table: str = "stock_daily") -> Optional[pd.DataFrame]:
         """从日K线聚合成周K线"""
-        daily_df = self._query_timescale_bars(ts_code, "stock_daily", None, None, limit * 5)
+        daily_df = await self._query_bars_pg(ts_code, daily_table, None, None, limit * 5)
         if daily_df is None or daily_df.empty:
             return None
         daily_df = daily_df.sort_values("time")
@@ -420,9 +747,9 @@ class DashService:
             weekly["pct_chg"] = (weekly["change"] / weekly["pre_close"].replace(0, np.nan)) * 100
         return weekly
 
-    def _derive_monthly_from_daily(self, ts_code: str, limit: int) -> Optional[pd.DataFrame]:
+    async def _derive_monthly_from_daily(self, ts_code: str, limit: int, daily_table: str = "stock_daily") -> Optional[pd.DataFrame]:
         """从日K线聚合成月K线"""
-        daily_df = self._query_timescale_bars(ts_code, "stock_daily", None, None, limit * 22)
+        daily_df = await self._query_bars_pg(ts_code, daily_table, None, None, limit * 22)
         if daily_df is None or daily_df.empty:
             return None
         daily_df = daily_df.sort_values("time")
@@ -510,52 +837,46 @@ class DashService:
         if not tf_config:
             return {"error": f"不支持的周期: {timeframe}", "bars": [], "indicators": {}}
 
+        if tf_config["source"] == "influx":
+            return {
+                "error": f"暂不支持分钟线周期: {timeframe}",
+                "ts_code": ts_code,
+                "timeframe": timeframe,
+                "bars": [],
+                "indicators": {},
+                "count": 0,
+            }
+
         bars_df = pd.DataFrame()
         is_etf = self._is_etf_code(ts_code)
         is_index = self._is_index_code(ts_code)
         fallback_msg = ""
+        if is_etf:
+            daily_table = "etf_daily"
+        elif is_index:
+            daily_table = "index_daily"
+        else:
+            daily_table = "stock_daily"
 
-        if not self.storage:
-            bars_df = self._mock_kline(ts_code, timeframe, limit)
-        elif tf_config["source"] == "influx":
-            bars_df = self._query_influx_bars(ts_code, tf_config["freq"], start, end, limit)
-            if (bars_df is None or bars_df.empty) and not is_index:
-                # 分钟线无数据，尝试从 InfluxDB 查更低级别再聚合
-                logger.info(f"{ts_code} 的 {tf_config['freq']} 分钟线数据为空，当前不可用")
-                fallback_msg = f"{tf_config['freq']} 分钟线数据未采集，请先运行数据采集任务"
-        elif tf_config["source"] == "timescale":
-            actual_table = tf_config["table"]
-            # ETF 只支持日线（周/月需要从日线聚合）
-            if is_etf and actual_table in ("stock_weekly", "stock_monthly"):
-                logger.info(f"ETF {ts_code} 不支持 {actual_table}，将从 etf_daily 聚合")
-                daily_bars = self._query_timescale_bars(ts_code, "etf_daily", start, end, limit * 22 if actual_table == "stock_monthly" else limit * 5)
-                if daily_bars is not None and not daily_bars.empty:
-                    if actual_table == "stock_weekly":
-                        bars_df = self._aggregate_df_to_weekly(daily_bars, limit)
-                    elif actual_table == "stock_monthly":
-                        bars_df = self._aggregate_df_to_monthly(daily_bars, limit)
-                fallback_msg = "ETF周/月数据通过日线聚合生成"
-            else:
-                bars_df = self._query_timescale_bars(ts_code, actual_table, start, end, limit)
-
-            # 周/月K线为空时：从日K线自动聚合（非指数、非ETF）
-            if (bars_df is None or bars_df.empty) and not is_index and not is_etf:
-                actual_table = tf_config.get("table", "")
-                if actual_table == "stock_weekly":
-                    logger.info(f"{ts_code} 周K表为空，从日K自动聚合")
-                    bars_df = self._derive_weekly_from_daily(ts_code, limit)
-                    fallback_msg = "周线数据通过日线聚合生成"
-                elif actual_table == "stock_monthly":
-                    logger.info(f"{ts_code} 月K表为空，从日K自动聚合")
-                    bars_df = self._derive_monthly_from_daily(ts_code, limit)
-                    fallback_msg = "月线数据通过日线聚合生成"
+        if timeframe == "day":
+            bars_df = await self._query_bars_pg(ts_code, daily_table, start, end, limit)
+        elif timeframe == "week":
+            bars_df = await self._query_bars_pg(ts_code, "stock_weekly", start, end, limit)
+            if bars_df is None or bars_df.empty:
+                logger.info(f"{ts_code} 周K表为空，从日K自动聚合")
+                bars_df = await self._derive_weekly_from_daily(ts_code, limit, daily_table)
+                fallback_msg = "周线数据通过日线聚合生成"
+        elif timeframe == "month":
+            bars_df = await self._query_bars_pg(ts_code, "stock_monthly", start, end, limit)
+            if bars_df is None or bars_df.empty:
+                logger.info(f"{ts_code} 月K表为空，从日K自动聚合")
+                bars_df = await self._derive_monthly_from_daily(ts_code, limit, daily_table)
+                fallback_msg = "月线数据通过日线聚合生成"
 
         if bars_df is None or bars_df.empty:
-            # ETF 日线为空时使用模拟数据（确保前端有内容可看）
-            if is_etf and timeframe == "day":
-                logger.info(f"ETF {ts_code} 日线数据为空，使用模拟K线")
-                bars_df = self._mock_kline(ts_code, "day", limit)
-                fallback_msg = "ETF日线数据暂未采集，当前为模拟数据"
+            if not await self._ensure_pg():
+                bars_df = self._mock_kline(ts_code, timeframe, limit)
+                fallback_msg = "数据库未连接，当前为模拟数据"
             else:
                 result = {
                     "ts_code": ts_code,
@@ -566,6 +887,8 @@ class DashService:
                 }
                 if fallback_msg:
                     result["message"] = fallback_msg
+                else:
+                    result["message"] = f"无 {ts_code} 的 {timeframe} K线数据"
                 return result
 
         # 统一列名
@@ -582,21 +905,30 @@ class DashService:
         # 转为 JSON 可序列化格式
         bars = self._df_to_bars(bars_df)
 
-        # 股票/ETF信息
+        # 股票/指数/ETF 信息
         stock_info = None
+        display_name = ts_code
         if is_etf:
             stock_info = await self.get_etf_info(ts_code)
+            display_name = stock_info.get("name", ts_code) if stock_info else ts_code
         else:
             stock_info = await self.get_stock_info(ts_code)
+            if not stock_info and is_index:
+                for idx in self.CORE_INDICES:
+                    if idx["ts_code"] == ts_code:
+                        stock_info = {"ts_code": ts_code, "name": idx["name"]}
+                        break
+            display_name = stock_info.get("name", ts_code) if stock_info else ts_code
 
         return {
             "ts_code": ts_code,
-            "name": stock_info.get("name", ts_code) if stock_info else ts_code,
+            "name": display_name,
             "timeframe": timeframe,
             "bars": bars,
             "indicators": indicator_data,
             "count": len(bars),
             "stock_info": stock_info,
+            "is_index": is_index,
             "is_etf": is_etf,
             "message": fallback_msg or None,
         }

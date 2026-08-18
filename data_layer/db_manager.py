@@ -48,8 +48,9 @@ class StorageManager:
                 from influxdb_client import InfluxDBClient
                 client = InfluxDBClient(
                     url=config.get_connection_string("influx"),
-                    token="supersecretadmin token",
-                    org="quant"
+                    token=config.influx_token or "supersecretadmin token",
+                    org=config.influx_org or "quant",
+                    timeout=5_000,  # ms，避免 health 检查无限卡住
                 )
                 self._connections['influx'] = client
                 self.logger.info("InfluxDB 客户端初始化成功")
@@ -67,7 +68,9 @@ class StorageManager:
                     config.get_connection_string("postgres"),
                     pool_size=10,
                     max_overflow=20,
-                    pool_timeout=30
+                    pool_timeout=30,
+                    pool_pre_ping=True,
+                    connect_args={"connect_timeout": 5},
                 )
                 self._connections['postgres'] = engine
                 self.logger.info("PostgreSQL 连接池初始化成功 (TimescaleDB 已启用)")

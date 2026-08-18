@@ -87,7 +87,16 @@ async def startup_event():
     from server.chat_service import chat_service
     models = await chat_service.get_available_models()
     providers = await chat_service.get_available_providers()
-    logger.info(f"已注册路由: /, /health, /agents, /chat/*, /models/*, /dash/*, /storage/*, /skills/*, /market/*")
+
+    # 初始化市场数据 PostgreSQL 连接池（行情中心 /market/* 依赖）
+    try:
+        from data_layer.storage import pg_manager
+        pg_manager.initialize()
+        logger.info("PostgreSQL 市场数据管理器 (pg_manager) 初始化成功")
+    except Exception as e:
+        logger.warning(f"PostgreSQL 市场数据管理器初始化失败: {e}")
+
+    logger.info(f"已注册路由: /, /health, /agents, /chat/*, /models/*, /dash/* (含 etf-board), /storage/*, /skills/*, /market/*")
     logger.info(f"可用模型: {len(models)} 个 ({sum(1 for m in models if m.get('available'))} 个已配置)")
     logger.info(f"可用提供商: {[p['id'] for p in providers]}")
     logger.info("=" * 60)

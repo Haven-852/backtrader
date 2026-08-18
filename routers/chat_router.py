@@ -30,6 +30,7 @@ class MessageRequest(BaseModel):
     system_prompt: Optional[str] = Field(None, description="系统提示词")
     temperature: float = Field(default=0.7, ge=0.0, le=2.0, description="温度参数")
     max_tokens: int = Field(default=4096, ge=1, le=128000, description="最大 token 数")
+    use_tools: bool = Field(default=True, description="是否启用 tools/ 技能工具自动调用")
 
 
 class MessageResponse(BaseModel):
@@ -39,13 +40,14 @@ class MessageResponse(BaseModel):
     usage: Dict = {}
     finish_reason: str = "stop"
     timestamp: str = Field(default_factory=lambda: datetime.now().isoformat())
+    tool_trace: List[Dict] = Field(default_factory=list, description="工具调用轨迹")
 
 
 # ─── 路由 ─────────────────────────────────────────────
 
 @router.post("/messages", response_model=MessageResponse)
 async def send_message(request: MessageRequest):
-    """发送消息（非流式）- 支持多模型切换"""
+    """发送消息（非流式）- 支持多模型切换；默认启用 tools 自动查数"""
     try:
         chat_req = ChatRequest(
             query=request.query,
@@ -57,14 +59,23 @@ async def send_message(request: MessageRequest):
             temperature=request.temperature,
             max_tokens=request.max_tokens,
         )
-        response = await chat_service.chat(chat_req)
+
+        if request.use_tools:
+            from server.tool_agent_service import tool_agent_service
+            response = await tool_agent_service.chat_with_tools(chat_req)
+        else:
+            response = await chat_service.chat(chat_req)
+
+        usage = response.usage or {}
+        tool_trace = usage.get("tool_trace") or []
         return MessageResponse(
             content=response.content,
             model=response.model,
             provider=response.provider,
-            usage=response.usage,
+            usage={k: v for k, v in usage.items() if k != "tool_trace"},
             finish_reason=response.finish_reason,
             timestamp=response.timestamp,
+            tool_trace=tool_trace,
         )
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"对话失败: {str(e)}")

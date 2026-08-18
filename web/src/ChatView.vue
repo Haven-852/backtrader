@@ -19,6 +19,30 @@
                 <span class="text-xs px-1.5 py-0.5 rounded bg-blue-600/20 text-blue-400">{{ msg.skill }}</span>
               </div>
               <div class="text-sm leading-relaxed" v-html="formatContent(msg.content)"></div>
+              <!-- 工具调用轨迹 -->
+              <div v-if="msg.toolTrace?.length" class="mt-2 space-y-1.5">
+                <div class="text-[10px] text-amber-400/90 font-medium tracking-wide">🔧 工具调用</div>
+                <div
+                  v-for="(step, si) in msg.toolTrace"
+                  :key="si"
+                  class="bg-zinc-900/80 border border-zinc-700/80 rounded-lg px-2.5 py-2 text-[11px]"
+                >
+                  <div class="flex items-center gap-1.5 text-zinc-300">
+                    <span class="text-zinc-500">#{{ step.round || si + 1 }}</span>
+                    <span class="font-mono text-emerald-400/90 truncate">{{ step.function || `${step.skill_id}/${step.tool_id}` }}</span>
+                    <span :class="step.result_ok === false ? 'text-red-400' : 'text-emerald-400'" class="ml-auto flex-shrink-0">
+                      {{ step.result_ok === false ? '失败' : '成功' }}
+                    </span>
+                  </div>
+                  <div v-if="step.arguments && Object.keys(step.arguments).length" class="mt-1 text-zinc-500 font-mono truncate">
+                    {{ JSON.stringify(step.arguments) }}
+                  </div>
+                  <details v-if="step.result_preview" class="mt-1">
+                    <summary class="cursor-pointer text-zinc-500 hover:text-zinc-300">查看结果摘要</summary>
+                    <pre class="mt-1 max-h-32 overflow-auto text-zinc-400 whitespace-pre-wrap break-all">{{ step.result_preview }}</pre>
+                  </details>
+                </div>
+              </div>
               <div v-if="msg.data" class="mt-2">
                 <div v-if="msg.dataType === 'tables'" class="bg-zinc-900 rounded-xl overflow-hidden border border-zinc-700">
                   <table class="w-full text-xs">
@@ -102,6 +126,10 @@
               {{ model.name }}
             </button>
             <div class="flex-1"></div>
+            <label class="flex items-center gap-1.5 text-xs text-zinc-400 cursor-pointer select-none mr-2">
+              <input v-model="useTools" type="checkbox" class="rounded border-zinc-600 bg-zinc-800 text-blue-500 focus:ring-blue-500/40" />
+              自动工具
+            </label>
             <button
               @click="clearChat"
               class="px-3 py-1.5 text-xs text-zinc-500 hover:text-zinc-300 transition-colors"
@@ -140,14 +168,30 @@
           <i class="fa-solid fa-wand-magic-sparkles text-blue-400 text-sm"></i>
           <h3 class="text-sm font-semibold">技能面板</h3>
         </div>
-        <span v-if="activeSkill" @click="activeSkill = null" class="text-xs text-zinc-500 hover:text-zinc-300 cursor-pointer transition-colors">
-          <i class="fa-solid fa-xmark"></i>
-        </span>
+        <div class="flex items-center gap-2">
+          <button
+            @click="toggleHandbook"
+            class="text-[10px] px-2 py-1 rounded-md border transition-colors"
+            :class="showHandbook ? 'border-amber-500/40 text-amber-300 bg-amber-500/10' : 'border-zinc-700 text-zinc-500 hover:text-zinc-300'"
+            title="查看 tools/HANDBOOK.md"
+          >
+            手册
+          </button>
+          <span v-if="activeSkill" @click="activeSkill = null" class="text-xs text-zinc-500 hover:text-zinc-300 cursor-pointer transition-colors">
+            <i class="fa-solid fa-xmark"></i>
+          </span>
+        </div>
       </div>
 
       <div class="flex-1 overflow-auto">
+        <!-- 工具总目录手册 -->
+        <div v-if="showHandbook" class="p-3">
+          <div class="text-[10px] text-zinc-500 mb-2 font-mono break-all">{{ handbookPath || 'tools/HANDBOOK.md' }}</div>
+          <pre class="text-[11px] text-zinc-400 whitespace-pre-wrap leading-relaxed bg-zinc-950/60 border border-zinc-800 rounded-xl p-3 max-h-[70vh] overflow-auto">{{ handbookContent || '加载中...' }}</pre>
+        </div>
+
         <!-- Skill 列表（未选中时） -->
-        <div v-if="!activeSkill" class="p-3 space-y-2">
+        <div v-else-if="!activeSkill" class="p-3 space-y-2">
           <div
             v-for="skill in skills"
             :key="skill.id"
@@ -255,6 +299,7 @@ interface Message {
   skill?: string
   data?: any
   dataType?: string
+  toolTrace?: any[]
 }
 
 interface Skill {
@@ -278,6 +323,7 @@ const messages = ref<Message[]>([])
 const inputMessage = ref('')
 const selectedModel = ref('deepseek-chat')
 const loading = ref(false)
+const useTools = ref(true)
 
 // ─── Skill Panel ─────────────────────────────────────
 const skills = ref<Skill[]>([])
@@ -285,6 +331,9 @@ const activeSkill = ref<Skill | null>(null)
 const selectedTool = ref<Tool | null>(null)
 const toolInputs = reactive<Record<string, string>>({})
 const skillExecuting = ref(false)
+const showHandbook = ref(false)
+const handbookContent = ref('')
+const handbookPath = ref('')
 
 const quickModels = [
   { id: 'deepseek-chat', name: 'DeepSeek' },
@@ -301,8 +350,8 @@ function fmt(val: any) {
   return String(val)
 }
 
-function addMessage(role: string, content: string, skillName?: string, data?: any, dataType?: string) {
-  messages.value.push({ role, content, time: new Date(), skill: skillName, data, dataType })
+function addMessage(role: string, content: string, skillName?: string, data?: any, dataType?: string, toolTrace?: any[]) {
+  messages.value.push({ role, content, time: new Date(), skill: skillName, data, dataType, toolTrace })
 }
 
 function formatContent(text: string): string {
@@ -329,17 +378,28 @@ async function sendMessage() {
   loading.value = true
 
   try {
+    const history = messages.value
+      .filter(m => m.role === 'user' || m.role === 'assistant')
+      .slice(-10)
+      .map(m => ({ role: m.role, content: m.content }))
+
     const res = await axios.post('/chat/messages', {
       query: msg,
       model: selectedModel.value,
-      history: messages.value.slice(-10).map(m => ({
-        role: m.role,
-        content: m.content,
-      })),
+      history,
+      use_tools: useTools.value,
     })
-    addMessage('assistant', res.data.content || '（空回复）')
+    addMessage(
+      'assistant',
+      res.data.content || '（空回复）',
+      undefined,
+      undefined,
+      undefined,
+      res.data.tool_trace || [],
+    )
   } catch (e: any) {
-    addMessage('assistant', '❌ 后端服务未响应。请确保 backend 已启动 (端口 8000)。')
+    const detail = e?.response?.data?.detail || ''
+    addMessage('assistant', `❌ 后端服务未响应。${detail || '请确保 backend 已启动 (端口 8000)。'}`)
   } finally {
     loading.value = false
   }
@@ -361,7 +421,24 @@ async function loadSkills() {
   }
 }
 
+async function toggleHandbook() {
+  showHandbook.value = !showHandbook.value
+  if (showHandbook.value && !handbookContent.value) {
+    try {
+      const res = await axios.get('/skills/handbook')
+      handbookContent.value = res.data.content || ''
+      handbookPath.value = res.data.path || 'tools/HANDBOOK.md'
+    } catch (e) {
+      handbookContent.value = '加载手册失败，请确认后端已启动且 tools/HANDBOOK.md 存在。'
+    }
+  }
+  if (showHandbook.value) {
+    activeSkill.value = null
+  }
+}
+
 function selectSkill(skill: Skill) {
+  showHandbook.value = false
   activeSkill.value = skill
   selectedTool.value = null
 }

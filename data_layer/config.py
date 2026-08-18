@@ -49,21 +49,21 @@ class DatabaseConfig:
 
         # --- InfluxDB 配置 (高频行情) ---
         self.influx = StorageConfig(
-            host=os.getenv("INFLUX_HOST", "localhost"),
+            host=os.getenv("INFLUX_HOST", "127.0.0.1"),
             port=int(os.getenv("INFLUX_PORT", 8086)),
             username=os.getenv("INFLUX_USER", "admin"),
             password=os.getenv("INFLUX_PASSWORD", "backtrader123"),
             database=os.getenv("INFLUX_BUCKET", "market_data")
         )
         # InfluxDB v2 额外配置
-        self.influx_url = os.getenv("INFLUX_URL", "http://localhost:8086")
+        self.influx_url = os.getenv("INFLUX_URL", "http://127.0.0.1:8086")
         self.influx_token = os.getenv("INFLUX_TOKEN", "")
         self.influx_org = os.getenv("INFLUX_ORG", "quant")
         self.influx_bucket = os.getenv("INFLUX_BUCKET", "market_data")
 
         # --- PostgreSQL + TimescaleDB (结构化数据 + 时序) ---
         self.postgres = {
-            "host": os.getenv("POSTGRES_HOST", os.getenv("PG_HOST", "localhost")),
+            "host": os.getenv("POSTGRES_HOST", os.getenv("PG_HOST", "127.0.0.1")),
             "port": int(os.getenv("POSTGRES_PORT", os.getenv("PG_PORT", 15432))),
             "user": os.getenv("POSTGRES_USER", os.getenv("PG_USER", "quant")),
             "password": os.getenv("POSTGRES_PASSWORD", os.getenv("PG_PASSWORD", "backtrader123")),
@@ -73,7 +73,7 @@ class DatabaseConfig:
 
         # --- Redis (实时缓存) ---
         self.redis = {
-            "host": os.getenv("REDIS_HOST", "localhost"),
+            "host": os.getenv("REDIS_HOST", "127.0.0.1"),
             "port": int(os.getenv("REDIS_PORT", 16379)),
             "password": os.getenv("REDIS_PASSWORD", None),
             "db": 0
@@ -81,7 +81,7 @@ class DatabaseConfig:
 
         # --- MinIO (S3 兼容数据湖) ---
         self.minio = {
-            "endpoint": os.getenv("MINIO_ENDPOINT", "localhost:9000"),
+            "endpoint": os.getenv("MINIO_ENDPOINT", "127.0.0.1:9000"),
             "access_key": os.getenv("MINIO_ACCESS_KEY", "quant"),
             "secret_key": os.getenv("MINIO_SECRET_KEY", "backtrader123"),
             "secure": False,

@@ -181,6 +181,17 @@ async def get_etfs():
         raise HTTPException(status_code=500, detail=f"获取ETF列表失败: {str(e)}")
 
 
+@router.get("/etf-board")
+async def get_etf_board(
+    limit: int = Query(default=100, ge=1, le=200, description="每个市场展示的ETF数量（气泡图）"),
+):
+    """ETF 一级/二级市场看板（上交所/深交所，数据来自 etf_daily）"""
+    try:
+        return await dash_service.get_etf_board(limit_per_market=limit)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"获取ETF看板失败: {str(e)}")
+
+
 @router.get("/etf-kline")
 async def get_etf_kline(
     ts_code: str = Query(..., description="ETF代码（如 510050.SH）"),

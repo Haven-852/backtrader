@@ -88,65 +88,92 @@ class StorageService:
     # ─── 统一状态检查 ─────────────────────────────────
 
     async def get_storage_status(self) -> Dict[str, Any]:
-        """获取所有存储后端的连接状态"""
-        services = {}
+        """获取所有存储后端的连接状态（各后端独立探测，互不拖死）"""
+        services: Dict[str, Any] = {}
 
         # PostgreSQL
-        pg = self.engine
-        if pg:
-            try:
-                with pg.connect() as c: c.execute(sa_text("SELECT 1"))
-                services["postgresql"] = {"name": "PostgreSQL + TimescaleDB", "status": "online",
-                                           "port": 15432, "desc": "结构化数据 & 时序K线"}
-            except Exception as e:
-                services["postgresql"] = {"name": "PostgreSQL + TimescaleDB", "status": "error",
-                                           "port": 15432, "desc": f"连接失败: {str(e)[:40]}"}
-        else:
-            services["postgresql"] = {"name": "PostgreSQL + TimescaleDB", "status": "disconnected",
-                                       "port": 15432, "desc": "未初始化"}
+        try:
+            pg = self.engine
+            if not pg:
+                services["postgresql"] = {
+                    "name": "PostgreSQL + TimescaleDB", "status": "disconnected",
+                    "port": 15432, "desc": "引擎未初始化（检查 POSTGRES_* 与依赖）",
+                }
+            else:
+                with pg.connect() as c:
+                    row = c.execute(sa_text("SELECT current_database(), current_user")).fetchone()
+                services["postgresql"] = {
+                    "name": "PostgreSQL + TimescaleDB", "status": "online",
+                    "port": 15432, "desc": f"结构化数据 & 时序K线 · {row[0]}@{row[1]}",
+                }
+        except Exception as e:
+            services["postgresql"] = {
+                "name": "PostgreSQL + TimescaleDB", "status": "error",
+                "port": 15432, "desc": f"连接失败: {str(e)[:80]}",
+            }
 
         # InfluxDB
-        influx = storage_manager.get_influx_client()
-        if influx:
-            try:
-                influx.health()
-                services["influxdb"] = {"name": "InfluxDB", "status": "online",
-                                         "port": 8086, "desc": "高频行情 & 分钟线"}
-            except Exception as e:
-                services["influxdb"] = {"name": "InfluxDB", "status": "error",
-                                         "port": 8086, "desc": f"连接失败: {str(e)[:40]}"}
-        else:
-            services["influxdb"] = {"name": "InfluxDB", "status": "disconnected",
-                                     "port": 8086, "desc": "未初始化"}
+        try:
+            influx = storage_manager.get_influx_client()
+            if not influx:
+                services["influxdb"] = {
+                    "name": "InfluxDB", "status": "disconnected",
+                    "port": 8086, "desc": "未初始化",
+                }
+            else:
+                health = influx.health()
+                ok = getattr(health, "status", None) == "pass" or str(getattr(health, "status", "")).lower() in ("pass", "ok")
+                services["influxdb"] = {
+                    "name": "InfluxDB",
+                    "status": "online" if ok else "error",
+                    "port": 8086,
+                    "desc": "高频行情 & 分钟线" if ok else f"health={getattr(health, 'status', health)}",
+                }
+        except Exception as e:
+            services["influxdb"] = {
+                "name": "InfluxDB", "status": "error",
+                "port": 8086, "desc": f"连接失败: {str(e)[:60]}",
+            }
 
         # Redis
-        redis = storage_manager.get_redis_client()
-        if redis:
-            try:
+        try:
+            redis = storage_manager.get_redis_client()
+            if not redis:
+                services["redis"] = {
+                    "name": "Redis", "status": "disconnected",
+                    "port": 16379, "desc": "未初始化或无法连接",
+                }
+            else:
                 redis.ping()
-                services["redis"] = {"name": "Redis", "status": "online",
-                                      "port": 16379, "desc": "实时缓存"}
-            except Exception as e:
-                services["redis"] = {"name": "Redis", "status": "error",
-                                      "port": 16379, "desc": str(e)[:60]}
-        else:
-            services["redis"] = {"name": "Redis", "status": "disconnected",
-                                  "port": 16379, "desc": "未初始化或无法连接"}
+                services["redis"] = {
+                    "name": "Redis", "status": "online",
+                    "port": 16379, "desc": "实时缓存",
+                }
+        except Exception as e:
+            services["redis"] = {
+                "name": "Redis", "status": "error",
+                "port": 16379, "desc": str(e)[:60],
+            }
 
         # MinIO
-        minio = storage_manager.get_minio_client()
-        if minio:
-            try:
-                bs = minio.list_buckets()
-                count = len(bs)
-                services["minio"] = {"name": "MinIO", "status": "online",
-                                      "port": 9000, "desc": f"数据湖 ({count} buckets)"}
-            except Exception as e:
-                services["minio"] = {"name": "MinIO", "status": "error",
-                                      "port": 9000, "desc": str(e)[:60]}
-        else:
-            services["minio"] = {"name": "MinIO", "status": "disconnected",
-                                  "port": 9000, "desc": "未初始化或无法连接"}
+        try:
+            minio = storage_manager.get_minio_client()
+            if not minio:
+                services["minio"] = {
+                    "name": "MinIO", "status": "disconnected",
+                    "port": 9000, "desc": "未初始化或无法连接",
+                }
+            else:
+                count = len(minio.list_buckets())
+                services["minio"] = {
+                    "name": "MinIO", "status": "online",
+                    "port": 9000, "desc": f"数据湖 ({count} buckets)",
+                }
+        except Exception as e:
+            services["minio"] = {
+                "name": "MinIO", "status": "error",
+                "port": 9000, "desc": str(e)[:60],
+            }
 
         return services
 
