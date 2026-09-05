@@ -39,42 +39,42 @@
           </div>
         </div>
 
-        <!-- 连通性测试 -->
+        <!-- 存储层状态（含连通性测试） -->
         <div
           @click="currentTab = 2"
           :class="{ 'bg-zinc-800 text-white': currentTab === 2, 'text-zinc-400 hover:text-white hover:bg-zinc-800/50': currentTab !== 2 }"
           class="flex items-center gap-3 px-4 py-3 rounded-xl cursor-pointer transition-all"
         >
-          <i class="fa-solid fa-plug w-5 text-center"></i>
-          <div>
-            <div class="font-medium text-sm">连通性测试</div>
-            <div class="text-xs text-zinc-500">模型 · 数据库</div>
-          </div>
-        </div>
-
-        <!-- 存储层状态 -->
-        <div
-          @click="currentTab = 3"
-          :class="{ 'bg-zinc-800 text-white': currentTab === 3, 'text-zinc-400 hover:text-white hover:bg-zinc-800/50': currentTab !== 3 }"
-          class="flex items-center gap-3 px-4 py-3 rounded-xl cursor-pointer transition-all"
-        >
           <i class="fa-solid fa-database w-5 text-center"></i>
           <div>
             <div class="font-medium text-sm">存储层状态</div>
-            <div class="text-xs text-zinc-500">基础设施监控</div>
+            <div class="text-xs text-zinc-500">连通测试 · 数据预览</div>
           </div>
         </div>
 
         <!-- 行情中心 -->
         <div
-          @click="currentTab = 4"
-          :class="{ 'bg-zinc-800 text-white': currentTab === 4, 'text-zinc-400 hover:text-white hover:bg-zinc-800/50': currentTab !== 4 }"
+          @click="currentTab = 3"
+          :class="{ 'bg-zinc-800 text-white': currentTab === 3, 'text-zinc-400 hover:text-white hover:bg-zinc-800/50': currentTab !== 3 }"
           class="flex items-center gap-3 px-4 py-3 rounded-xl cursor-pointer transition-all"
         >
           <i class="fa-solid fa-globe w-5 text-center"></i>
           <div>
             <div class="font-medium text-sm">行情中心</div>
             <div class="text-xs text-zinc-500">全市场 · 30张表</div>
+          </div>
+        </div>
+
+        <!-- 策略分析 -->
+        <div
+          @click="currentTab = 4"
+          :class="{ 'bg-zinc-800 text-white': currentTab === 4, 'text-zinc-400 hover:text-white hover:bg-zinc-800/50': currentTab !== 4 }"
+          class="flex items-center gap-3 px-4 py-3 rounded-xl cursor-pointer transition-all"
+        >
+          <i class="fa-solid fa-chess w-5 text-center"></i>
+          <div>
+            <div class="font-medium text-sm">策略分析</div>
+            <div class="text-xs text-zinc-500">回测 · Agent · 记忆</div>
           </div>
         </div>
       </div>
@@ -112,89 +112,91 @@
           <DashView :active="currentTab === 1" />
         </div>
 
-        <!-- Test Tab -->
-        <div v-if="currentTab === 2" class="h-full overflow-auto p-6">
-          <h3 class="text-xl font-semibold mb-6">连通性测试中心</h3>
-          <div class="grid grid-cols-2 gap-6 max-w-5xl">
-            <div class="bg-zinc-900 rounded-2xl p-6">
-              <h4 class="font-semibold mb-4 flex items-center gap-2">
-                <i class="fa-solid fa-brain text-blue-400"></i> 大模型连通测试
-              </h4>
-              <div class="space-y-3">
-                <div v-for="model in testModels" :key="model.id"
-                  @click="testModel(model.id)"
-                  class="p-4 rounded-xl bg-zinc-800/50 hover:bg-zinc-800 cursor-pointer border border-transparent hover:border-zinc-700 transition-all"
-                >
-                  <div class="flex justify-between items-center">
-                    <div>
-                      <div class="font-medium text-sm">{{ model.name }}</div>
-                      <div class="text-xs text-zinc-500 mt-0.5">{{ model.provider }}</div>
-                    </div>
-                    <div :class="modelResults[model.id] ? 'text-emerald-400' : 'text-zinc-500'" class="text-sm font-medium">
-                      {{ modelResults[model.id] || '点击测试' }}
-                    </div>
-                  </div>
-                </div>
-              </div>
-            </div>
-
-            <div class="bg-zinc-900 rounded-2xl p-6">
-              <h4 class="font-semibold mb-4 flex items-center gap-2">
-                <i class="fa-solid fa-database text-emerald-400"></i> 存储层测试
-              </h4>
-              <div
-                @click="testAllDatabases()"
-                class="p-5 rounded-xl bg-zinc-800/50 hover:bg-zinc-800 cursor-pointer border border-transparent hover:border-emerald-500/30 transition-all mb-3"
-              >
-                <div class="flex justify-between items-center">
-                  <div>
-                    <div class="font-medium text-sm">全链路存储测试</div>
-                    <div class="text-xs text-zinc-500 mt-0.5">PostgreSQL · TimescaleDB · InfluxDB · Redis</div>
-                  </div>
-                  <div class="text-right">
-                    <div :class="dbStatus === 'connected' ? 'text-emerald-400' : dbStatus === 'testing' ? 'text-amber-400' : 'text-zinc-500'"
-                      class="text-lg font-semibold">
-                      {{ dbStatus === 'connected' ? '✅' : dbStatus === 'testing' ? '⏳' : '测试' }}
-                    </div>
-                  </div>
-                </div>
-              </div>
-              <div v-if="dbResults.length" class="space-y-2">
-                <div v-for="r in dbResults" :key="r.name" class="flex justify-between items-center text-sm py-1.5 border-b border-zinc-800 last:border-0">
-                  <span class="text-zinc-400">{{ r.name }}</span>
-                  <span :class="r.ok ? 'text-emerald-400' : 'text-red-400'">{{ r.ok ? '✅' : '❌' }} {{ r.msg }}</span>
-                </div>
-              </div>
-            </div>
-          </div>
-        </div>
-
-        <!-- Storage Tab -->
-        <div v-if="currentTab === 3" class="h-full flex flex-col overflow-hidden">
-          <div class="flex-shrink-0 px-6 pt-5 pb-3">
-            <h3 class="text-xl font-semibold mb-3">存储层实时状态</h3>
-            <div class="flex gap-2 mb-4">
-              <button v-for="be in backends" :key="be.key" @click="switchBackend(be.key)"
-                :class="activeBackend === be.key ? 'bg-blue-600/20 text-blue-400 border-blue-500/40' : 'bg-zinc-900 text-zinc-500 hover:text-zinc-300 border-zinc-800'"
-                class="flex items-center gap-2 px-4 py-2 rounded-xl border text-sm transition-all">
-                <i :class="be.icon" class="text-xs"></i> {{ be.label }}
-                <span class="w-1.5 h-1.5 rounded-full" :class="getBackendStatus(be.key) === 'online' ? 'bg-emerald-500' : getBackendStatus(be.key) === 'error' ? 'bg-red-500' : 'bg-amber-500'"></span>
-              </button>
-              <div class="flex-1"></div>
+        <!-- 存储层状态（含连通性测试） -->
+        <div v-if="currentTab === 2" class="h-full flex flex-col overflow-hidden">
+          <div class="flex-shrink-0 px-6 pt-5 pb-3 space-y-4">
+            <div class="flex items-center justify-between">
+              <h3 class="text-xl font-semibold">存储层状态</h3>
               <button @click="refreshAll" class="px-3 py-2 bg-zinc-900 hover:bg-zinc-800 border border-zinc-800 rounded-xl text-xs text-zinc-400 transition-colors">
                 <i class="fa-solid fa-rotate mr-1" :class="{ 'animate-spin': tablesLoading }"></i> 刷新
               </button>
             </div>
-            <div class="grid grid-cols-4 gap-2.5">
-              <div v-for="be in backends" :key="'st-'+be.key" @click="switchBackend(be.key)"
-                :class="['rounded-xl px-3.5 py-2.5 border cursor-pointer transition-all', activeBackend === be.key ? (getBackendStatus(be.key) === 'online' ? 'border-emerald-500/50 bg-emerald-500/5' : 'border-amber-500/40 bg-amber-500/5') : 'border-zinc-800 bg-zinc-900/70 hover:border-zinc-700']">
-                <div class="flex items-center justify-between mb-1">
-                  <span class="text-xs font-medium text-zinc-300">{{ be.label }}</span>
-                  <span class="text-xs" :class="getBackendStatus(be.key) === 'online' ? 'text-emerald-400' : getBackendStatus(be.key) === 'error' ? 'text-red-400' : 'text-amber-400'">
-                    {{ getBackendStatus(be.key) === 'online' ? '在线' : getBackendStatus(be.key) === 'error' ? '异常' : '离线' }}
-                  </span>
+
+            <!-- 连通性测试（合并自原独立页） -->
+            <div class="grid grid-cols-1 xl:grid-cols-2 gap-4">
+              <div class="bg-zinc-900 rounded-2xl p-4 border border-zinc-800">
+                <h4 class="font-semibold mb-3 flex items-center gap-2 text-sm">
+                  <i class="fa-solid fa-brain text-blue-400"></i> 大模型连通测试
+                </h4>
+                <div class="space-y-2">
+                  <div v-for="model in testModels" :key="model.id"
+                    @click="testModel(model.id)"
+                    class="p-3 rounded-xl bg-zinc-800/50 hover:bg-zinc-800 cursor-pointer border border-transparent hover:border-zinc-700 transition-all"
+                  >
+                    <div class="flex justify-between items-center">
+                      <div>
+                        <div class="font-medium text-sm">{{ model.name }}</div>
+                        <div class="text-xs text-zinc-500 mt-0.5">{{ model.provider }}</div>
+                      </div>
+                      <div :class="modelResults[model.id] ? 'text-emerald-400' : 'text-zinc-500'" class="text-xs font-medium">
+                        {{ modelResults[model.id] || '点击测试' }}
+                      </div>
+                    </div>
+                  </div>
                 </div>
-                <div class="text-xs text-zinc-600 truncate">{{ be.desc }}</div>
+              </div>
+
+              <div class="bg-zinc-900 rounded-2xl p-4 border border-zinc-800">
+                <h4 class="font-semibold mb-3 flex items-center gap-2 text-sm">
+                  <i class="fa-solid fa-plug text-emerald-400"></i> 存储连通测试
+                </h4>
+                <div
+                  @click="testAllDatabases()"
+                  class="p-4 rounded-xl bg-zinc-800/50 hover:bg-zinc-800 cursor-pointer border border-transparent hover:border-emerald-500/30 transition-all mb-2"
+                >
+                  <div class="flex justify-between items-center">
+                    <div>
+                      <div class="font-medium text-sm">全链路存储测试</div>
+                      <div class="text-xs text-zinc-500 mt-0.5">PostgreSQL · TimescaleDB · InfluxDB · Redis</div>
+                    </div>
+                    <div class="text-right">
+                      <div :class="dbStatus === 'connected' ? 'text-emerald-400' : dbStatus === 'testing' ? 'text-amber-400' : 'text-zinc-500'"
+                        class="text-base font-semibold">
+                        {{ dbStatus === 'connected' ? '✅' : dbStatus === 'testing' ? '⏳' : '测试' }}
+                      </div>
+                    </div>
+                  </div>
+                </div>
+                <div v-if="dbResults.length" class="space-y-1.5">
+                  <div v-for="r in dbResults" :key="r.name" class="flex justify-between items-center text-xs py-1.5 border-b border-zinc-800 last:border-0">
+                    <span class="text-zinc-400">{{ r.name }}</span>
+                    <span :class="r.ok ? 'text-emerald-400' : 'text-red-400'">{{ r.ok ? '✅' : '❌' }} {{ r.msg }}</span>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <!-- 后端在线状态卡片 -->
+            <div>
+              <div class="flex gap-2 mb-3 flex-wrap">
+                <button v-for="be in backends" :key="be.key" @click="switchBackend(be.key)"
+                  :class="activeBackend === be.key ? 'bg-blue-600/20 text-blue-400 border-blue-500/40' : 'bg-zinc-900 text-zinc-500 hover:text-zinc-300 border-zinc-800'"
+                  class="flex items-center gap-2 px-4 py-2 rounded-xl border text-sm transition-all">
+                  <i :class="be.icon" class="text-xs"></i> {{ be.label }}
+                  <span class="w-1.5 h-1.5 rounded-full" :class="getBackendStatus(be.key) === 'online' ? 'bg-emerald-500' : getBackendStatus(be.key) === 'error' ? 'bg-red-500' : 'bg-amber-500'"></span>
+                </button>
+              </div>
+              <div class="grid grid-cols-2 md:grid-cols-4 gap-2.5">
+                <div v-for="be in backends" :key="'st-'+be.key" @click="switchBackend(be.key)"
+                  :class="['rounded-xl px-3.5 py-2.5 border cursor-pointer transition-all', activeBackend === be.key ? (getBackendStatus(be.key) === 'online' ? 'border-emerald-500/50 bg-emerald-500/5' : 'border-amber-500/40 bg-amber-500/5') : 'border-zinc-800 bg-zinc-900/70 hover:border-zinc-700']">
+                  <div class="flex items-center justify-between mb-1">
+                    <span class="text-xs font-medium text-zinc-300">{{ be.label }}</span>
+                    <span class="text-xs" :class="getBackendStatus(be.key) === 'online' ? 'text-emerald-400' : getBackendStatus(be.key) === 'error' ? 'text-red-400' : 'text-amber-400'">
+                      {{ getBackendStatus(be.key) === 'online' ? '在线' : getBackendStatus(be.key) === 'error' ? '异常' : '离线' }}
+                    </span>
+                  </div>
+                  <div class="text-xs text-zinc-600 truncate">{{ be.desc }}</div>
+                </div>
               </div>
             </div>
           </div>
@@ -302,8 +304,13 @@
         </div>
 
         <!-- Market Data Tab -->
-        <div v-if="currentTab === 4" class="h-full">
+        <div v-if="currentTab === 3" class="h-full">
           <MarketDashView />
+        </div>
+
+        <!-- Strategy Analysis Tab -->
+        <div v-if="currentTab === 4" class="flex-1 min-h-0 overflow-hidden">
+          <StrategyView />
         </div>
       </div>
     </div>
@@ -316,11 +323,12 @@ import axios from 'axios'
 import ChatView from './ChatView.vue'
 import DashView from './DashView.vue'
 import MarketDashView from './MarketDashView.vue'
+import StrategyView from './StrategyView.vue'
 
 const currentTab = ref(1)
 
-const tabTitles = ['大模型对话', '行情看板', '连通性测试', '存储层状态', '行情中心']
-const tabSubtitles = ['DeepSeek · GPT · Claude', 'K线 · MA · MACD · RSI', '模型 & 数据库', '数据表 · 内容预览', '全市场 · 30张表']
+const tabTitles = ['大模型对话', '行情看板', '存储层状态', '行情中心', '策略分析']
+const tabSubtitles = ['DeepSeek · GPT · Claude', 'K线 · MA · MACD · RSI', '连通测试 · 数据预览', '全市场 · 30张表', '模式A/B · 回测 · 记忆']
 
 const testModels = [
   { id: 'deepseek-chat', name: 'DeepSeek Chat', provider: 'deepseek' },

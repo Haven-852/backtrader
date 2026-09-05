@@ -1,48 +1,149 @@
-# Yuxi Vue3 Agent Platform 一键启动脚本
-# 所有服务运行在 Docker 容器中
+# start-all.ps1
+# Check docker-compose containers, then start local frontend + backend.
+# ASCII-only: avoids PowerShell 5.x UTF-8 without BOM parse issues.
 
-Write-Host "🚀 启动 语析 · Yuxi Backtrader Agent Platform (Vue3版)" -ForegroundColor Cyan
+$ErrorActionPreference = "Continue"
+$ProjectRoot = $PSScriptRoot
+if (-not $ProjectRoot) { $ProjectRoot = Get-Location | Select-Object -ExpandProperty Path }
+Set-Location $ProjectRoot
+
 Write-Host "=============================================================" -ForegroundColor Cyan
+Write-Host "  AIquant Backtrader - start-all" -ForegroundColor Cyan
+Write-Host "=============================================================" -ForegroundColor Cyan
+Write-Host "ProjectRoot: $ProjectRoot" -ForegroundColor Gray
+Write-Host ""
 
-# 检查 Docker 是否运行
-try {
-    docker info | Out-Null
-    Write-Host "✅ Docker 引擎运行正常" -ForegroundColor Green
-} catch {
-    Write-Host "❌ Docker 未运行！请先启动 Docker Desktop" -ForegroundColor Red
-    exit 1
+# Containers from docker-compose.yml (container_name)
+# Local FE/BE do not need compose frontend/backend/nginx; still report them.
+$Containers = @(
+    @{ Name = "backtrader-postgres";   Service = "postgres";   Need = $true;  Port = "15432" },
+    @{ Name = "backtrader-redis";      Service = "redis";      Need = $true;  Port = "16379" },
+    @{ Name = "backtrader-influxdb";   Service = "influxdb";   Need = $true;  Port = "8086" },
+    @{ Name = "backtrader-minio";      Service = "minio";      Need = $true;  Port = "9000/9001" },
+    @{ Name = "backtrader-clickhouse"; Service = "clickhouse"; Need = $false; Port = "18123" },
+    @{ Name = "backtrader-frontend";   Service = "frontend";   Need = $false; Port = "5173(docker)" },
+    @{ Name = "backtrader-backend";    Service = "backend";    Need = $false; Port = "8000(docker)" },
+    @{ Name = "backtrader-nginx";      Service = "nginx";      Need = $false; Port = "8080" }
+)
+
+function Test-DockerEngine {
+    try {
+        docker info 2>$null | Out-Null
+        if ($LASTEXITCODE -ne 0) { return $false }
+        return $true
+    } catch {
+        return $false
+    }
 }
 
-# 确保数据目录存在
-if (-not (Test-Path "data\influxdb")) {
-    New-Item -ItemType Directory -Path "data\influxdb" -Force | Out-Null
-    Write-Host "📁 创建数据目录" -ForegroundColor Yellow
+function Get-ContainerState([string]$Name) {
+    # Returns: running | exited | missing | unknown
+    try {
+        $status = docker inspect -f "{{.State.Status}}" $Name 2>$null
+        if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($status)) {
+            return "missing"
+        }
+        return $status.Trim()
+    } catch {
+        return "unknown"
+    }
 }
 
-Write-Host "`n📦 构建并启动所有容器 (Frontend + Backend + Storage)..." -ForegroundColor Yellow
-Write-Host "这可能需要几分钟来下载镜像..." -ForegroundColor Gray
+# ----- 1) Docker + container check -----
+Write-Host "[1/3] Check Docker containers (docker-compose.yml)" -ForegroundColor Yellow
+Write-Host ""
 
-# 启动所有服务
-docker compose up -d --build
+$dockerOk = Test-DockerEngine
+if (-not $dockerOk) {
+    Write-Host "  [WARN] Docker engine is NOT running (or docker CLI missing)." -ForegroundColor Red
+    Write-Host "         Start Docker Desktop if you need Postgres/Redis/etc." -ForegroundColor Gray
+    Write-Host "         Will still start frontend + backend." -ForegroundColor Gray
+    Write-Host ""
+} else {
+    Write-Host "  [OK] Docker engine is running" -ForegroundColor Green
+    Write-Host ""
+    Write-Host ("  {0,-26} {1,-12} {2,-10} {3}" -f "CONTAINER", "SERVICE", "NEED", "STATUS") -ForegroundColor DarkGray
+    Write-Host ("  {0,-26} {1,-12} {2,-10} {3}" -f ("-" * 26), ("-" * 12), ("-" * 10), ("-" * 18)) -ForegroundColor DarkGray
 
-Write-Host "`n⏳ 等待服务启动 (10秒)..." -ForegroundColor Yellow
-Start-Sleep -Seconds 10
+    $needDown = @()
+    foreach ($c in $Containers) {
+        $state = if ($dockerOk) { Get-ContainerState $c.Name } else { "unknown" }
+        $needTag = if ($c.Need) { "yes" } else { "optional" }
 
-Write-Host "`n📊 服务状态:" -ForegroundColor Cyan
-docker compose ps
+        if ($state -eq "running") {
+            Write-Host ("  {0,-26} {1,-12} {2,-10} " -f $c.Name, $c.Service, $needTag) -NoNewline
+            Write-Host ("already running  (port {0})" -f $c.Port) -ForegroundColor Green
+        } elseif ($state -eq "missing") {
+            Write-Host ("  {0,-26} {1,-12} {2,-10} " -f $c.Name, $c.Service, $needTag) -NoNewline
+            Write-Host ("NOT started       (port {0})" -f $c.Port) -ForegroundColor $(if ($c.Need) { "Red" } else { "DarkYellow" })
+            if ($c.Need) { $needDown += $c.Service }
+        } else {
+            Write-Host ("  {0,-26} {1,-12} {2,-10} " -f $c.Name, $c.Service, $needTag) -NoNewline
+            Write-Host ("$state            (port {0})" -f $c.Port) -ForegroundColor Yellow
+            if ($c.Need) { $needDown += $c.Service }
+        }
+    }
 
-Write-Host "`n🌐 访问地址:" -ForegroundColor Green
-Write-Host "  前端 (Vue3)     : http://localhost:5173" -ForegroundColor White
-Write-Host "  生产前端 (Nginx): http://localhost:8080" -ForegroundColor White
-Write-Host "  后端 API         : http://localhost:8000" -ForegroundColor White
-Write-Host "  API 文档         : http://localhost:8000/docs" -ForegroundColor White
-Write-Host "  InfluxDB         : http://localhost:8086" -ForegroundColor White
-Write-Host "  MinIO Console    : http://localhost:9001 (user: quant, pass: backtrader123)" -ForegroundColor White
+    Write-Host ""
+    if ($needDown.Count -gt 0) {
+        Write-Host "  [INFO] Required storage containers not running: $($needDown -join ', ')" -ForegroundColor Yellow
+        Write-Host "         Tip: docker compose up -d $($needDown -join ' ')" -ForegroundColor Gray
+    } else {
+        Write-Host "  [OK] All required storage containers are running" -ForegroundColor Green
+    }
+    Write-Host ""
+}
 
-Write-Host "`n✅ 启动完成！" -ForegroundColor Green
-Write-Host "   Vue3 前端已完全替代旧版 HTML，实现智能体对话、连通性测试、全容器化运行。" -ForegroundColor Gray
-Write-Host "`n💡 使用方法：" -ForegroundColor Cyan
-Write-Host "   1. 打开 http://localhost:5173" -ForegroundColor White
-Write-Host "   2. 点击「一键测试全部」验证连通性" -ForegroundColor White
-Write-Host "   3. 在对话框中输入交易相关问题" -ForegroundColor White
-Write-Host "`n📖 详细文档请查看: doc\Vue3-Yuxi-Frontend-容器化部署.md" -ForegroundColor Gray
+# ----- 2) Backend -----
+Write-Host "[2/3] Start backend (FastAPI :8000)" -ForegroundColor Yellow
+$BackendScript = Join-Path $ProjectRoot "start-backend.ps1"
+if (-not (Test-Path $BackendScript)) {
+    Write-Host "  [ERROR] start-backend.ps1 not found" -ForegroundColor Red
+} else {
+    Start-Process powershell -WorkingDirectory $ProjectRoot -ArgumentList @(
+        "-NoExit",
+        "-ExecutionPolicy", "Bypass",
+        "-File", $BackendScript
+    )
+    Write-Host "  [OK] Backend window opened -> http://localhost:8000" -ForegroundColor Green
+    Write-Host "       Docs: http://localhost:8000/docs" -ForegroundColor Gray
+}
+Write-Host ""
+
+# ----- 3) Frontend -----
+Write-Host "[3/3] Start frontend (Vite :5173)" -ForegroundColor Yellow
+$WebDir = Join-Path $ProjectRoot "web"
+if (-not (Test-Path $WebDir)) {
+    Write-Host "  [ERROR] web/ directory not found" -ForegroundColor Red
+} else {
+    $NodeModules = Join-Path $WebDir "node_modules"
+    $feCmd = @"
+Set-Location '$WebDir'
+Write-Host '=== Frontend (Vite) ===' -ForegroundColor Cyan
+if (-not (Test-Path 'node_modules')) {
+  Write-Host 'npm install ...' -ForegroundColor Yellow
+  npm install
+}
+Write-Host 'npm run dev ...' -ForegroundColor Cyan
+npm run dev
+"@
+    Start-Process powershell -WorkingDirectory $WebDir -ArgumentList @(
+        "-NoExit",
+        "-ExecutionPolicy", "Bypass",
+        "-Command", $feCmd
+    )
+    if (Test-Path $NodeModules) {
+        Write-Host "  [OK] Frontend window opened (node_modules present)" -ForegroundColor Green
+    } else {
+        Write-Host "  [OK] Frontend window opened (will npm install then npm run dev)" -ForegroundColor Green
+    }
+    Write-Host "       UI: http://localhost:5173" -ForegroundColor Gray
+}
+
+Write-Host ""
+Write-Host "=============================================================" -ForegroundColor Cyan
+Write-Host "  Done. Two new windows: backend + frontend." -ForegroundColor Green
+Write-Host "  Frontend : http://localhost:5173" -ForegroundColor White
+Write-Host "  Backend  : http://localhost:8000" -ForegroundColor White
+Write-Host "  API Docs : http://localhost:8000/docs" -ForegroundColor White
+Write-Host "=============================================================" -ForegroundColor Cyan
