@@ -64,6 +64,7 @@ from routers.dash_router import router as dash_router
 from routers.storage_router import router as storage_router
 from routers.skill_router import router as skill_router
 from routers.market_data_router import router as market_data_router
+from routers.strategy_router import router as strategy_router
 
 app.include_router(system_router)          # /, /health, /agents
 app.include_router(chat_router)            # /chat/*
@@ -72,6 +73,7 @@ app.include_router(dash_router)            # /dash/*
 app.include_router(storage_router)         # /storage/*
 app.include_router(skill_router)           # /skills/*
 app.include_router(market_data_router)     # /market/*
+app.include_router(strategy_router)        # /strategy/*
 
 # ─── 启动日志 ─────────────────────────────────────────
 

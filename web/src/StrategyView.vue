@@ -25,13 +25,24 @@
           </button>
         </div>
 
-        <label class="flex items-center gap-1.5 text-xs text-zinc-400 cursor-pointer select-none">
-          <input v-model="lookbackGuard" type="checkbox" class="rounded border-zinc-600 bg-zinc-800 text-emerald-500" />
-          前视保护 lookback_guard
-        </label>
-        <label class="flex items-center gap-1.5 text-xs text-zinc-400 cursor-pointer select-none">
-          <input v-model="useWalkForward" type="checkbox" class="rounded border-zinc-600 bg-zinc-800 text-amber-500" />
-          Walk-Forward
+        <label
+          v-for="opt in backtestOptions"
+          :key="opt.key"
+          class="flex items-center gap-1.5 text-xs text-zinc-400 cursor-pointer select-none"
+          :title="opt.description || opt.ui_hint || ''"
+        >
+          <input
+            v-model="optionValues[opt.key]"
+            type="checkbox"
+            class="rounded border-zinc-600 bg-zinc-800"
+            :class="opt.key === 'lookback_guard' ? 'text-emerald-500' : 'text-amber-500'"
+          />
+          <span>{{ opt.label }}</span>
+          <span class="text-zinc-600 font-mono text-[10px]">{{ opt.label_en }}</span>
+          <span
+            v-if="opt.recommended"
+            class="text-[9px] px-1 rounded bg-emerald-500/15 text-emerald-400"
+          >推荐</span>
         </label>
 
         <div class="flex-1"></div>
@@ -104,9 +115,18 @@
       <aside class="w-64 flex-shrink-0 border-r border-zinc-800 bg-zinc-900/40 flex flex-col min-h-0">
         <div class="px-3 py-2.5 border-b border-zinc-800 flex items-center justify-between">
           <span class="text-xs font-semibold text-zinc-300">策略工具箱</span>
-          <span class="text-[10px] text-zinc-500">{{ strategies.length }} 种</span>
+          <span class="text-[10px] text-zinc-500">
+            {{ catalogLoading ? '加载中…' : `${strategies.length} 种` }}
+          </span>
+        </div>
+        <div v-if="catalogError" class="px-3 py-2 text-[10px] text-red-400 border-b border-zinc-800">
+          {{ catalogError }}
+          <button @click="loadCatalog" class="ml-2 underline text-sky-400">重试</button>
         </div>
         <div class="flex-1 overflow-y-auto p-2 space-y-1.5 scrollbar-thin">
+          <div v-if="catalogLoading && !strategies.length" class="text-[10px] text-zinc-500 px-2 py-4 text-center">
+            <i class="fa-solid fa-spinner animate-spin mr-1"></i>从后端拉取策略目录…
+          </div>
           <div
             v-for="s in strategies"
             :key="s.id"
@@ -146,9 +166,25 @@
           <template v-if="mainTab === 'setup'">
             <div class="grid grid-cols-1 lg:grid-cols-2 gap-4">
               <div class="bg-zinc-900 rounded-2xl border border-zinc-800 p-4 space-y-3">
-                <h4 class="text-xs font-semibold text-zinc-300 flex items-center gap-2">
-                  <i class="fa-solid fa-eye text-sky-400"></i> 数据与感知
-                </h4>
+                <div class="flex items-center justify-between gap-2">
+                  <h4 class="text-xs font-semibold text-zinc-300 flex items-center gap-2">
+                    <i class="fa-solid fa-eye text-sky-400"></i> 数据与感知
+                    <span
+                      class="text-[10px] px-1.5 py-0.5 rounded font-normal"
+                      :class="perceiveOk ? 'bg-emerald-500/15 text-emerald-400' : perceiveError ? 'bg-red-500/15 text-red-400' : 'bg-zinc-800 text-zinc-500'"
+                    >
+                      {{ perceiveOk ? 'PostgreSQL 真实数据' : perceiveError ? '读取失败' : '未加载' }}
+                    </span>
+                  </h4>
+                  <button
+                    @click="loadPerceive"
+                    :disabled="perceiveLoading"
+                    class="px-2.5 py-1 rounded-lg text-[10px] bg-sky-600/20 text-sky-300 border border-sky-500/30 hover:bg-sky-600/30 disabled:opacity-50"
+                  >
+                    <i class="fa-solid fa-database mr-1" :class="{ 'fa-spinner animate-spin': perceiveLoading }"></i>
+                    {{ perceiveLoading ? '读取中' : '读取真实行情' }}
+                  </button>
+                </div>
                 <div class="grid grid-cols-2 gap-2">
                   <div>
                     <label class="text-[10px] text-zinc-500 block mb-1">标的代码</label>
@@ -185,7 +221,70 @@
                     {{ f.label }}
                   </label>
                 </div>
-                <div v-if="state.regime" class="text-xs text-zinc-400 bg-zinc-800/50 rounded-lg px-3 py-2">
+
+                <div v-if="perceiveError" class="text-xs text-red-400 bg-red-500/10 border border-red-500/20 rounded-lg px-3 py-2">
+                  {{ perceiveError }}
+                </div>
+
+                <div v-if="perceiveData" class="space-y-2">
+                  <div class="text-xs text-zinc-300 bg-zinc-800/50 rounded-lg px-3 py-2 space-y-1">
+                    <div>
+                      <span class="text-zinc-500">标的</span>
+                      {{ perceiveData.name }} <span class="font-mono text-zinc-400">{{ perceiveData.ts_code }}</span>
+                    </div>
+                    <div>
+                      <span class="text-zinc-500">库内区间</span>
+                      {{ perceiveData.date_range?.start }} → {{ perceiveData.date_range?.end }}
+                      · {{ perceiveData.bar_count }} 根K线
+                    </div>
+                    <div>
+                      <span class="text-zinc-500">最新</span>
+                      {{ perceiveData.latest?.trade_date }}
+                      收 {{ perceiveData.latest?.close }}
+                      <span :class="(perceiveData.latest?.pct_chg ?? 0) >= 0 ? 'text-red-400' : 'text-green-400'">
+                        {{ (perceiveData.latest?.pct_chg ?? 0) >= 0 ? '+' : '' }}{{ perceiveData.latest?.pct_chg }}%
+                      </span>
+                    </div>
+                    <div>
+                      <span class="text-zinc-500">市况</span>
+                      <span class="text-amber-300 font-medium">{{ perceiveData.regime?.label || state.regime }}</span>
+                      <span class="text-zinc-600 ml-2">{{ perceiveData.regime?.detail }}</span>
+                    </div>
+                  </div>
+
+                  <div v-if="featureEntries.length" class="grid grid-cols-2 gap-1.5">
+                    <div v-for="[k, v] in featureEntries" :key="k" class="bg-zinc-950/50 border border-zinc-800 rounded-lg px-2 py-1.5">
+                      <div class="text-[9px] text-zinc-500">{{ k }}</div>
+                      <div class="text-xs tabular-nums text-zinc-200">{{ v ?? '-' }}</div>
+                    </div>
+                  </div>
+
+                  <div v-if="perceiveData.bars_preview?.length" class="border border-zinc-800 rounded-xl overflow-hidden">
+                    <div class="px-2 py-1.5 text-[10px] text-zinc-500 border-b border-zinc-800">最近 {{ perceiveData.bars_preview.length }} 日（PostgreSQL）</div>
+                    <div class="max-h-40 overflow-auto">
+                      <table class="w-full text-[10px]">
+                        <thead class="sticky top-0 bg-zinc-900">
+                          <tr class="text-zinc-500 border-b border-zinc-800">
+                            <th class="text-left py-1 px-2">日期</th>
+                            <th class="text-right py-1 px-2">收盘</th>
+                            <th class="text-right py-1 px-2">涨跌%</th>
+                            <th class="text-right py-1 px-2">成交量</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          <tr v-for="b in [...perceiveData.bars_preview].reverse()" :key="b.trade_date" class="border-b border-zinc-800/40">
+                            <td class="py-1 px-2 text-zinc-400">{{ b.trade_date }}</td>
+                            <td class="py-1 px-2 text-right tabular-nums">{{ b.close }}</td>
+                            <td class="py-1 px-2 text-right tabular-nums" :class="(b.pct_chg ?? 0) >= 0 ? 'text-red-400' : 'text-green-400'">{{ b.pct_chg }}</td>
+                            <td class="py-1 px-2 text-right tabular-nums text-zinc-500">{{ b.vol }}</td>
+                          </tr>
+                        </tbody>
+                      </table>
+                    </div>
+                  </div>
+                </div>
+
+                <div v-else-if="state.regime" class="text-xs text-zinc-400 bg-zinc-800/50 rounded-lg px-3 py-2">
                   当前识别状态：<span class="text-amber-300 font-medium">{{ regimeLabel(state.regime) }}</span>
                   <span class="text-zinc-600 ml-2">{{ state.analysisNote }}</span>
                 </div>
@@ -248,10 +347,31 @@
             </div>
             <template v-else>
               <div class="flex items-center gap-2 text-[10px] mb-1">
-                <span :class="backtestResult.lookback_ok ? 'text-emerald-400' : 'text-red-400'" class="px-2 py-0.5 rounded bg-zinc-800">
+                <span
+                  v-if="backtestResult.options_applied?.lookback_guard"
+                  :class="backtestResult.options_applied.lookback_guard.enabled ? 'text-emerald-400' : 'text-red-400'"
+                  class="px-2 py-0.5 rounded bg-zinc-800"
+                  :title="backtestResult.options_applied.lookback_guard.detail"
+                >
+                  {{ backtestResult.options_applied.lookback_guard.label }}:
+                  {{ backtestResult.options_applied.lookback_guard.status }}
+                </span>
+                <span
+                  v-else
+                  :class="backtestResult.lookback_ok ? 'text-emerald-400' : 'text-red-400'"
+                  class="px-2 py-0.5 rounded bg-zinc-800"
+                >
                   lookback_guard: {{ backtestResult.lookback_ok ? '通过' : '拦截' }}
                 </span>
-                <span v-if="backtestResult.walk_forward" class="text-amber-400 px-2 py-0.5 rounded bg-zinc-800">Walk-Forward 已启用</span>
+                <span
+                  v-if="backtestResult.options_applied?.walk_forward"
+                  class="text-amber-400 px-2 py-0.5 rounded bg-zinc-800"
+                  :title="backtestResult.options_applied.walk_forward.detail"
+                >
+                  {{ backtestResult.options_applied.walk_forward.label }}:
+                  {{ backtestResult.options_applied.walk_forward.status }}
+                </span>
+                <span v-else-if="backtestResult.walk_forward" class="text-amber-400 px-2 py-0.5 rounded bg-zinc-800">Walk-Forward 已启用</span>
                 <span class="text-zinc-600">{{ backtestResult.strategy_name }} · {{ backtestResult.ts_code }}</span>
               </div>
               <div class="grid grid-cols-2 md:grid-cols-3 xl:grid-cols-6 gap-2">
@@ -388,8 +508,19 @@ import * as echarts from 'echarts'
 const MEMORY_KEY = 'strategy_analysis_memory_v1'
 
 const runMode = ref<'A' | 'B'>('A')
-const lookbackGuard = ref(true)
-const useWalkForward = ref(false)
+const lookbackGuard = computed({
+  get: () => !!optionValues.lookback_guard,
+  set: (v: boolean) => { optionValues.lookback_guard = v },
+})
+const useWalkForward = computed({
+  get: () => !!optionValues.walk_forward,
+  set: (v: boolean) => { optionValues.walk_forward = v },
+})
+const backtestOptions = ref<any[]>([])
+const optionValues = reactive<Record<string, boolean>>({
+  lookback_guard: true,
+  walk_forward: false,
+})
 const running = ref(false)
 const stopAuto = ref(false)
 const mainTab = ref<'setup' | 'backtest' | 'memory' | 'logs'>('setup')
@@ -407,91 +538,74 @@ const cycleNodes = [
   { id: 'reflect', label: '反思' },
 ]
 
-const strategies = [
-  {
-    id: 'dual_ma',
-    name: '双均线动量',
-    category: '动量',
-    desc: '快线上穿慢线买入，下穿卖出。',
-    suitable_regime: 'trend_up / trend_down',
-    logic: '信号：MA_fast 上穿 MA_slow → 多；下穿 → 平仓。适合趋势市。',
-    params: [
-      { name: 'fast', label: '快线周期', min: 2, max: 60, step: 1, default: 5 },
-      { name: 'slow', label: '慢线周期', min: 5, max: 200, step: 1, default: 20 },
-    ],
-  },
-  {
-    id: 'mean_reversion',
-    name: '均值回归',
-    category: '均值回归',
-    desc: '价格偏离均线过大后反向交易。',
-    suitable_regime: 'range',
-    logic: '偏离度 = (close-MA)/MA；低于 -z 买入，高于 +z 卖出。',
-    params: [
-      { name: 'window', label: '均线窗口', min: 5, max: 120, default: 20 },
-      { name: 'z', label: '偏离阈值%', min: 1, max: 15, step: 0.5, default: 3 },
-    ],
-  },
-  {
-    id: 'rsi_revert',
-    name: 'RSI 超买超卖',
-    category: '均值回归',
-    desc: 'RSI 超卖买入、超买卖出。',
-    suitable_regime: 'range',
-    logic: 'RSI < oversold 开多；RSI > overbought 平仓。',
-    params: [
-      { name: 'period', label: 'RSI 周期', min: 5, max: 30, default: 14 },
-      { name: 'oversold', label: '超卖', min: 10, max: 40, default: 30 },
-      { name: 'overbought', label: '超买', min: 60, max: 90, default: 70 },
-    ],
-  },
-  {
-    id: 'breakout',
-    name: '通道突破',
-    category: '突破',
-    desc: '突破 N 日最高价做多。',
-    suitable_regime: 'trend_up',
-    logic: '收盘价 > 近 N 日最高 → 买入；跌破近 M 日最低 → 卖出。',
-    params: [
-      { name: 'entry_n', label: '突破窗口', min: 5, max: 60, default: 20 },
-      { name: 'exit_n', label: '退出窗口', min: 3, max: 40, default: 10 },
-    ],
-  },
-  {
-    id: 'vol_filter',
-    name: '波动率过滤',
-    category: '过滤',
-    desc: '高波动时降仓或空仓，可与主策略组合。',
-    suitable_regime: 'high_vol（规避）',
-    logic: '波动分位 > 阈值则禁止开仓，仅允许减仓。',
-    params: [
-      { name: 'vol_window', label: '波动窗口', min: 10, max: 60, default: 20 },
-      { name: 'pctile', label: '分位阈值', min: 50, max: 95, default: 80 },
-    ],
-  },
-  {
-    id: 'short_swing',
-    name: '短线心得规则包',
-    category: '规则',
-    desc: '基于短线炒股心得的轮动与风控规则（示意）。',
-    suitable_regime: '轮动市',
-    logic: '隔夜浮盈减仓、均线上方卖出、中间时段只卖不买等规则组合（演示版用简化信号）。',
-    params: [
-      { name: 'take_half', label: '隔夜减仓%', min: 30, max: 70, default: 50 },
-      { name: 'max_hold_days', label: '最长持仓天', min: 1, max: 10, default: 3 },
-    ],
-  },
-]
-
-const selectedStrategy = ref<any>(strategies[0])
+const strategies = ref<any[]>([])
+const catalogLoading = ref(false)
+const catalogError = ref('')
+const selectedStrategy = ref<any>(null)
 const paramValues = reactive<Record<string, number>>({})
 
 function selectStrategy(s: any) {
   selectedStrategy.value = s
-  for (const p of s.params) paramValues[p.name] = p.default
+  for (const key of Object.keys(paramValues)) delete paramValues[key]
+  for (const p of s.params || []) paramValues[p.name] = p.default
 }
 
-selectStrategy(strategies[0])
+function strategyFitsRegime(s: any, regime: string) {
+  if (!regime) return false
+  const list: string[] = s.suitable_regimes
+  if (Array.isArray(list) && list.length) return list.includes(regime)
+  return String(s.suitable_regime || '').includes(regime)
+}
+
+async function loadCatalog() {
+  catalogLoading.value = true
+  catalogError.value = ''
+  try {
+    const res = await fetch('/strategy/catalog')
+    const data = await res.json().catch(() => ({}))
+    if (!res.ok) throw new Error(data.detail || `HTTP ${res.status}`)
+    strategies.value = data.strategies || []
+    if (!selectedStrategy.value && strategies.value.length) {
+      selectStrategy(strategies.value[0])
+    } else if (selectedStrategy.value) {
+      const fresh = strategies.value.find((s: any) => s.id === selectedStrategy.value.id)
+      if (fresh) selectStrategy(fresh)
+    }
+    pushLog(`[目录] 已从后端加载 ${strategies.value.length} 种策略`, 'ok')
+  } catch (e: any) {
+    catalogError.value = e?.message || String(e)
+    pushLog(`[目录] 加载失败: ${catalogError.value}`, 'error')
+  } finally {
+    catalogLoading.value = false
+  }
+}
+
+async function loadOptions() {
+  try {
+    const res = await fetch('/strategy/options')
+    const data = await res.json().catch(() => ({}))
+    if (!res.ok) throw new Error(data.detail || `HTTP ${res.status}`)
+    backtestOptions.value = data.options || []
+    const defaults = data.defaults || {}
+    for (const [k, v] of Object.entries(defaults)) {
+      optionValues[k] = !!v
+    }
+    // 若后端尚未返回选项，保留本地兜底两项
+    if (!backtestOptions.value.length) {
+      backtestOptions.value = [
+        { key: 'lookback_guard', label: '前视保护', label_en: 'lookback_guard', default: true, recommended: true, description: '次日开盘成交，避免前视' },
+        { key: 'walk_forward', label: 'Walk-Forward', label_en: 'walk_forward', default: false, description: '滚动样本外检验' },
+      ]
+    }
+    pushLog(`[选项] 已加载回测开关：${backtestOptions.value.map((o: any) => o.label).join('、')}`, 'ok')
+  } catch (e: any) {
+    backtestOptions.value = [
+      { key: 'lookback_guard', label: '前视保护', label_en: 'lookback_guard', default: true, recommended: true, description: '次日开盘成交，避免前视' },
+      { key: 'walk_forward', label: 'Walk-Forward', label_en: 'walk_forward', default: false, description: '滚动样本外检验' },
+    ]
+    pushLog(`[选项] 拉取失败，使用本地兜底: ${e?.message || e}`, 'error')
+  }
+}
 
 const config = reactive({
   tsCode: '000001.SZ',
@@ -532,6 +646,17 @@ const backtestResult = ref<any>(null)
 const memories = ref<any[]>(loadMemories())
 const equityChartEl = ref<HTMLDivElement>()
 let equityChart: any = null
+
+const perceiveLoading = ref(false)
+const perceiveData = ref<any>(null)
+const perceiveError = ref('')
+const perceiveOk = computed(() => !!perceiveData.value?.ok)
+
+const featureEntries = computed(() => {
+  const f = perceiveData.value?.features
+  if (!f || typeof f !== 'object') return []
+  return Object.entries(f)
+})
 
 const stepButtonLabel = computed(() => {
   const order = ['analyze', 'hypothesize', 'backtest', 'reflect']
@@ -616,137 +741,197 @@ function sleep(ms: number) {
   return new Promise(r => setTimeout(r, ms))
 }
 
-/** 演示用：本地模拟分析/回测（后续可接真实 backtrader API） */
-function mockAnalyze() {
-  const regimes = ['trend_up', 'range', 'high_vol', 'trend_down']
-  const regime = regimes[Math.floor(Math.random() * regimes.length)]
-  state.regime = regime
-  state.analysisNote = `标的 ${config.tsCode}，特征 ${featureToggles.filter(f => f.enabled).map(f => f.label).join('+') || '无'}`
+async function loadPerceive() {
+  perceiveLoading.value = true
+  perceiveError.value = ''
+  try {
+    const feats = featureToggles.filter(f => f.enabled).map(f => f.id).join(',') || 'ma,rsi,vol_pctile'
+    const params = new URLSearchParams({
+      ts_code: config.tsCode.trim(),
+      limit: '500',
+      vol_window: String(config.volWindow || 20),
+      features: feats,
+    })
+    if (config.start) params.set('start', config.start)
+    if (config.end) params.set('end', config.end)
+    const res = await fetch(`/strategy/perceive?${params}`)
+    const data = await res.json().catch(() => ({}))
+    if (!res.ok) {
+      perceiveData.value = null
+      perceiveError.value = data.detail || `HTTP ${res.status}`
+      pushLog(`[感知] 失败: ${perceiveError.value}`, 'error')
+      return null
+    }
+    perceiveData.value = data
+    if (data.regime?.regime) {
+      state.regime = data.regime.regime
+      state.analysisNote = data.regime.detail || `${data.name} ${data.bar_count} bars`
+    }
+    // 用库内实际区间回填日期（便于后续回测）
+    if (data.date_range?.start) config.start = data.date_range.start
+    if (data.date_range?.end) config.end = data.date_range.end
+    pushLog(
+      `[感知] PostgreSQL · ${data.name}(${data.ts_code}) · ${data.bar_count}根 · ${data.regime?.label} · 最新${data.latest?.trade_date} 收${data.latest?.close}`,
+      'ok'
+    )
+    return data
+  } catch (e: any) {
+    perceiveData.value = null
+    perceiveError.value = e?.message || String(e)
+    pushLog(`[感知] 异常: ${perceiveError.value}`, 'error')
+    return null
+  } finally {
+    perceiveLoading.value = false
+  }
+}
+
+/** 分析：调用后端感知（PostgreSQL） */
+async function runAnalyze() {
+  const data = perceiveData.value?.ok ? perceiveData.value : await loadPerceive()
+  if (data?.ok) {
+    state.regime = data.regime?.regime || 'unknown'
+    state.analysisNote =
+      data.regime?.detail ||
+      标的 ()，特征 
+    state.step = 'analyze'
+    if (!state.completed.includes('analyze')) state.completed.push('analyze')
+    pushLog([分析] 后端感知 regime= · , 'ok')
+    return true
+  }
+  state.regime = 'unknown'
+  state.analysisNote = perceiveError.value || '未能读取 PostgreSQL 行情'
   state.step = 'analyze'
   if (!state.completed.includes('analyze')) state.completed.push('analyze')
-  pushLog(`[分析] regime=${regime} · ${state.analysisNote}`, 'ok')
+  pushLog([分析] 失败 — , 'error')
+  return false
 }
 
-function mockHypothesize() {
-  if (!selectedStrategy.value) return
-  // 按 regime 简单推荐
-  const s = selectedStrategy.value
-  const fit = s.suitable_regime.includes(state.regime) || state.regime === 'range'
-  state.hypothesis = fit
-    ? `市况 ${regimeLabel(state.regime)} 与「${s.name}」匹配，采用默认/当前参数验证。`
-    : `市况 ${regimeLabel(state.regime)} 与「${s.name}」不完全匹配，仍回测以对比记忆库。`
-  state.step = 'hypothesize'
-  if (!state.completed.includes('hypothesize')) state.completed.push('hypothesize')
-  pushLog(`[假设] ${state.hypothesis}`, 'ok')
-}
-
-function mockBacktest() {
-  if (lookbackGuard.value === false) {
-    pushLog('[回测] lookback_guard 已关闭 — 结果仅供演示，存在前视风险', 'error')
+/** 假设：POST /strategy/hypothesize */
+async function runHypothesize() {
+  if (!selectedStrategy.value) {
+    pushLog('[假设] 请先选择策略', 'error')
+    return false
   }
-
-  const seed = (selectedStrategy.value?.id?.length || 1) + config.cash / 1e5
-  const total_return = Number((((seed * 17) % 40) - 12) / 100)
-  const max_drawdown = -Math.abs(Number((((seed * 9) % 18) + 5) / 100))
-  const sharpe = Number((((seed * 3) % 25) / 10 - 0.3).toFixed(2))
-  const win_rate = Number((0.35 + (seed % 7) / 20).toFixed(2))
-  const trade_count = 8 + Math.floor(seed % 20)
-  const alpha = Number((total_return - 0.05).toFixed(4))
-
-  const equity = []
-  let v = 1
-  for (let i = 0; i < 80; i++) {
-    v *= 1 + (Math.sin(i / 5 + seed) * 0.008 + total_return / 80)
-    equity.push(Number(v.toFixed(4)))
-  }
-
-  const trades = []
-  for (let i = 0; i < Math.min(trade_count, 12); i++) {
-    const buy = i % 2 === 0
-    trades.push({
-      date: `2025-${String((i % 12) + 1).padStart(2, '0')}-${String((i % 27) + 1).padStart(2, '0')}`,
-      side: buy ? '买入' : '卖出',
-      price: (10 + (i * 1.3) % 5).toFixed(2),
-      size: 100 * (1 + (i % 5)),
-      pnl: buy ? null : Number((((i * 7) % 17) - 6).toFixed(2)),
+  try {
+    const res = await fetch('/strategy/hypothesize', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        strategy_id: selectedStrategy.value.id,
+        regime: state.regime || 'unknown',
+        params: { ...paramValues },
+      }),
     })
+    const data = await res.json().catch(() => ({}))
+    if (!res.ok) throw new Error(data.detail || HTTP )
+    state.hypothesis = data.hypothesis
+    if (data.suggested_strategy && runMode.value === 'B') {
+      const better = strategies.value.find((s) => s.id === data.suggested_strategy.id)
+      if (better) {
+        selectStrategy(better)
+        pushLog([假设] 后端建议切换 → , 'ok')
+      }
+    }
+    state.step = 'hypothesize'
+    if (!state.completed.includes('hypothesize')) state.completed.push('hypothesize')
+    pushLog([假设] , 'ok')
+    return true
+  } catch (e) {
+    pushLog([假设] 失败: , 'error')
+    return false
   }
-
-  let walk_forward_rows: any[] = []
-  if (useWalkForward.value) {
-    walk_forward_rows = [1, 2, 3].map(fold => ({
-      fold,
-      train_ret: Number((total_return + fold * 0.01).toFixed(4)),
-      test_ret: Number((total_return - fold * 0.015).toFixed(4)),
-      test_dd: Number((max_drawdown - fold * 0.005).toFixed(4)),
-    }))
-  }
-
-  backtestResult.value = {
-    strategy_name: selectedStrategy.value.name,
-    ts_code: config.tsCode,
-    total_return,
-    max_drawdown,
-    sharpe,
-    win_rate,
-    trade_count,
-    alpha,
-    equity,
-    trades,
-    lookback_ok: lookbackGuard.value,
-    walk_forward: useWalkForward.value,
-    walk_forward_rows,
-    params: { ...paramValues },
-  }
-
-  state.step = 'backtest'
-  if (!state.completed.includes('backtest')) state.completed.push('backtest')
-  pushLog(
-    `[回测] 收益 ${fmtPct(total_return)} · 回撤 ${fmtPct(max_drawdown)} · 夏普 ${sharpe}` +
-      (lookbackGuard.value ? ' · guard=ON' : ' · guard=OFF'),
-    lookbackGuard.value ? 'ok' : 'error'
-  )
-  mainTab.value = 'backtest'
-  nextTick(() => renderEquity())
 }
 
-function mockReflect() {
+/** 回测：POST /strategy/backtest（真实日线） */
+async function runBacktest() {
+  if (!selectedStrategy.value) {
+    pushLog('[回测] 请先选择策略', 'error')
+    return false
+  }
+  if (!lookbackGuard.value) {
+    pushLog('[回测] lookback_guard 已关闭 — 同日收盘成交，存在前视风险', 'error')
+  }
+  try {
+    const res = await fetch('/strategy/backtest', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        strategy_id: selectedStrategy.value.id,
+        ts_code: config.tsCode.trim(),
+        params: { ...paramValues },
+        start: config.start || null,
+        end: config.end || null,
+        cash: config.cash,
+        lookback_guard: lookbackGuard.value,
+        walk_forward: useWalkForward.value,
+        benchmark: config.benchmark,
+        limit: 800,
+      }),
+    })
+    const data = await res.json().catch(() => ({}))
+    if (!res.ok) {
+      const detail = typeof data.detail === 'string' ? data.detail : (data.detail ? JSON.stringify(data.detail) : HTTP )
+      throw new Error(detail)
+    }
+    backtestResult.value = data
+    state.step = 'backtest'
+    if (!state.completed.includes('backtest')) state.completed.push('backtest')
+    pushLog(
+      [回测] 后端 ·  · 收益  · 回撤  · 夏普  +
+        (data.lookback_ok ? ' · guard=ON' : ' · guard=OFF') +
+         · bars=,
+      data.lookback_ok ? 'ok' : 'error'
+    )
+    mainTab.value = 'backtest'
+    await nextTick(() => renderEquity())
+    return true
+  } catch (e) {
+    pushLog([回测] 失败: , 'error')
+    return false
+  }
+}
+
+/** 反思：POST /strategy/reflect */
+async function runReflect() {
   const r = backtestResult.value
   if (!r) {
     pushLog('[反思] 无回测结果，跳过', 'error')
-    return
+    return false
   }
-  const success =
-    r.total_return > 0 &&
-    Math.abs(r.max_drawdown) * 100 <= harness.maxDrawdownPct &&
-    r.sharpe >= harness.minSharpe
+  try {
+    const res = await fetch('/strategy/reflect', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        backtest_result: r,
+        regime: state.regime,
+        max_drawdown_pct: harness.maxDrawdownPct,
+        min_sharpe: harness.minSharpe,
+        mode: runMode.value,
+        auto_save_memory: harness.autoSaveMemory,
+      }),
+    })
+    const data = await res.json().catch(() => ({}))
+    if (!res.ok) throw new Error(data.detail || HTTP )
+    state.reflection = data.reflection
+    state.step = 'reflect'
+    if (!state.completed.includes('reflect')) state.completed.push('reflect')
+    pushLog([反思] , data.success ? 'ok' : 'error')
 
-  state.reflection = success
-    ? `策略「${r.strategy_name}」在 ${regimeLabel(state.regime)} 下达到风控阈值，可写入记忆供后续假设检索。`
-    : `未达 harness 阈值（回撤≤${harness.maxDrawdownPct}% 或 夏普≥${harness.minSharpe}）。建议换参或换策略，并记录失败案例。`
-
-  state.step = 'reflect'
-  if (!state.completed.includes('reflect')) state.completed.push('reflect')
-  pushLog(`[反思] ${state.reflection}`, success ? 'ok' : 'error')
-
-  if (runMode.value === 'A' || harness.autoSaveMemory) {
-    const item = {
-      id: `${Date.now()}`,
-      created_at: new Date().toLocaleString('zh-CN'),
-      strategy_name: r.strategy_name,
-      ts_code: r.ts_code,
-      regime: state.regime,
-      total_return: r.total_return,
-      max_drawdown: r.max_drawdown,
-      sharpe: r.sharpe,
-      success,
-      reflection: state.reflection,
-      mode: runMode.value,
+    if (data.save_memory && data.memory_item) {
+      memories.value = [data.memory_item, ...memories.value].slice(0, 50)
+      saveMemories()
+      pushLog('[记忆] 已写入策略记忆库', 'ok')
+      mainTab.value = 'memory'
     }
-    memories.value = [item, ...memories.value].slice(0, 50)
-    saveMemories()
-    pushLog('[记忆] 已写入策略记忆库', 'ok')
-    mainTab.value = 'memory'
+    if (data.param_tweak && runMode.value === 'B') {
+      paramValues[data.param_tweak.name] = data.param_tweak.value
+      pushLog([Agent] 后端建议改参 =, 'ok')
+    }
+    return data
+  } catch (e) {
+    pushLog([反思] 失败: , 'error')
+    return false
   }
 }
 
@@ -760,10 +945,10 @@ async function runManualStep() {
       pushLog('本轮四步已完成，可重置后再次运行', 'ok')
       return
     }
-    if (next === 'analyze') mockAnalyze()
-    else if (next === 'hypothesize') mockHypothesize()
-    else if (next === 'backtest') mockBacktest()
-    else if (next === 'reflect') mockReflect()
+    if (next === 'analyze') await runAnalyze()
+    else if (next === 'hypothesize') await runHypothesize()
+    else if (next === 'backtest') await runBacktest()
+    else if (next === 'reflect') await runReflect()
   } finally {
     running.value = false
   }
@@ -778,7 +963,7 @@ async function runAutoAgent() {
   running.value = true
   stopAuto.value = false
   mainTab.value = 'logs'
-  pushLog(`===== 模式 B 启动 · 最多 ${harness.maxIterations} 轮 =====`, 'ok')
+  pushLog(===== 模式 B 启动 · 最多  轮 =====, 'ok')
 
   try {
     for (let i = 1; i <= harness.maxIterations; i++) {
@@ -789,47 +974,28 @@ async function runAutoAgent() {
       state.iteration = i
       state.completed = []
       state.step = ''
-      pushLog(`--- 迭代 ${i}/${harness.maxIterations} ---`)
+      pushLog(--- 迭代 / ---)
 
-      await sleep(400)
       if (stopAuto.value) break
-      mockAnalyze()
+      await runAnalyze()
 
-      await sleep(400)
       if (stopAuto.value) break
-      // 自动按 regime 选更合适策略
-      const better = strategies.find(s => s.suitable_regime.includes(state.regime))
+      const better = strategies.value.find(s => strategyFitsRegime(s, state.regime))
       if (better && better.id !== selectedStrategy.value.id) {
         selectStrategy(better)
-        pushLog(`[Agent] 根据 regime 切换策略 → ${better.name}`, 'ok')
+        pushLog([Agent] 根据 regime 切换策略 → , 'ok')
       }
-      mockHypothesize()
+      await runHypothesize()
 
-      await sleep(500)
       if (stopAuto.value) break
-      mockBacktest()
+      const btOk = await runBacktest()
+      if (!btOk) continue
 
-      await sleep(400)
       if (stopAuto.value) break
-      mockReflect()
-
-      const r = backtestResult.value
-      const ok =
-        r &&
-        r.total_return > 0 &&
-        Math.abs(r.max_drawdown) * 100 <= harness.maxDrawdownPct &&
-        r.sharpe >= harness.minSharpe
-
-      if (ok) {
-        pushLog(`[Agent] 迭代 ${i} 达到目标，提前结束`, 'ok')
+      const ref = await runReflect()
+      if (ref && ref.success) {
+        pushLog([Agent] 迭代  达到目标，提前结束, 'ok')
         break
-      }
-
-      // 简单改参
-      if (selectedStrategy.value.params[0]) {
-        const p = selectedStrategy.value.params[0]
-        paramValues[p.name] = Math.min(p.max, (paramValues[p.name] || p.default) + 1)
-        pushLog(`[Agent] 未达标，调整参数 ${p.name}=${paramValues[p.name]}`, 'ok')
       }
     }
   } finally {
@@ -843,13 +1009,17 @@ function renderEquity() {
   if (!equityChartEl.value || !backtestResult.value?.equity?.length) return
   if (!equityChart) equityChart = echarts.init(equityChartEl.value, 'dark')
   const data = backtestResult.value.equity
-  const bench = data.map((v: number, i: number) => Number((1 + (v - 1) * 0.6 + i * 0.0005).toFixed(4)))
+  const dates = backtestResult.value.equity_dates || data.map((_: any, i: number) => i + 1)
+  const benchRet = backtestResult.value.benchmark_return ?? 0
+  const bench = data.map((_: number, i: number) =>
+    Number((1 + (benchRet * i) / Math.max(data.length - 1, 1)).toFixed(4))
+  )
   equityChart.setOption({
     backgroundColor: 'transparent',
     grid: { left: 48, right: 16, top: 28, bottom: 28 },
     legend: { data: ['策略', '基准'], textStyle: { color: '#a1a1aa', fontSize: 10 }, top: 4 },
     tooltip: { trigger: 'axis' },
-    xAxis: { type: 'category', data: data.map((_: any, i: number) => i + 1), axisLabel: { color: '#71717a', fontSize: 9 } },
+    xAxis: { type: 'category', data: dates, axisLabel: { color: '#71717a', fontSize: 9 } },
     yAxis: { type: 'value', scale: true, axisLabel: { color: '#71717a', fontSize: 9 }, splitLine: { lineStyle: { color: '#27272a' } } },
     series: [
       { name: '策略', type: 'line', data, showSymbol: false, lineStyle: { width: 1.5, color: '#a78bfa' } },
@@ -870,9 +1040,11 @@ function onResize() {
   equityChart?.resize()
 }
 
-onMounted(() => {
+onMounted(async () => {
   window.addEventListener('resize', onResize)
   pushLog('策略分析工作台已就绪 · 可切换模式 A / B', 'ok')
+  await Promise.all([loadCatalog(), loadOptions()])
+  loadPerceive()
 })
 
 onUnmounted(() => {
