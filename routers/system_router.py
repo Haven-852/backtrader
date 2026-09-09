@@ -47,20 +47,12 @@ async def root():
 
 @router.get("/health", response_model=HealthResponse)
 async def health_check():
-    """系统健康检查"""
-    try:
-        health = await model_service.get_health()
-        return HealthResponse(
-            status=health.get("status", "unknown"),
-            version=health.get("version", "3.0.0"),
-            services=health.get("services", {}),
-        )
-    except Exception as e:
-        return HealthResponse(
-            status="degraded",
-            version="3.0.0",
-            services={"error": str(e)},
-        )
+    """轻量健康检查：不探测外部 DB/模型，避免拖死单 worker。"""
+    return HealthResponse(
+        status="healthy",
+        version="3.0.0",
+        services={"api": "up"},
+    )
 
 
 @router.get("/agents")

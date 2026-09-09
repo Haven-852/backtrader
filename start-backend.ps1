@@ -39,16 +39,27 @@ if (Test-Path $EnvFile) {
     Write-Host "[OK] Copied .env to backend\.env" -ForegroundColor Gray
 }
 
+# Prefer 8010: Windows may leave orphan LISTEN sockets on 8000/8001 that accept nothing.
+$BackendPort = if ($env:BACKEND_PORT) { $env:BACKEND_PORT } else { "8010" }
+
 Write-Host ""
-Write-Host "Starting FastAPI on http://0.0.0.0:8000" -ForegroundColor Cyan
-Write-Host "Docs: http://localhost:8000/docs" -ForegroundColor White
+Write-Host "Starting FastAPI on http://0.0.0.0:$BackendPort" -ForegroundColor Cyan
+Write-Host "Docs: http://127.0.0.1:$BackendPort/docs" -ForegroundColor White
 Write-Host "Press Ctrl+C to stop" -ForegroundColor Yellow
 
 Write-Host "[START] uvicorn ..." -ForegroundColor Cyan
+# Avoid --reload on Windows when orphan sockets exist; set BACKEND_RELOAD=1 to enable.
+$ReloadArgs = @()
+if ($env:BACKEND_RELOAD -eq "1") {
+    $ReloadArgs = @(
+        "--reload",
+        "--reload-dir", $BackendDir,
+        "--reload-dir", (Join-Path $ProjectRoot "routers"),
+        "--reload-dir", (Join-Path $ProjectRoot "server"),
+        "--reload-dir", (Join-Path $ProjectRoot "data_layer")
+    )
+}
 & $PythonExe -m uvicorn main:app `
-    --host 0.0.0.0 --port 8000 --reload `
+    --host 127.0.0.1 --port $BackendPort `
     --app-dir $BackendDir `
-    --reload-dir $BackendDir `
-    --reload-dir (Join-Path $ProjectRoot "routers") `
-    --reload-dir (Join-Path $ProjectRoot "server") `
-    --reload-dir (Join-Path $ProjectRoot "data_layer")
+    @ReloadArgs

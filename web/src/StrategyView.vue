@@ -745,6 +745,15 @@ async function loadPerceive() {
   perceiveLoading.value = true
   perceiveError.value = ''
   try {
+    // 挑选式：标的缺/旧则后端感知前会补 Datahubco；此处也可显式触发
+    try {
+      await fetch('/data/selective/ensure', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ ts_code: config.tsCode.trim(), mode: 'fresh' }),
+      })
+    } catch (_) { /* 后端 perceive 仍会再补一次 */ }
+
     const feats = featureToggles.filter(f => f.enabled).map(f => f.id).join(',') || 'ma,rsi,vol_pctile'
     const params = new URLSearchParams({
       ts_code: config.tsCode.trim(),
@@ -767,7 +776,6 @@ async function loadPerceive() {
       state.regime = data.regime.regime
       state.analysisNote = data.regime.detail || `${data.name} ${data.bar_count} bars`
     }
-    // 用库内实际区间回填日期（便于后续回测）
     if (data.date_range?.start) config.start = data.date_range.start
     if (data.date_range?.end) config.end = data.date_range.end
     pushLog(
@@ -785,24 +793,25 @@ async function loadPerceive() {
   }
 }
 
-/** 分析：调用后端感知（PostgreSQL） */
+/** 分析：调用后端感知（PostgreSQL + 挑选式补数） */
 async function runAnalyze() {
   const data = perceiveData.value?.ok ? perceiveData.value : await loadPerceive()
   if (data?.ok) {
     state.regime = data.regime?.regime || 'unknown'
+    const featLabels = featureToggles.filter(f => f.enabled).map(f => f.label).join('+') || '无'
     state.analysisNote =
       data.regime?.detail ||
-      标的 ()，特征 
+      ('标的 ' + (data.name || '') + '(' + (data.ts_code || '') + ')，特征 ' + featLabels)
     state.step = 'analyze'
     if (!state.completed.includes('analyze')) state.completed.push('analyze')
-    pushLog([分析] 后端感知 regime= · , 'ok')
+    pushLog('[分析] 后端感知 regime=' + state.regime + ' · ' + state.analysisNote, 'ok')
     return true
   }
   state.regime = 'unknown'
   state.analysisNote = perceiveError.value || '未能读取 PostgreSQL 行情'
   state.step = 'analyze'
   if (!state.completed.includes('analyze')) state.completed.push('analyze')
-  pushLog([分析] 失败 — , 'error')
+  pushLog('[分析] 失败 — ' + state.analysisNote, 'error')
   return false
 }
 
@@ -823,21 +832,21 @@ async function runHypothesize() {
       }),
     })
     const data = await res.json().catch(() => ({}))
-    if (!res.ok) throw new Error(data.detail || HTTP )
+    if (!res.ok) throw new Error(data.detail || ('HTTP ' + res.status))
     state.hypothesis = data.hypothesis
     if (data.suggested_strategy && runMode.value === 'B') {
       const better = strategies.value.find((s) => s.id === data.suggested_strategy.id)
       if (better) {
         selectStrategy(better)
-        pushLog([假设] 后端建议切换 → , 'ok')
+        pushLog('[假设] 后端建议切换 → ' + better.name, 'ok')
       }
     }
     state.step = 'hypothesize'
     if (!state.completed.includes('hypothesize')) state.completed.push('hypothesize')
-    pushLog([假设] , 'ok')
+    pushLog('[假设] ' + state.hypothesis, 'ok')
     return true
   } catch (e) {
-    pushLog([假设] 失败: , 'error')
+    pushLog('[假设] 失败: ' + (e && e.message ? e.message : String(e)), 'error')
     return false
   }
 }
@@ -870,23 +879,24 @@ async function runBacktest() {
     })
     const data = await res.json().catch(() => ({}))
     if (!res.ok) {
-      const detail = typeof data.detail === 'string' ? data.detail : (data.detail ? JSON.stringify(data.detail) : HTTP )
+      const detail = typeof data.detail === 'string' ? data.detail : (data.detail ? JSON.stringify(data.detail) : ('HTTP ' + res.status))
       throw new Error(detail)
     }
     backtestResult.value = data
     state.step = 'backtest'
     if (!state.completed.includes('backtest')) state.completed.push('backtest')
     pushLog(
-      [回测] 后端 ·  · 收益  · 回撤  · 夏普  +
+      '[回测] 后端 · ' + data.strategy_name + ' · 收益 ' + fmtPct(data.total_return) +
+        ' · 回撤 ' + fmtPct(data.max_drawdown) + ' · 夏普 ' + data.sharpe +
         (data.lookback_ok ? ' · guard=ON' : ' · guard=OFF') +
-         · bars=,
+        ' · bars=' + data.bar_count,
       data.lookback_ok ? 'ok' : 'error'
     )
     mainTab.value = 'backtest'
     await nextTick(() => renderEquity())
     return true
   } catch (e) {
-    pushLog([回测] 失败: , 'error')
+    pushLog('[回测] 失败: ' + (e && e.message ? e.message : String(e)), 'error')
     return false
   }
 }
@@ -912,11 +922,11 @@ async function runReflect() {
       }),
     })
     const data = await res.json().catch(() => ({}))
-    if (!res.ok) throw new Error(data.detail || HTTP )
+    if (!res.ok) throw new Error(data.detail || ('HTTP ' + res.status))
     state.reflection = data.reflection
     state.step = 'reflect'
     if (!state.completed.includes('reflect')) state.completed.push('reflect')
-    pushLog([反思] , data.success ? 'ok' : 'error')
+    pushLog('[反思] ' + state.reflection, data.success ? 'ok' : 'error')
 
     if (data.save_memory && data.memory_item) {
       memories.value = [data.memory_item, ...memories.value].slice(0, 50)
@@ -926,11 +936,11 @@ async function runReflect() {
     }
     if (data.param_tweak && runMode.value === 'B') {
       paramValues[data.param_tweak.name] = data.param_tweak.value
-      pushLog([Agent] 后端建议改参 =, 'ok')
+      pushLog('[Agent] 后端建议改参 ' + data.param_tweak.name + '=' + data.param_tweak.value, 'ok')
     }
     return data
   } catch (e) {
-    pushLog([反思] 失败: , 'error')
+    pushLog('[反思] 失败: ' + (e && e.message ? e.message : String(e)), 'error')
     return false
   }
 }
@@ -963,7 +973,7 @@ async function runAutoAgent() {
   running.value = true
   stopAuto.value = false
   mainTab.value = 'logs'
-  pushLog(===== 模式 B 启动 · 最多  轮 =====, 'ok')
+  pushLog('===== 模式 B 启动 · 最多 ' + harness.maxIterations + ' 轮 =====', 'ok')
 
   try {
     for (let i = 1; i <= harness.maxIterations; i++) {
@@ -974,7 +984,7 @@ async function runAutoAgent() {
       state.iteration = i
       state.completed = []
       state.step = ''
-      pushLog(--- 迭代 / ---)
+      pushLog('--- 迭代 ' + i + '/' + harness.maxIterations + ' ---')
 
       if (stopAuto.value) break
       await runAnalyze()
@@ -983,7 +993,7 @@ async function runAutoAgent() {
       const better = strategies.value.find(s => strategyFitsRegime(s, state.regime))
       if (better && better.id !== selectedStrategy.value.id) {
         selectStrategy(better)
-        pushLog([Agent] 根据 regime 切换策略 → , 'ok')
+        pushLog('[Agent] 根据 regime 切换策略 → ' + better.name, 'ok')
       }
       await runHypothesize()
 
@@ -994,7 +1004,7 @@ async function runAutoAgent() {
       if (stopAuto.value) break
       const ref = await runReflect()
       if (ref && ref.success) {
-        pushLog([Agent] 迭代  达到目标，提前结束, 'ok')
+        pushLog('[Agent] 迭代 ' + i + ' 达到目标，提前结束', 'ok')
         break
       }
     }

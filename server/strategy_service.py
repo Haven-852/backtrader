@@ -259,6 +259,13 @@ class StrategyService:
         if not self.engine:
             return {"ok": False, "error": "PostgreSQL 未连接", "source": "postgres"}
 
+        # 挑选式：策略标的缺/旧则先补 Datahubco
+        try:
+            from server.selective_data_service import selective_data_service
+            await selective_data_service.ensure_fresh_if_needed(ts_code)
+        except Exception as e:
+            logger.warning("perceive 前补数失败 %s: %s", ts_code, e)
+
         df = self._read_bars(ts_code, start=start, end=end, limit=limit)
         if df.empty:
             return {

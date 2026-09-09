@@ -610,7 +610,27 @@ function closeCtxMenu() {
   ctxMenu.value.visible = false
 }
 
-function addToWatchlist(item: any) {
+async function ensureSelectiveBars(tsCode: string, mode: 'watchlist' | 'fresh' | 'extend' = 'fresh') {
+  if (!tsCode) return null
+  try {
+    const res = await fetch('/data/selective/ensure', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ ts_code: tsCode, mode }),
+    })
+    const data = await res.json().catch(() => ({}))
+    if (!res.ok) {
+      console.warn('selective ensure failed', data)
+      return null
+    }
+    return data
+  } catch (e) {
+    console.warn('selective ensure error', e)
+    return null
+  }
+}
+
+async function addToWatchlist(item: any) {
   if (!item?.ts_code) return
   if (isInWatchlist(item.ts_code)) {
     showToast('已在自选股中')
@@ -629,6 +649,23 @@ function addToWatchlist(item: any) {
   ]
   if (!watchlistOpen.value) watchlistOpen.value = true
   showToast(`已添加：${item.short_name || item.name || item.ts_code}`)
+  // 挑选式：个股拉近一季度日线 + 周/月 → PG
+    if ((item.kind || 'stock') === 'stock') {
+      showToast('正在补齐自选行情…')
+      const r = await ensureSelectiveBars(item.ts_code, 'watchlist')
+      if (r?.ok) {
+        const bar = r.latest_bar || r.verify?.local
+        const match = r.verify?.match
+        const tip = bar
+          ? `已入库 ${bar.trade_date} 收 ${bar.close}` + (match === false ? '（与远端不一致，请复查）' : '')
+          : `行情已入库（日线 ${r.upserted?.daily ?? 0} 条）`
+        showToast(tip)
+        // 若当前正在看该股，刷新 K 线
+        if (currentTsCode.value === item.ts_code) {
+          await loadData()
+        }
+      }
+    }
 }
 
 function removeFromWatchlist(tsCode: string) {
@@ -748,6 +785,10 @@ const changePercent = computed(() => {
   if (selectedTab.value === 'etf' && currentETF.value?.pct_chg != null) {
     return Number(currentETF.value.pct_chg).toFixed(2)
   }
+  // 优先用后端/PG 的 pct_chg（与 Datahubco 一致）
+  if (last.pct_chg != null && last.pct_chg !== '' && !Number.isNaN(Number(last.pct_chg))) {
+    return Number(last.pct_chg).toFixed(4)
+  }
   if (bars.length >= 2) {
     const prev = bars[bars.length - 2]
     if (prev.close && prev.close !== 0) {
@@ -768,8 +809,12 @@ const changeAmount = computed(() => {
   if (selectedTab.value === 'etf' && currentETF.value?.change != null) {
     return currentETF.value.change
   }
+  const last = bars[bars.length - 1]
+  if (last.change != null && last.change !== '' && !Number.isNaN(Number(last.change))) {
+    return +Number(last.change).toFixed(2)
+  }
   if (bars.length >= 2) {
-    return +(bars[bars.length - 1].close - bars[bars.length - 2].close).toFixed(2)
+    return +(last.close - bars[bars.length - 2].close).toFixed(2)
   }
   return null
 })
@@ -779,8 +824,10 @@ const prevClose = computed(() => {
   if (selectedTab.value === 'index' && currentIndex.value?.pre_close) {
     return currentIndex.value.pre_close
   }
+  const last = latestBar.value
+  if (last?.pre_close != null && last.pre_close !== '') return Number(last.pre_close)
   if (bars.length >= 2) return bars[bars.length - 2].close
-  return latestBar.value?.open ?? null
+  return last?.open ?? null
 })
 
 const amplitude = computed(() => {

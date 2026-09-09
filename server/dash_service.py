@@ -162,55 +162,70 @@ class DashService:
         return self.AVAILABLE_INDICATORS
 
     async def search_stocks(self, keyword: str, limit: int = 20) -> List[Dict]:
-        """搜索股票（ref_stock_basic via pg_manager）"""
-        if not await self._ensure_pg():
-            return self._mock_stock_search(keyword)
-
-        try:
-            sql = """
-            SELECT ts_code, symbol, name, area, industry, list_date
-            FROM ref_stock_basic
-            WHERE (ts_code ILIKE :kw OR name ILIKE :kw OR symbol ILIKE :kw)
-            ORDER BY ts_code
-            LIMIT :limit
-            """
-            df = await self.pg.query_sql(sql, {"kw": f"%{keyword}%", "limit": limit})
-            if df is None or df.empty:
-                return []
-            return df.to_dict("records")
-        except Exception as e:
-            logger.warning(f"pg 搜索股票失败，尝试 storage 回退: {e}")
-            engine = self.storage.get_postgres_engine() if self.storage else None
-            if engine:
-                try:
-                    sql = """
-                    SELECT ts_code, symbol, name, area, industry, list_date
-                    FROM ref_stock_basic
-                    WHERE (ts_code ILIKE :kw OR name ILIKE :kw OR symbol ILIKE :kw)
-                    ORDER BY ts_code LIMIT :limit
-                    """
-                    df = pd.read_sql(sa_text(sql), engine, params={"kw": f"%{keyword}%", "limit": limit})
+        """搜索股票（ref_stock_basic）；asyncpg 不可用时回退 SQLAlchemy。"""
+        if await self._ensure_pg():
+            try:
+                sql = """
+                SELECT ts_code, symbol, name, area, industry, list_date
+                FROM ref_stock_basic
+                WHERE (ts_code ILIKE :kw OR name ILIKE :kw OR symbol ILIKE :kw)
+                ORDER BY ts_code
+                LIMIT :limit
+                """
+                df = await self.pg.query_sql(sql, {"kw": f"%{keyword}%", "limit": limit})
+                if df is not None and not df.empty:
                     return df.to_dict("records")
-                except Exception:
-                    pass
-            return self._mock_stock_search(keyword)
+            except Exception as e:
+                logger.warning(f"pg 搜索股票失败，尝试 storage 回退: {e}")
+
+        engine = self.storage.get_postgres_engine() if self.storage else None
+        if engine:
+            try:
+                sql = """
+                SELECT ts_code, symbol, name, area, industry, list_date
+                FROM ref_stock_basic
+                WHERE (ts_code ILIKE :kw OR name ILIKE :kw OR symbol ILIKE :kw)
+                ORDER BY ts_code LIMIT :limit
+                """
+                df = pd.read_sql(
+                    sa_text(sql), engine, params={"kw": f"%{keyword}%", "limit": limit}
+                )
+                return df.to_dict("records") if not df.empty else []
+            except Exception as e:
+                logger.warning(f"storage 搜索股票失败: {e}")
+        return self._mock_stock_search(keyword)
 
     async def get_stock_info(self, ts_code: str) -> Optional[Dict]:
-        """获取股票基本信息（ref_stock_basic via pg_manager）"""
-        if not await self._ensure_pg():
-            return None
+        """获取股票基本信息；asyncpg 不可用时回退 SQLAlchemy。"""
+        if await self._ensure_pg():
+            try:
+                df = await self.pg.query_sql(
+                    "SELECT ts_code, symbol, name, area, industry, list_date "
+                    "FROM ref_stock_basic WHERE ts_code = :code LIMIT 1",
+                    {"code": ts_code},
+                )
+                if df is not None and not df.empty:
+                    return df.iloc[0].to_dict()
+            except Exception as e:
+                logger.warning(f"获取股票信息失败 ({ts_code}): {e}")
 
+        engine = self.storage.get_postgres_engine() if self.storage else None
+        if not engine:
+            return None
         try:
-            df = await self.pg.query_sql(
-                "SELECT ts_code, symbol, name, area, industry, list_date "
-                "FROM ref_stock_basic WHERE ts_code = :code LIMIT 1",
-                {"code": ts_code},
+            df = pd.read_sql(
+                sa_text(
+                    "SELECT ts_code, symbol, name, area, industry, list_date "
+                    "FROM ref_stock_basic WHERE ts_code = :code LIMIT 1"
+                ),
+                engine,
+                params={"code": ts_code},
             )
-            if df is None or df.empty:
+            if df.empty:
                 return None
             return df.iloc[0].to_dict()
         except Exception as e:
-            logger.warning(f"获取股票信息失败 ({ts_code}): {e}")
+            logger.warning(f"storage 获取股票信息失败 ({ts_code}): {e}")
             return None
 
     async def get_etf_info(self, ts_code: str) -> Optional[Dict]:
@@ -686,38 +701,50 @@ class DashService:
         self, ts_code: str, table: str,
         start: Optional[str], end: Optional[str], limit: int
     ) -> Optional[pd.DataFrame]:
-        """从 PostgreSQL 查询K线（data_layer.storage.pg_manager）"""
-        if not await self._ensure_pg():
-            return None
+        """从 PostgreSQL 查询K线。
 
-        try:
-            actual_table = table
-            if self._is_etf_code(ts_code):
-                actual_table = "etf_daily"
-            elif self._is_index_code(ts_code) and table in ("stock_daily", "stock_weekly", "stock_monthly", "index_daily"):
-                actual_table = "index_daily"
-            elif table in ("stock_daily", "stock_weekly", "stock_monthly", "etf_daily"):
-                actual_table = table
-
-            df = await self.pg.query(
-                table=actual_table,
-                ts_code=ts_code,
-                start_date=start,
-                end_date=end,
-                limit=limit,
-                order_by="trade_date",
-                order_desc=True,
-            )
-            if df is None or df.empty:
-                return None
-            if "trade_date" in df.columns:
-                df["time"] = pd.to_datetime(df["trade_date"])
-            return df
-        except Exception as e:
-            logger.warning(f"pg 查询 {table} 失败 ({ts_code}): {e}")
-
+        优先 SQLAlchemy（与挑选式/策略同一引擎，稳定可用）；
+        asyncpg 作补充；二者都失败才返回 None。
+        """
+        # 1) SQLAlchemy 同步引擎（已知可用）
         if self.storage:
-            return self._query_timescale_bars(ts_code, table, start, end, limit)
+            df = self._query_timescale_bars(ts_code, table, start, end, limit)
+            if df is not None and not df.empty:
+                return df
+
+        # 2) asyncpg 回退（带超时，避免连接池挂死拖垮看板）
+        if await self._ensure_pg():
+            try:
+                actual_table = table
+                if self._is_etf_code(ts_code):
+                    actual_table = "etf_daily"
+                elif self._is_index_code(ts_code) and table in (
+                    "stock_daily", "stock_weekly", "stock_monthly", "index_daily"
+                ):
+                    actual_table = "index_daily"
+                elif table in ("stock_daily", "stock_weekly", "stock_monthly", "etf_daily"):
+                    actual_table = table
+
+                import asyncio
+                df = await asyncio.wait_for(
+                    self.pg.query(
+                        table=actual_table,
+                        ts_code=ts_code,
+                        start_date=start,
+                        end_date=end,
+                        limit=limit,
+                        order_by="trade_date",
+                        order_desc=True,
+                    ),
+                    timeout=8.0,
+                )
+                if df is not None and not df.empty:
+                    if "trade_date" in df.columns:
+                        df["time"] = pd.to_datetime(df["trade_date"])
+                    return df
+            except Exception as e:
+                logger.warning(f"pg_manager 查询 {table} 失败 ({ts_code}): {e}")
+
         return None
 
     async def _derive_weekly_from_daily(self, ts_code: str, limit: int, daily_table: str = "stock_daily") -> Optional[pd.DataFrame]:
@@ -857,9 +884,30 @@ class DashService:
             daily_table = "index_daily"
         else:
             daily_table = "stock_daily"
+            # 个股挑选式：缺/旧则 Datahubco → PG
+            try:
+                from server.selective_data_service import selective_data_service
+                await selective_data_service.ensure_fresh_if_needed(ts_code)
+            except Exception as e:
+                logger.warning(f"挑选式补数跳过 {ts_code}: {e}")
 
         if timeframe == "day":
             bars_df = await self._query_bars_pg(ts_code, daily_table, start, end, limit)
+            # 滑动更早：库内日线不足且为个股时向前续拉
+            if (
+                daily_table == "stock_daily"
+                and (bars_df is None or len(bars_df) < min(limit, 60))
+            ):
+                try:
+                    from server.selective_data_service import selective_data_service
+                    await selective_data_service.ensure(
+                        ts_code, mode="extend", extend_days=90
+                    )
+                    bars_df = await self._query_bars_pg(
+                        ts_code, daily_table, start, end, limit
+                    )
+                except Exception as e:
+                    logger.warning(f"日线向前续拉失败 {ts_code}: {e}")
         elif timeframe == "week":
             bars_df = await self._query_bars_pg(ts_code, "stock_weekly", start, end, limit)
             if bars_df is None or bars_df.empty:
@@ -874,7 +922,13 @@ class DashService:
                 fallback_msg = "月线数据通过日线聚合生成"
 
         if bars_df is None or bars_df.empty:
-            if not await self._ensure_pg():
+            # 仅当 asyncpg 与 SQLAlchemy 都不可用时才用模拟数据
+            engine_ok = False
+            try:
+                engine_ok = bool(self.storage and self.storage.get_postgres_engine())
+            except Exception:
+                engine_ok = False
+            if not await self._ensure_pg() and not engine_ok:
                 bars_df = self._mock_kline(ts_code, timeframe, limit)
                 fallback_msg = "数据库未连接，当前为模拟数据"
             else:
@@ -1190,14 +1244,29 @@ class DashService:
             bar = {
                 "time": str(row.get("time", "")),
             }
-            for col in ["open", "high", "low", "close", "vol", "amount"]:
+            for col in ["open", "high", "low", "close", "vol", "amount", "pre_close", "change", "pct_chg"]:
                 val = row.get(col)
+                if val is None or (isinstance(val, float) and np.isnan(val)):
+                    continue
                 if isinstance(val, (np.integer, np.floating)):
-                    bar[col] = round(float(val), 4) if col != "vol" else int(val)
-                elif val is None or (isinstance(val, float) and np.isnan(val)):
-                    bar[col] = None
+                    if col == "vol":
+                        bar[col] = int(val)
+                    elif col in ("change", "pct_chg"):
+                        bar[col] = round(float(val), 4)
+                    else:
+                        bar[col] = round(float(val), 4)
                 else:
-                    bar[col] = val
+                    try:
+                        # Decimal / str from SQLAlchemy
+                        num = float(val)
+                        if col == "vol":
+                            bar[col] = int(num)
+                        elif col in ("change", "pct_chg"):
+                            bar[col] = round(num, 4)
+                        else:
+                            bar[col] = round(num, 4)
+                    except (TypeError, ValueError):
+                        bar[col] = val
             bars.append(bar)
         return bars
 
