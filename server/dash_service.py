@@ -12,6 +12,7 @@ Dash Service - 股票行情看板服务层
 import sys
 import os
 import logging
+import asyncio
 from typing import Dict, Any, Optional, List
 from datetime import datetime, timedelta
 
@@ -107,7 +108,7 @@ class DashService:
 
     # 可用的技术指标
     AVAILABLE_INDICATORS = [
-        {"id": "ma",       "name": "移动均线 MA",    "params": {"periods": [5, 10, 20, 60]}},
+        {"id": "ma",       "name": "移动均线 MA",    "params": {"periods": [5, 10, 20, 30]}},
         {"id": "ema",      "name": "指数均线 EMA",   "params": {"periods": [12, 26]}},
         {"id": "macd",     "name": "MACD",           "params": {"fast": 12, "slow": 26, "signal": 9}},
         {"id": "rsi",      "name": "RSI 相对强弱",   "params": {"period": 14}},
@@ -150,8 +151,9 @@ class DashService:
         return self._storage
 
     def get_available_timeframes(self) -> List[Dict]:
-        """获取可用周期列表（行情看板仅日/周/月）"""
+        """获取可用周期列表"""
         return [
+            {"id": "intraday", "name": "分时", "group": "分时"},
             {"id": "day",   "name": "日线", "group": "日线"},
             {"id": "week",  "name": "周线", "group": "周线"},
             {"id": "month", "name": "月线", "group": "月线"},
@@ -269,61 +271,137 @@ class DashService:
         {"ts_code": "399673.SZ", "name": "创业板50", "short_name": "创50"},
     ]
 
-    async def get_index_snapshots(self) -> List[Dict]:
-        """获取核心指数最新快照（index_daily via pg_manager）"""
-        if not await self._ensure_pg():
-            return self._mock_index_snapshots()
+    async def get_index_snapshots(self, auto_sync: bool = True) -> List[Dict]:
+        """获取核心指数最新快照（优先 SQLAlchemy 读 index_daily；可自动持续补数）"""
+        sync_info = None
+        if auto_sync:
+            try:
+                from data_layer.collectors.datahubco import continuous_fetcher
+                sync_info = await asyncio.to_thread(continuous_fetcher.ensure_indices_fresh)
+            except Exception as e:
+                logger.warning(f"指数持续同步跳过: {e}")
+                sync_info = {"ok": False, "error": str(e)}
 
-        results = []
-        try:
-            for idx_info in self.CORE_INDICES:
-                code = idx_info["ts_code"]
-                df = await self.pg.query(
-                    table="index_daily",
-                    ts_code=code,
-                    limit=1,
-                    order_by="trade_date",
-                    order_desc=True,
+        # 1) SQLAlchemy（稳定，不依赖 asyncpg）
+        engine = self.storage.get_postgres_engine() if self.storage else None
+        if engine:
+            try:
+                codes = [i["ts_code"] for i in self.CORE_INDICES]
+                sql = sa_text(
+                    """
+                    SELECT DISTINCT ON (ts_code)
+                           ts_code, trade_date, close, open, high, low,
+                           pre_close, change, pct_chg, vol, amount
+                    FROM index_daily
+                    WHERE ts_code IN :codes
+                    ORDER BY ts_code, trade_date DESC
+                    """
                 )
-                if df is None or df.empty:
+                df = await asyncio.to_thread(
+                    pd.read_sql, sql, engine, params={"codes": tuple(codes)}
+                )
+                by_code = {}
+                if df is not None and not df.empty:
+                    for _, row in df.iterrows():
+                        by_code[str(row["ts_code"])] = row
+
+                results = []
+                for idx_info in self.CORE_INDICES:
+                    code = idx_info["ts_code"]
+                    row = by_code.get(code)
+                    if row is None:
+                        results.append({
+                            "ts_code": code,
+                            "name": idx_info["name"],
+                            "short_name": idx_info["short_name"],
+                            "trade_date": "",
+                            "close": 0,
+                            "pre_close": 0,
+                            "change": 0,
+                            "pct_chg": 0,
+                            "vol": 0,
+                            "amount": 0,
+                        })
+                        continue
+                    close_val = float(row["close"]) if pd.notna(row.get("close")) else 0
+                    pre_close_val = float(row["pre_close"]) if pd.notna(row.get("pre_close")) else close_val
+                    change_val = float(row["change"]) if pd.notna(row.get("change")) else 0
+                    pct_val = float(row["pct_chg"]) if pd.notna(row.get("pct_chg")) else 0
                     results.append({
                         "ts_code": code,
                         "name": idx_info["name"],
                         "short_name": idx_info["short_name"],
-                        "trade_date": "",
-                        "close": 0,
-                        "pre_close": 0,
-                        "change": 0,
-                        "pct_chg": 0,
-                        "vol": 0,
-                        "amount": 0,
+                        "trade_date": str(row["trade_date"])[:10] if pd.notna(row.get("trade_date")) else "",
+                        "close": round(close_val, 2),
+                        "open": round(float(row["open"]), 2) if pd.notna(row.get("open")) else None,
+                        "high": round(float(row["high"]), 2) if pd.notna(row.get("high")) else None,
+                        "low": round(float(row["low"]), 2) if pd.notna(row.get("low")) else None,
+                        "pre_close": round(pre_close_val, 2),
+                        "change": round(change_val, 2),
+                        "pct_chg": round(pct_val, 2),
+                        "vol": int(row["vol"]) if pd.notna(row.get("vol")) else 0,
+                        "amount": float(row["amount"]) if pd.notna(row.get("amount")) else 0,
                     })
-                    continue
+                # 若多数有真实收盘价则返回
+                if any((r.get("close") or 0) > 0 for r in results):
+                    return results
+            except Exception as e:
+                logger.warning(f"SQLAlchemy 指数快照失败: {e}")
 
-                row = df.iloc[0]
-                close_val = float(row["close"]) if pd.notna(row.get("close")) else 0
-                pre_close_val = float(row["pre_close"]) if pd.notna(row.get("pre_close")) else close_val
-                change_val = float(row["change"]) if pd.notna(row.get("change")) else 0
-                pct_val = float(row["pct_chg"]) if pd.notna(row.get("pct_chg")) else 0
-                results.append({
-                    "ts_code": code,
-                    "name": idx_info["name"],
-                    "short_name": idx_info["short_name"],
-                    "trade_date": str(row["trade_date"])[:10] if pd.notna(row.get("trade_date")) else "",
-                    "close": round(close_val, 2),
-                    "open": round(float(row["open"]), 2) if pd.notna(row.get("open")) else None,
-                    "high": round(float(row["high"]), 2) if pd.notna(row.get("high")) else None,
-                    "low": round(float(row["low"]), 2) if pd.notna(row.get("low")) else None,
-                    "pre_close": round(pre_close_val, 2),
-                    "change": round(change_val, 2),
-                    "pct_chg": round(pct_val, 2),
-                    "vol": int(row["vol"]) if pd.notna(row.get("vol")) else 0,
-                    "amount": float(row["amount"]) if pd.notna(row.get("amount")) else 0,
-                })
-            return results
-        except Exception as e:
-            logger.warning(f"获取指数快照失败: {e}")
-            return self._mock_index_snapshots()
+        # 2) asyncpg 回退
+        if await self._ensure_pg():
+            results = []
+            try:
+                for idx_info in self.CORE_INDICES:
+                    code = idx_info["ts_code"]
+                    df = await self.pg.query(
+                        table="index_daily",
+                        ts_code=code,
+                        limit=1,
+                        order_by="trade_date",
+                        order_desc=True,
+                    )
+                    if df is None or df.empty:
+                        results.append({
+                            "ts_code": code,
+                            "name": idx_info["name"],
+                            "short_name": idx_info["short_name"],
+                            "trade_date": "",
+                            "close": 0,
+                            "pre_close": 0,
+                            "change": 0,
+                            "pct_chg": 0,
+                            "vol": 0,
+                            "amount": 0,
+                        })
+                        continue
+
+                    row = df.iloc[0]
+                    close_val = float(row["close"]) if pd.notna(row.get("close")) else 0
+                    pre_close_val = float(row["pre_close"]) if pd.notna(row.get("pre_close")) else close_val
+                    change_val = float(row["change"]) if pd.notna(row.get("change")) else 0
+                    pct_val = float(row["pct_chg"]) if pd.notna(row.get("pct_chg")) else 0
+                    results.append({
+                        "ts_code": code,
+                        "name": idx_info["name"],
+                        "short_name": idx_info["short_name"],
+                        "trade_date": str(row["trade_date"])[:10] if pd.notna(row.get("trade_date")) else "",
+                        "close": round(close_val, 2),
+                        "open": round(float(row["open"]), 2) if pd.notna(row.get("open")) else None,
+                        "high": round(float(row["high"]), 2) if pd.notna(row.get("high")) else None,
+                        "low": round(float(row["low"]), 2) if pd.notna(row.get("low")) else None,
+                        "pre_close": round(pre_close_val, 2),
+                        "change": round(change_val, 2),
+                        "pct_chg": round(pct_val, 2),
+                        "vol": int(row["vol"]) if pd.notna(row.get("vol")) else 0,
+                        "amount": float(row["amount"]) if pd.notna(row.get("amount")) else 0,
+                    })
+                if any((r.get("close") or 0) > 0 for r in results):
+                    return results
+            except Exception as e:
+                logger.warning(f"获取指数快照失败: {e}")
+
+        return self._mock_index_snapshots()
 
     def _mock_index_snapshots(self) -> List[Dict]:
         """模拟指数快照数据（数据库不可用时）"""
@@ -839,6 +917,7 @@ class DashService:
         end: Optional[str] = None,
         limit: int = 500,
         indicators: Optional[List[str]] = None,
+        auto_fill: bool = True,
     ) -> Dict[str, Any]:
         """
         获取K线数据并计算技术指标
@@ -884,18 +963,20 @@ class DashService:
             daily_table = "index_daily"
         else:
             daily_table = "stock_daily"
-            # 个股挑选式：缺/旧则 Datahubco → PG
-            try:
-                from server.selective_data_service import selective_data_service
-                await selective_data_service.ensure_fresh_if_needed(ts_code)
-            except Exception as e:
-                logger.warning(f"挑选式补数跳过 {ts_code}: {e}")
+            # 个股挑选式：缺/旧则 Datahubco → PG（搜索 30 日路径会关掉 auto_fill）
+            if auto_fill:
+                try:
+                    from server.selective_data_service import selective_data_service
+                    await selective_data_service.ensure_fresh_if_needed(ts_code)
+                except Exception as e:
+                    logger.warning(f"挑选式补数跳过 {ts_code}: {e}")
 
         if timeframe == "day":
             bars_df = await self._query_bars_pg(ts_code, daily_table, start, end, limit)
             # 滑动更早：库内日线不足且为个股时向前续拉
             if (
-                daily_table == "stock_daily"
+                auto_fill
+                and daily_table == "stock_daily"
                 and (bars_df is None or len(bars_df) < min(limit, 60))
             ):
                 try:
@@ -1194,7 +1275,7 @@ class DashService:
             try:
                 if ind == "ma":
                     mas = {}
-                    for p in [5, 10, 20, 60]:
+                    for p in [5, 10, 20, 30]:
                         ma_val = calc_ma(close, p)
                         mas[f"MA{p}"] = [round(v, 2) if not pd.isna(v) else None for v in ma_val.values]
                     result["ma"] = mas

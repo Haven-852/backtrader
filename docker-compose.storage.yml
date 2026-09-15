@@ -43,7 +43,7 @@ services:
     restart: unless-stopped
 
   minio:
-    image: minio/minio
+    image: quay.io/minio/minio:latest
     container_name: backtrader-minio
     ports:
       - "9000:9000"

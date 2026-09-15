@@ -119,6 +119,24 @@
             {{ catalogLoading ? '加载中…' : `${strategies.length} 种` }}
           </span>
         </div>
+        <div class="px-2 py-2 border-b border-zinc-800 space-y-1.5">
+          <div class="text-[9px] text-zinc-600 px-0.5">选股工具</div>
+          <div
+            @click="openScreener"
+            :class="[
+              'rounded-xl p-2.5 border cursor-pointer transition-all',
+              toolboxMode === 'screener'
+                ? 'border-emerald-500/50 bg-emerald-500/10'
+                : 'border-zinc-800 bg-zinc-900/60 hover:border-zinc-700'
+            ]"
+          >
+            <div class="flex items-center justify-between mb-0.5">
+              <span class="text-xs font-medium text-zinc-200">低于5日均线</span>
+              <span class="text-[9px] px-1.5 py-0.5 rounded bg-zinc-800 text-zinc-500">选股</span>
+            </div>
+            <p class="text-[10px] text-zinc-500 leading-relaxed">前一交易日收盘低于 MA5，可设偏离幅度</p>
+          </div>
+        </div>
         <div v-if="catalogError" class="px-3 py-2 text-[10px] text-red-400 border-b border-zinc-800">
           {{ catalogError }}
           <button @click="loadCatalog" class="ml-2 underline text-sky-400">重试</button>
@@ -133,7 +151,7 @@
             @click="selectStrategy(s)"
             :class="[
               'rounded-xl p-2.5 border cursor-pointer transition-all',
-              selectedStrategy?.id === s.id
+              toolboxMode === 'strategy' && selectedStrategy?.id === s.id
                 ? 'border-violet-500/50 bg-violet-500/10'
                 : 'border-zinc-800 bg-zinc-900/60 hover:border-zinc-700'
             ]"
@@ -162,6 +180,107 @@
         </div>
 
         <div class="flex-1 overflow-y-auto scrollbar-thin p-4 space-y-4">
+          <template v-if="mainTab === 'screener'">
+            <div class="bg-zinc-900 rounded-2xl border border-zinc-800 p-4 space-y-3">
+              <div class="flex items-center justify-between gap-2">
+                <h4 class="text-xs font-semibold text-zinc-300 flex items-center gap-2">
+                  <i class="fa-solid fa-filter text-emerald-400"></i> 低于5日均线选股
+                  <span class="text-[10px] text-zinc-500 font-normal">默认搜索上一已收盘日，缺口日线写入 PostgreSQL</span>
+                </h4>
+                <button
+                  type="button"
+                  @click="runScreener"
+                  :disabled="screenerLoading"
+                  class="px-3 py-1.5 rounded-lg text-[11px] bg-emerald-600/20 text-emerald-300 border border-emerald-500/30 hover:bg-emerald-600/30 disabled:opacity-50"
+                >
+                  <i class="fa-solid fa-magnifying-glass mr-1" :class="{ 'fa-spinner animate-spin': screenerLoading }"></i>
+                  {{ screenerLoading ? '搜索并入库中…' : '开始搜索' }}
+                </button>
+              </div>
+              <div class="grid grid-cols-2 lg:grid-cols-4 gap-2">
+                <div>
+                  <label class="text-[10px] text-zinc-500 block mb-1">交易日</label>
+                  <input v-model="screener.asof" type="date" class="w-full bg-zinc-800 border border-zinc-700 rounded-lg px-2.5 py-1.5 text-xs outline-none" />
+                </div>
+                <div>
+                  <label class="text-[10px] text-zinc-500 block mb-1">均线周期</label>
+                  <input v-model.number="screener.maPeriod" type="number" min="2" max="60" class="w-full bg-zinc-800 border border-zinc-700 rounded-lg px-2.5 py-1.5 text-xs outline-none" />
+                </div>
+                <div>
+                  <label class="text-[10px] text-zinc-500 block mb-1">至少低于均线 %</label>
+                  <input v-model.number="screener.belowPct" type="number" min="0" max="50" step="0.5" class="w-full bg-zinc-800 border border-zinc-700 rounded-lg px-2.5 py-1.5 text-xs outline-none" />
+                </div>
+                <div>
+                  <label class="text-[10px] text-zinc-500 block mb-1">最多返回</label>
+                  <input v-model.number="screener.limit" type="number" min="10" max="1000" class="w-full bg-zinc-800 border border-zinc-700 rounded-lg px-2.5 py-1.5 text-xs outline-none" />
+                </div>
+              </div>
+              <div class="flex flex-wrap gap-1.5">
+                <label class="flex items-center gap-1 px-2 py-1 rounded-md bg-zinc-800/80 text-[10px] text-zinc-400 cursor-pointer">
+                  <input v-model="screener.includeMain" type="checkbox" class="rounded border-zinc-600" /> 主板
+                </label>
+                <label class="flex items-center gap-1 px-2 py-1 rounded-md bg-zinc-800/80 text-[10px] text-zinc-400 cursor-pointer">
+                  <input v-model="screener.includeStar" type="checkbox" class="rounded border-zinc-600" /> 科创板
+                </label>
+                <label class="flex items-center gap-1 px-2 py-1 rounded-md bg-zinc-800/80 text-[10px] text-zinc-400 cursor-pointer">
+                  <input v-model="screener.includeChinext" type="checkbox" class="rounded border-zinc-600" /> 创业板
+                </label>
+                <label class="flex items-center gap-1 px-2 py-1 rounded-md bg-zinc-800/80 text-[10px] text-zinc-400 cursor-pointer">
+                  <input v-model="screener.includeBse" type="checkbox" class="rounded border-zinc-600" /> 北交所
+                </label>
+                <label class="flex items-center gap-1 px-2 py-1 rounded-md bg-zinc-800/80 text-[10px] text-zinc-400 cursor-pointer">
+                  <input v-model="screener.includeSt" type="checkbox" class="rounded border-zinc-600" /> 包含 ST
+                </label>
+              </div>
+              <p class="text-[10px] text-zinc-600">点击一行即可到行情看板看 K 线；侧栏回到「策略分析」或看板上的「返回选股」可继续看本次搜索结果。</p>
+              <p v-if="screenerError" class="text-xs text-red-400 bg-red-500/10 border border-red-500/20 rounded-lg px-3 py-2">{{ screenerError }}</p>
+              <div v-if="screenerResult" class="text-[10px] text-zinc-400">
+                交易日 {{ screenerResult.asof }} · 股票池 {{ screenerResult.universe }} · 入库 {{ screenerResult.filled_rows }} 行 · 命中 {{ screenerResult.hit_count }}
+              </div>
+              <div v-if="screenerResult?.hits?.length" class="border border-zinc-800 rounded-xl overflow-hidden">
+                <table class="w-full text-[11px]">
+                  <thead class="bg-zinc-800/80 text-zinc-500">
+                    <tr>
+                      <th class="text-left px-2 py-1.5 font-medium">代码</th>
+                      <th class="text-left px-2 py-1.5 font-medium">名称</th>
+                      <th class="text-left px-2 py-1.5 font-medium">板块</th>
+                      <th class="text-right px-2 py-1.5 font-medium">收盘</th>
+                      <th class="text-right px-2 py-1.5 font-medium">MA{{ screener.maPeriod }}</th>
+                      <th class="text-right px-2 py-1.5 font-medium">低于%</th>
+                      <th class="px-2 py-1.5"></th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    <tr
+                      v-for="h in screenerResult.hits"
+                      :key="h.ts_code"
+                      class="border-t border-zinc-800/60 hover:bg-zinc-800/40 cursor-pointer"
+                      :class="screenerActiveCode === h.ts_code ? 'bg-emerald-500/10' : ''"
+                      title="点击在行情看板查看"
+                      @click="openHitInDash(h)"
+                    >
+                      <td class="px-2 py-1.5 font-mono text-zinc-300">{{ h.ts_code }}</td>
+                      <td class="px-2 py-1.5 text-zinc-200">
+                        {{ h.name }}
+                        <span v-if="h.is_st" class="ml-1 text-[9px] text-red-400">ST</span>
+                      </td>
+                      <td class="px-2 py-1.5 text-zinc-500">{{ h.market }}</td>
+                      <td class="px-2 py-1.5 text-right tabular-nums">{{ h.close }}</td>
+                      <td class="px-2 py-1.5 text-right tabular-nums text-zinc-400">{{ h.ma5 }}</td>
+                      <td class="px-2 py-1.5 text-right tabular-nums text-emerald-400">{{ h.below_pct }}</td>
+                      <td class="px-2 py-1.5 text-right">
+                        <span class="text-[10px] text-sky-400">看行情</span>
+                      </td>
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
+              <div v-else-if="screenerResult && !screenerLoading" class="text-xs text-zinc-600 py-6 text-center">
+                没有满足条件的股票
+              </div>
+            </div>
+          </template>
+
           <!-- 感知与参数 -->
           <template v-if="mainTab === 'setup'">
             <div class="grid grid-cols-1 lg:grid-cols-2 gap-4">
@@ -205,6 +324,25 @@
                   <div>
                     <label class="text-[10px] text-zinc-500 block mb-1">结束日期</label>
                     <input v-model="config.end" type="date" class="w-full bg-zinc-800 border border-zinc-700 rounded-lg px-2.5 py-1.5 text-xs outline-none" />
+                  </div>
+                  <div class="col-span-2">
+                    <button
+                      type="button"
+                      @click="fetchRangeData"
+                      :disabled="rangeLoading || !config.tsCode || !config.start || !config.end"
+                      class="w-full px-2.5 py-1.5 rounded-lg text-[11px] bg-emerald-600/20 text-emerald-300 border border-emerald-500/30 hover:bg-emerald-600/30 disabled:opacity-50"
+                    >
+                      <i class="fa-solid fa-cloud-arrow-down mr-1" :class="{ 'fa-spinner animate-spin': rangeLoading }"></i>
+                      {{ rangeLoading ? '正在检查并补齐…' : '获取数据' }}
+                    </button>
+                    <p v-if="rangeError" class="mt-1.5 text-[10px] text-red-400">{{ rangeError }}</p>
+                    <p v-else-if="rangeReport" class="mt-1.5 text-[10px] text-zinc-400 leading-relaxed">
+                      {{ rangeReport.table }} · 应有 {{ rangeReport.expected }} 个交易日，库内原有 {{ rangeReport.existing_before }}，缺口 {{ rangeReport.missing_before }}
+                      <template v-if="rangeReport.skipped"> · 已齐，无需补拉</template>
+                      <template v-else> · 本次写入 {{ rangeUpserted }}，补后仍缺 {{ rangeReport.still_missing }}</template>
+                      <span v-if="rangeReport.note" class="text-zinc-500"> · {{ rangeReport.note }}</span>
+                    </p>
+                    <p v-else class="mt-1.5 text-[10px] text-zinc-600">对照所选区间检查 PostgreSQL，缺口则从 Tushare 兼容源写入对应表</p>
                   </div>
                   <div>
                     <label class="text-[10px] text-zinc-500 block mb-1">初始资金</label>
@@ -504,6 +642,7 @@
 <script setup lang="ts">
 import { ref, reactive, computed, watch, nextTick, onMounted, onUnmounted } from 'vue'
 import * as echarts from 'echarts'
+import { openStockInDash } from './appNav'
 
 const MEMORY_KEY = 'strategy_analysis_memory_v1'
 
@@ -523,13 +662,31 @@ const optionValues = reactive<Record<string, boolean>>({
 })
 const running = ref(false)
 const stopAuto = ref(false)
-const mainTab = ref<'setup' | 'backtest' | 'memory' | 'logs'>('setup')
+const mainTab = ref<'setup' | 'screener' | 'backtest' | 'memory' | 'logs'>('setup')
 const mainTabs = [
   { id: 'setup', label: '感知与参数' },
+  { id: 'screener', label: '选股器' },
   { id: 'backtest', label: '回测验证' },
   { id: 'memory', label: '策略记忆' },
   { id: 'logs', label: 'Agent 日志' },
 ]
+const toolboxMode = ref<'strategy' | 'screener'>('strategy')
+const screenerLoading = ref(false)
+const screenerError = ref('')
+const screenerResult = ref<any>(null)
+const screenerActiveCode = ref('')
+const SCREENER_CACHE_KEY = 'strategy_screener_cache_v1'
+const screener = reactive({
+  asof: '',
+  maPeriod: 5,
+  belowPct: 0,
+  limit: 200,
+  includeMain: true,
+  includeStar: true,
+  includeChinext: true,
+  includeBse: false,
+  includeSt: false,
+})
 
 const cycleNodes = [
   { id: 'analyze', label: '分析' },
@@ -544,10 +701,112 @@ const catalogError = ref('')
 const selectedStrategy = ref<any>(null)
 const paramValues = reactive<Record<string, number>>({})
 
+function persistScreenerCache() {
+  try {
+    sessionStorage.setItem(SCREENER_CACHE_KEY, JSON.stringify({
+      form: { ...screener },
+      result: screenerResult.value,
+      active: screenerActiveCode.value,
+    }))
+  } catch { /* ignore */ }
+}
+
+function restoreScreenerCache() {
+  try {
+    const raw = sessionStorage.getItem(SCREENER_CACHE_KEY)
+    if (!raw) return false
+    const data = JSON.parse(raw)
+    if (data.form) Object.assign(screener, data.form)
+    if (data.result) screenerResult.value = data.result
+    if (data.active) screenerActiveCode.value = data.active
+    return !!data.result
+  } catch {
+    return false
+  }
+}
+
 function selectStrategy(s: any) {
+  toolboxMode.value = 'strategy'
   selectedStrategy.value = s
   for (const key of Object.keys(paramValues)) delete paramValues[key]
   for (const p of s.params || []) paramValues[p.name] = p.default
+}
+
+function openScreener() {
+  toolboxMode.value = 'screener'
+  mainTab.value = 'screener'
+  if (!screener.asof) loadScreenerAsof()
+}
+
+async function loadScreenerAsof() {
+  try {
+    const res = await fetch('/strategy/screener/asof')
+    const data = await res.json().catch(() => ({}))
+    if (data?.asof) screener.asof = String(data.asof).slice(0, 10)
+  } catch (_) { /* 使用手动日期 */ }
+}
+
+async function runScreener() {
+  screenerLoading.value = true
+  screenerError.value = ''
+  screenerResult.value = null
+  try {
+    const res = await fetch('/strategy/screener/below-ma', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        asof: screener.asof || null,
+        ma_period: screener.maPeriod || 5,
+        below_pct: screener.belowPct || 0,
+        include_st: screener.includeSt,
+        include_main: screener.includeMain,
+        include_star: screener.includeStar,
+        include_chinext: screener.includeChinext,
+        include_bse: screener.includeBse,
+        include_cdr: false,
+        limit: screener.limit || 200,
+        fill: true,
+      }),
+    })
+    const data = await res.json().catch(() => ({}))
+    if (!res.ok) {
+      const detail = data.detail
+      screenerError.value = typeof detail === 'string' ? detail : (detail?.error || `HTTP ${res.status}`)
+      pushLog(`[选股] 失败: ${screenerError.value}`, 'error')
+      return
+    }
+    screenerResult.value = data
+    if (data.asof) screener.asof = String(data.asof).slice(0, 10)
+    persistScreenerCache()
+    pushLog(
+      `[选股] ${data.asof} 低于MA${data.ma_period} ≥${data.below_pct}% · 池${data.universe} · 入库${data.filled_rows} · 命中${data.hit_count}`,
+      'ok',
+    )
+  } catch (e: any) {
+    screenerError.value = e?.message || String(e)
+    pushLog(`[选股] 异常: ${screenerError.value}`, 'error')
+  } finally {
+    screenerLoading.value = false
+  }
+}
+
+function openHitInDash(h: any) {
+  if (!h?.ts_code) return
+  config.tsCode = h.ts_code
+  screenerActiveCode.value = h.ts_code
+  persistScreenerCache()
+  toolboxMode.value = 'screener'
+  mainTab.value = 'screener'
+  openStockInDash({
+    ts_code: h.ts_code,
+    name: h.name,
+    industry: h.industry,
+  }, 'screener')
+  pushLog(`[选股] 打开行情看板 ${h.name || ''} ${h.ts_code}`, 'ok')
+}
+
+function useScreenerHit(h: any) {
+  openHitInDash(h)
 }
 
 function strategyFitsRegime(s: any, regime: string) {
@@ -651,6 +910,13 @@ const perceiveLoading = ref(false)
 const perceiveData = ref<any>(null)
 const perceiveError = ref('')
 const perceiveOk = computed(() => !!perceiveData.value?.ok)
+const rangeLoading = ref(false)
+const rangeError = ref('')
+const rangeReport = ref<any>(null)
+const rangeUpserted = computed(() => {
+  const u = rangeReport.value?.upserted || {}
+  return Object.values(u).reduce((sum: number, n: any) => sum + (Number(n) || 0), 0)
+})
 
 const featureEntries = computed(() => {
   const f = perceiveData.value?.features
@@ -741,18 +1007,66 @@ function sleep(ms: number) {
   return new Promise(r => setTimeout(r, ms))
 }
 
-async function loadPerceive() {
+async function fetchRangeData() {
+  const tsCode = config.tsCode.trim()
+  if (!tsCode || !config.start || !config.end) {
+    rangeError.value = '请先填写标的代码、开始日期和结束日期'
+    return
+  }
+  rangeLoading.value = true
+  rangeError.value = ''
+  rangeReport.value = null
+  try {
+    const extra = config.benchmark && config.benchmark !== tsCode ? [config.benchmark.trim()] : []
+    const res = await fetch('/data/selective/ensure-range', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        ts_code: tsCode,
+        start: config.start,
+        end: config.end,
+        extra_codes: extra,
+      }),
+    })
+    const data = await res.json().catch(() => ({}))
+    if (!res.ok) {
+      const detail = data.detail
+      rangeError.value = typeof detail === 'string' ? detail : (detail?.error || `HTTP ${res.status}`)
+      pushLog(`[获取数据] 失败: ${rangeError.value}`, 'error')
+      return
+    }
+    rangeReport.value = data
+    const extraNote = (data.extras || [])
+      .map((x: any) => `${x.ts_code} 缺口${x.missing_before ?? '?'} 写入${Object.values(x.upserted || {}).reduce((a: number, b: any) => a + (Number(b) || 0), 0)}`)
+      .join('；')
+    pushLog(
+      `[获取数据] ${data.ts_code} → ${data.table} · 应有${data.expected} 原有${data.existing_before} 缺口${data.missing_before} 写入${Object.values(data.upserted || {}).reduce((a: number, b: any) => a + (Number(b) || 0), 0)} 仍缺${data.still_missing}` +
+        (extraNote ? ` · 基准 ${extraNote}` : ''),
+      data.still_missing ? 'warn' : 'ok',
+    )
+    await loadPerceive({ keepDates: true, skipEnsure: true })
+  } catch (e: any) {
+    rangeError.value = e?.message || String(e)
+    pushLog(`[获取数据] 异常: ${rangeError.value}`, 'error')
+  } finally {
+    rangeLoading.value = false
+  }
+}
+
+async function loadPerceive(opts: { keepDates?: boolean; skipEnsure?: boolean } = {}) {
   perceiveLoading.value = true
   perceiveError.value = ''
   try {
-    // 挑选式：标的缺/旧则后端感知前会补 Datahubco；此处也可显式触发
-    try {
-      await fetch('/data/selective/ensure', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ ts_code: config.tsCode.trim(), mode: 'fresh' }),
-      })
-    } catch (_) { /* 后端 perceive 仍会再补一次 */ }
+    // 挑选式：标的缺/旧则后端感知前会补 Datahubco；区间补齐后可跳过 fresh
+    if (!opts.skipEnsure) {
+      try {
+        await fetch('/data/selective/ensure', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ ts_code: config.tsCode.trim(), mode: 'fresh' }),
+        })
+      } catch (_) { /* 后端 perceive 仍会再补一次 */ }
+    }
 
     const feats = featureToggles.filter(f => f.enabled).map(f => f.id).join(',') || 'ma,rsi,vol_pctile'
     const params = new URLSearchParams({
@@ -776,8 +1090,10 @@ async function loadPerceive() {
       state.regime = data.regime.regime
       state.analysisNote = data.regime.detail || `${data.name} ${data.bar_count} bars`
     }
-    if (data.date_range?.start) config.start = data.date_range.start
-    if (data.date_range?.end) config.end = data.date_range.end
+    if (!opts.keepDates) {
+      if (data.date_range?.start) config.start = data.date_range.start
+      if (data.date_range?.end) config.end = data.date_range.end
+    }
     pushLog(
       `[感知] PostgreSQL · ${data.name}(${data.ts_code}) · ${data.bar_count}根 · ${data.regime?.label} · 最新${data.latest?.trade_date} 收${data.latest?.close}`,
       'ok'
@@ -1053,8 +1369,13 @@ function onResize() {
 onMounted(async () => {
   window.addEventListener('resize', onResize)
   pushLog('策略分析工作台已就绪 · 可切换模式 A / B', 'ok')
-  await Promise.all([loadCatalog(), loadOptions()])
-  loadPerceive()
+  const hadCache = restoreScreenerCache()
+  if (hadCache) {
+    toolboxMode.value = 'screener'
+    mainTab.value = 'screener'
+  }
+  await Promise.all([loadCatalog(), loadOptions(), hadCache ? Promise.resolve() : loadScreenerAsof()])
+  if (!hadCache) loadPerceive()
 })
 
 onUnmounted(() => {

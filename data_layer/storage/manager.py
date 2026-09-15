@@ -415,7 +415,7 @@ class PostgresManager:
             return await session.get(model, pk_values)
 
     async def count(self, table: str, **filters) -> int:
-        """统计行数"""
+        """统计行数（精确 COUNT，大表会很慢；行情中心摘要请用 estimate_table_counts）"""
         self._check_initialized()
         model = TABLE_MODEL_MAP.get(table)
         if model is None:
@@ -431,6 +431,31 @@ class PostgresManager:
         async with self.get_async_session_context() as session:
             result = await session.execute(stmt)
             return result.scalar() or 0
+
+    async def estimate_table_counts(self, tables: list[str] | None = None) -> dict[str, int]:
+        """用 pg_class.reltuples 一次取多表近似行数，避免对大表逐个 COUNT(*)。"""
+        self._check_initialized()
+        names = tables or list(TABLE_MODEL_MAP.keys())
+        if not names:
+            return {}
+        placeholders = ", ".join(f":t{i}" for i in range(len(names)))
+        sql = f"""
+        SELECT c.relname AS table_name,
+               GREATEST(COALESCE(s.n_live_tup, 0), GREATEST(c.reltuples, 0))::bigint AS est_rows
+        FROM pg_class c
+        JOIN pg_namespace n ON n.oid = c.relnamespace
+        LEFT JOIN pg_stat_user_tables s ON s.relid = c.oid
+        WHERE n.nspname = 'public'
+          AND c.relkind IN ('r', 'p', 'm')
+          AND c.relname IN ({placeholders})
+        """
+        params = {f"t{i}": name for i, name in enumerate(names)}
+        df = await self.query_sql(sql, params)
+        counts = {name: 0 for name in names}
+        if df is not None and not df.empty:
+            for _, row in df.iterrows():
+                counts[str(row["table_name"])] = int(row["est_rows"] or 0)
+        return counts
 
     async def get_table_stats(self) -> pd.DataFrame:
         """获取所有表的行数统计"""

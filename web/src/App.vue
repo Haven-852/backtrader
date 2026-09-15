@@ -274,8 +274,15 @@
                 <div class="flex-shrink-0 px-5 py-3 border-b border-zinc-800" v-if="previewData.columns?.length">
                   <h4 class="text-xs font-semibold text-zinc-400 mb-2 uppercase tracking-wide">列信息 ({{ previewData.columns.length }} 列)</h4>
                   <div class="flex flex-wrap gap-1.5">
-                    <span v-for="col in previewData.columns.slice(0, 20)" :key="col.name" class="inline-flex items-center gap-1 px-2 py-0.5 rounded text-xs bg-zinc-800 text-zinc-400" :title="col.name+': '+col.type">{{ col.name }}<span class="text-zinc-600">:{{ col.type }}</span></span>
-                    <span v-if="previewData.columns.length > 20" class="text-xs text-zinc-600 self-center">...还有 {{ previewData.columns.length - 20 }} 列</span>
+                    <span
+                      v-for="col in previewData.columns"
+                      :key="col.name"
+                      class="inline-flex items-center gap-1 px-2 py-0.5 rounded text-xs bg-zinc-800 text-zinc-400"
+                      :title="(col.label || col.name) + (col.type ? ' · ' + col.type : '')"
+                    >
+                      <span class="text-zinc-300 font-mono">{{ col.name }}</span>
+                      <span class="text-emerald-500/90">：{{ col.label || col.name }}</span>
+                    </span>
                   </div>
                 </div>
                 <div class="flex-1 flex flex-col min-h-0">
@@ -290,8 +297,8 @@
                   <div class="flex-1 overflow-auto px-5 pb-4" v-if="previewData.rows?.length">
                     <div class="overflow-x-auto max-h-full">
                       <table class="w-full text-xs border-collapse">
-                        <thead class="sticky top-0 z-10"><tr class="border-b border-zinc-700 bg-zinc-900"><th class="text-left py-2 px-3 text-zinc-500 font-medium sticky left-0 bg-zinc-900">#</th><th v-for="col in previewColumns" :key="col" class="text-left py-2 px-3 text-zinc-400 font-medium whitespace-nowrap">{{ col }}</th></tr></thead>
-                        <tbody><tr v-for="(row, ri) in previewData.rows" :key="ri" class="border-b border-zinc-800/50 hover:bg-zinc-800/30"><td class="py-1.5 px-3 text-zinc-600 sticky left-0 bg-zinc-900 tabular-nums">{{ previewOffset + ri + 1 }}</td><td v-for="col in previewColumns" :key="col" class="py-1.5 px-3 text-zinc-300 whitespace-nowrap max-w-[220px] truncate" :title="formatCell(row[col])">{{ formatCell(row[col]) }}</td></tr></tbody>
+                        <thead class="sticky top-0 z-10"><tr class="border-b border-zinc-700 bg-zinc-900"><th class="text-left py-2 px-3 text-zinc-500 font-medium sticky left-0 bg-zinc-900">#</th><th v-for="col in previewColumns" :key="col.name" class="text-left py-2 px-3 text-zinc-400 font-medium whitespace-nowrap" :title="col.name"><span class="text-zinc-300">{{ col.label }}</span><span class="ml-1 text-[10px] text-zinc-600 font-mono">{{ col.name }}</span></th></tr></thead>
+                        <tbody><tr v-for="(row, ri) in previewData.rows" :key="ri" class="border-b border-zinc-800/50 hover:bg-zinc-800/30"><td class="py-1.5 px-3 text-zinc-600 sticky left-0 bg-zinc-900 tabular-nums">{{ previewOffset + ri + 1 }}</td><td v-for="col in previewColumns" :key="col.name" class="py-1.5 px-3 text-zinc-300 whitespace-nowrap max-w-[220px] truncate" :title="formatCell(row[col.name])">{{ formatCell(row[col.name]) }}</td></tr></tbody>
                       </table>
                     </div>
                     <div v-if="previewLoadingMore" class="flex justify-center py-3"><i class="fa-solid fa-spinner animate-spin text-zinc-500"></i></div>
@@ -303,13 +310,15 @@
           </div>
         </div>
 
-        <!-- Market Data Tab -->
-        <div v-if="currentTab === 3" class="h-full">
-          <MarketDashView />
+        <!-- Market Data Tab：KeepAlive 避免每次点击都整页重拉 -->
+        <div v-show="currentTab === 3" class="h-full min-h-0 overflow-hidden">
+          <KeepAlive>
+            <MarketDashView v-if="currentTab === 3" />
+          </KeepAlive>
         </div>
 
-        <!-- Strategy Analysis Tab -->
-        <div v-if="currentTab === 4" class="flex-1 min-h-0 overflow-hidden">
+        <!-- Strategy Analysis Tab：v-show 保活，选股结果离开看板后仍在 -->
+        <div v-show="currentTab === 4" class="flex-1 min-h-0 overflow-hidden">
           <StrategyView />
         </div>
       </div>
@@ -324,8 +333,7 @@ import ChatView from './ChatView.vue'
 import DashView from './DashView.vue'
 import MarketDashView from './MarketDashView.vue'
 import StrategyView from './StrategyView.vue'
-
-const currentTab = ref(1)
+import { currentTab } from './appNav'
 
 const tabTitles = ['大模型对话', '行情看板', '存储层状态', '行情中心', '策略分析']
 const tabSubtitles = ['DeepSeek · GPT · Claude', 'K线 · MA · MACD · RSI', '连通测试 · 数据预览', '全市场 · 30张表', '模式A/B · 回测 · 记忆']
@@ -360,7 +368,7 @@ const testAllDatabases = async () => {
 }
 
 interface TableInfo { table_name: string; name: string; label: string; category: string; desc: string; source: string; rows: number; has_data: boolean }
-interface PreviewData { table_name: string; info: TableInfo; columns: { name: string; type: string; nullable: boolean }[]; rows: Record<string, any>[]; total_rows: number; preview_count: number }
+interface PreviewData { table_name: string; info: TableInfo; columns: { name: string; type: string; nullable: boolean; label?: string }[]; rows: Record<string, any>[]; total_rows: number; preview_count: number }
 
 const backends = [
   { key: 'postgresql', label: 'PostgreSQL', icon: 'fa-solid fa-database', desc: '结构化 & 时序K线' },
@@ -393,8 +401,12 @@ const filteredItems = computed(() => {
 })
 
 const previewColumns = computed(() => {
-  if (!previewData.value?.rows?.length) return []
-  return Object.keys(previewData.value.rows[0])
+  const cols = previewData.value?.columns
+  if (cols?.length) {
+    return cols.map((c) => ({ name: c.name, label: c.label || c.name }))
+  }
+  if (!previewData.value?.rows?.length) return [] as { name: string; label: string }[]
+  return Object.keys(previewData.value.rows[0]).map((name) => ({ name, label: name }))
 })
 
 function getBackendStatus(key: string): string {

@@ -12,6 +12,7 @@ from sqlalchemy import text as sa_text
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from data_layer.db_manager import storage_manager
+from server.column_labels import enrich_columns
 
 logger = logging.getLogger(__name__)
 
@@ -27,6 +28,9 @@ PG_TABLES_INFO: Dict[str, Dict[str, str]] = {
     "ref_policy_law": {"name":"政策法规库","category":"参照数据","desc":"监管政策与法律法规","source":"手动采集"},
     "ref_stk_limit_daily": {"name":"涨跌停价","category":"参照数据","desc":"每日涨跌停限制价格","source":"Tushare stk_limit"},
     "ref_suspend_d": {"name":"停复牌信息","category":"参照数据","desc":"停牌/复牌记录","source":"Tushare suspend_d"},
+    "dash_watchlist": {"name":"看板自选股","category":"参照数据","desc":"行情看板自选及持续日更名单","source":"用户自选"},
+    "strategy_screener_run": {"name":"选股运行","category":"策略分析","desc":"低于均线等选股任务记录","source":"策略选股器"},
+    "strategy_screener_hit": {"name":"选股命中","category":"策略分析","desc":"选股命中标的及偏离幅度","source":"策略选股器"},
     "news_article": {"name":"新闻资讯","category":"新闻资讯","desc":"财经新闻与资讯","source":"Tushare news"},
     "news_ann": {"name":"公司公告","category":"新闻资讯","desc":"上市公司公告披露","source":"Tushare anns"},
     "board_secretary_interact": {"name":"董秘互动","category":"互动与研究","desc":"投资者与董秘问答","source":"Tushare"},
@@ -55,6 +59,10 @@ PG_TABLES_INFO: Dict[str, Dict[str, str]] = {
     "margin_detail_daily": {"name":"两融明细","category":"特色指标","desc":"个股融资融券","source":"Tushare margin_detail"},
     "stock_block_trade": {"name":"大宗交易","category":"特色指标","desc":"大额交易记录","source":"Tushare block_trade"},
     "index_weight": {"name":"指数权重","category":"特色指标","desc":"成分股权重数据","source":"Tushare index_weight"},
+    "sector_dc_index_daily": {"name":"东财行业板块指数","category":"板块行情","desc":"涨跌幅/领涨股/涨跌家数/层级","source":"Datahubco dc_index"},
+    "sector_dc_daily": {"name":"东财行业板块日K","category":"板块行情","desc":"板块OHLC/成交额","source":"Datahubco dc_daily"},
+    "sector_moneyflow_daily": {"name":"东财板块资金流","category":"板块行情","desc":"主力净流入等","source":"Datahubco moneyflow_ind_dc"},
+    "sector_dc_member": {"name":"东财板块成分","category":"板块行情","desc":"板块成分股列表","source":"Datahubco dc_member"},
 }
 
 
@@ -229,6 +237,7 @@ class StorageService:
             cdf = pd.read_sql(sa_text(col_sql), engine, params={"t": table})
             if cdf.empty: return {"error": f"表 {table} 不存在"}
             cols = [{"name":r["column_name"],"type":r["data_type"],"nullable":r["is_nullable"]=="YES"} for _,r in cdf.iterrows()]
+            cols = enrich_columns(cols, table)
 
             try:
                 rsql = f'SELECT * FROM "{table}" ORDER BY 1 LIMIT {limit} OFFSET {offset}'
@@ -324,6 +333,7 @@ class StorageService:
                     cols_set.update(row.keys())
 
             cols = [{"name": c, "type": "string", "nullable": True} for c in sorted(cols_set)]
+            cols = enrich_columns(cols, "influx")
             return {"name": item, "label": f"{bucket}/{measurement}", "info": {"desc": f"Measurement: {measurement} in {bucket}", "category": "InfluxDB"},
                     "columns": cols, "rows": rows[:limit], "total_rows": len(rows), "preview_count": len(rows),
                     "offset": 0, "limit": limit, "has_more": False}
@@ -397,6 +407,7 @@ class StorageService:
                 rows = [{"key": key, "value": _ser(val)}]
 
             cols = [{"name": c, "type": "string", "nullable": True} for c in (rows[0].keys() if rows else ["key","value"])]
+            cols = enrich_columns(cols, "redis")
 
             return {"name": key, "label": key, "info": {"desc": f"类型: {ktype}, TTL: {ttl if ttl>0 else '永久'}", "category": "Redis"},
                     "columns": cols, "rows": rows, "total_rows": len(rows), "preview_count": len(rows),
@@ -447,6 +458,7 @@ class StorageService:
                     {"name":"size","type":"bigint","nullable":True},
                     {"name":"last_modified","type":"timestamp","nullable":True},
                     {"name":"content_type","type":"text","nullable":True}]
+            cols = enrich_columns(cols, "minio")
 
             return {"name": bucket, "label": f"🪣 {bucket}", "info": {"desc": f"MinIO Bucket 对象列表", "category": "MinIO"},
                     "columns": cols, "rows": rows, "total_rows": len(rows), "preview_count": len(rows),

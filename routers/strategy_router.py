@@ -8,11 +8,13 @@ GET  /strategy/meta             - 数据覆盖
 POST /strategy/hypothesize      - 假设生成（后端）
 POST /strategy/backtest         - 回测（后端，真实日线）
 POST /strategy/reflect          - 反思（后端）
+POST /strategy/screener/below-ma - 前一日低于 N 日均线选股
 """
 
 from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel, Field
 from typing import Any, Dict, Optional
+import asyncio
 
 from server.strategy_service import strategy_service
 from server.strategy_cycle_service import strategy_cycle_service
@@ -188,3 +190,67 @@ async def reflect(body: ReflectRequest):
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"反思失败: {e}")
+
+
+class BelowMaRequest(BaseModel):
+    asof: Optional[str] = Field(None, description="交易日 YYYY-MM-DD，默认上一已收盘交易日")
+    ma_period: int = Field(5, ge=2, le=60)
+    below_pct: float = Field(0, ge=0, le=50, description="相对均线至少低多少个百分点，0 表示只要低于均线")
+    include_st: bool = False
+    include_main: bool = True
+    include_star: bool = True
+    include_chinext: bool = True
+    include_bse: bool = False
+    include_cdr: bool = False
+    limit: int = Field(200, ge=10, le=1000)
+    fill: bool = Field(True, description="缺口则从 Tushare 兼容源拉取并写入 stock_daily")
+
+
+@router.get("/screener/asof")
+async def screener_asof():
+    """选股默认交易日（上一已收盘日）"""
+    try:
+        from data_layer.collectors.datahubco.selective import selective_fetcher
+
+        selective_fetcher.ensure_trade_cal()
+        ctx = selective_fetcher.session_context()
+        return {
+            "ok": True,
+            "asof": ctx.get("asof"),
+            "today": ctx.get("today"),
+            "reason": ctx.get("reason"),
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/screener/below-ma")
+async def screener_below_ma(body: BelowMaRequest):
+    """
+    搜索指定交易日（默认前一已收盘日）收盘价低于 N 日均线的股票。
+    缺口日线从 Datahubco 拉取写入 stock_daily，命中写入 strategy_screener_hit。
+    """
+    try:
+        from server.screener_service import screener_service
+
+        result = await asyncio.to_thread(
+            screener_service.screen_below_ma,
+            body.asof,
+            body.ma_period,
+            body.below_pct,
+            body.include_st,
+            body.include_main,
+            body.include_star,
+            body.include_chinext,
+            body.include_bse,
+            body.include_cdr,
+            body.limit,
+            body.fill,
+        )
+        if not result.get("ok"):
+            raise HTTPException(status_code=400, detail=result.get("error") or "选股失败")
+        return result
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"选股失败: {e}")

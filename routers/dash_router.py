@@ -13,6 +13,7 @@ from fastapi import APIRouter, HTTPException, Query
 from typing import Optional, List, Dict, Any
 
 from server.dash_service import dash_service
+from server.intraday_service import intraday_service
 
 router = APIRouter(prefix="/dash", tags=["dash"])
 
@@ -70,6 +71,32 @@ async def get_stock_info(ts_code: str):
         raise HTTPException(status_code=500, detail=f"获取股票信息失败: {str(e)}")
 
 
+@router.get("/intraday")
+async def get_intraday(
+    ts_code: str = Query(..., min_length=1, description="股票代码，如 002028.SZ 或 002028"),
+    trade_date: Optional[str] = Query(None, description="交易日 YYYY-MM-DD；默认当日/最近交易日"),
+    history: bool = Query(False, description="True=按历史回看，只查 Timescale 不写 Redis"),
+):
+    """
+    当日分时：盘中 Redis 出图，同时写入 Timescale stock_intraday_mins，
+    并用分时聚合 upsert stock_daily。
+    指定历史日或 history=true：只查/补 Timescale，不回填 Redis。
+    """
+    try:
+        result = await intraday_service.get(
+            ts_code=ts_code,
+            trade_date=trade_date,
+            history=history,
+        )
+        if result.get("ok") is False and not result.get("bars"):
+            raise HTTPException(status_code=400, detail=result.get("error") or "无分时数据")
+        return result
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"获取分时失败: {str(e)}")
+
+
 @router.get("/kline")
 async def get_kline(
     ts_code: str = Query(..., min_length=1, description="股票代码（如 000001.SZ）"),
@@ -78,6 +105,7 @@ async def get_kline(
     end: Optional[str] = Query(None, description="结束日期 (YYYY-MM-DD)"),
     limit: int = Query(default=500, ge=1, le=5000, description="最大返回条数"),
     indicators: Optional[str] = Query(None, description="技术指标（逗号分隔）: ma,ema,macd,rsi,boll,kdj,volume"),
+    auto_fill: bool = Query(True, description="个股缺数时是否自动补最新/向前续拉"),
 ):
     """
     获取K线数据
@@ -99,6 +127,7 @@ async def get_kline(
             end=end,
             limit=limit,
             indicators=ind_list,
+            auto_fill=auto_fill,
         )
 
         if "error" in result:
@@ -135,10 +164,12 @@ async def get_quick_analysis(
 
 
 @router.get("/indices")
-async def get_indices():
-    """获取大盘指数实时快照（同花顺风格）"""
+async def get_indices(
+    auto_sync: bool = Query(True, description="缺/旧数据时自动从 Datahubco 持续补齐 index_daily"),
+):
+    """获取大盘指数快照（同花顺风格顶部条；持续获取写入 index_daily）"""
     try:
-        indices = await dash_service.get_index_snapshots()
+        indices = await dash_service.get_index_snapshots(auto_sync=auto_sync)
         return {"indices": indices, "total": len(indices)}
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"获取指数数据失败: {str(e)}")
@@ -190,6 +221,79 @@ async def get_etf_board(
         return await dash_service.get_etf_board(limit_per_market=limit)
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"获取ETF看板失败: {str(e)}")
+
+
+@router.get("/sector-board")
+async def get_sector_board(
+    level: str = Query(default="东财一级行业", description="东财一级/二级/三级行业"),
+    trade_date: Optional[str] = Query(None, description="YYYY-MM-DD 或 YYYYMMDD"),
+    auto_sync: bool = Query(True, description="缺数据时自动从 Datahubco 同步"),
+    parent_code: Optional[str] = Query(None, description="父板块代码；传入则返回其子行业气泡数据"),
+):
+    """东财行业板块气泡图数据（index+daily+moneyflow 合并；支持按父板块下钻）"""
+    try:
+        from server.sector_service import sector_service
+
+        return await sector_service.get_board_async(
+            level=level,
+            trade_date=trade_date,
+            auto_sync=auto_sync,
+            parent_code=parent_code,
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"获取行业板块看板失败: {str(e)}")
+
+
+@router.get("/sector/{ts_code}/members")
+async def get_sector_members(
+    ts_code: str,
+    trade_date: Optional[str] = Query(None),
+    auto_fetch: bool = Query(True),
+):
+    """板块成分股 + 当日行情"""
+    try:
+        from server.sector_service import sector_service
+
+        return await sector_service.get_members_async(
+            ts_code=ts_code, trade_date=trade_date, auto_fetch=auto_fetch
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"获取板块成分失败: {str(e)}")
+
+
+@router.get("/sector/{ts_code}/children")
+async def get_sector_children(
+    ts_code: str,
+    trade_date: Optional[str] = Query(None),
+    auto_sync: bool = Query(True),
+):
+    """某板块下的子行业气泡数据（L1→L2 或 L2→L3）"""
+    try:
+        from server.sector_service import sector_service
+
+        return await sector_service.get_board_async(
+            trade_date=trade_date,
+            auto_sync=auto_sync,
+            parent_code=ts_code,
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"获取子板块失败: {str(e)}")
+
+
+@router.post("/sector-hierarchy/rebuild")
+async def rebuild_sector_hierarchy(
+    trade_date: Optional[str] = Query(None),
+    sync_members: bool = Query(True, description="重建前补齐缺失成分股"),
+):
+    """按成分股包含关系重建一级→二级→三级层级表"""
+    try:
+        from server.sector_service import sector_service
+
+        return await sector_service.rebuild_hierarchy_async(
+            trade_date=trade_date, sync_members=sync_members
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"重建行业层级失败: {str(e)}")
 
 
 @router.get("/etf-kline")

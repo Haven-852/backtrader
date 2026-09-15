@@ -102,7 +102,7 @@ POSTGRES_DDL_LIST = [
         base_point     NUMERIC(16,4),
         list_date      DATE,
         weight_rule    VARCHAR(20),
-        desc           TEXT,
+        "desc"         TEXT,
         exp_date       DATE
     )
     """,
@@ -641,6 +641,53 @@ POSTGRES_DDL_LIST = [
         PRIMARY KEY (ts_code, end_date)
     )
     """,
+
+    # 21. 策略选股运行
+    """
+    CREATE TABLE IF NOT EXISTS strategy_screener_run (
+        id           SERIAL PRIMARY KEY,
+        asof         DATE NOT NULL,
+        ma_period    INT DEFAULT 5,
+        below_pct    NUMERIC(8,4) DEFAULT 0,
+        filters      JSONB,
+        hit_count    INT,
+        filled_rows  INT,
+        created_at   TIMESTAMPTZ DEFAULT NOW()
+    )
+    """,
+
+    # 22. 策略选股命中
+    """
+    CREATE TABLE IF NOT EXISTS strategy_screener_hit (
+        run_id       INT NOT NULL,
+        ts_code      VARCHAR(16) NOT NULL,
+        name         VARCHAR(64),
+        market       VARCHAR(16),
+        industry     VARCHAR(50),
+        is_st        BOOLEAN,
+        trade_date   DATE,
+        close        NUMERIC(12,4),
+        ma5          NUMERIC(12,4),
+        below_pct    NUMERIC(12,4),
+        PRIMARY KEY (run_id, ts_code)
+    )
+    """,
+
+    # 20. 行情看板自选股（持续日更名单）
+    """
+    CREATE TABLE IF NOT EXISTS dash_watchlist (
+        ts_code         VARCHAR(16)   PRIMARY KEY,
+        name            VARCHAR(64),
+        short_name      VARCHAR(64),
+        kind            VARCHAR(16)   DEFAULT 'stock',
+        industry        VARCHAR(64),
+        continuous      BOOLEAN       DEFAULT TRUE,
+        created_at      TIMESTAMPTZ   DEFAULT NOW(),
+        last_synced_at  TIMESTAMPTZ,
+        last_sync_ok    BOOLEAN,
+        last_sync_error TEXT
+    )
+    """,
 ]
 
 # ─────────────────────────────────────────────────────────────────────
@@ -1023,6 +1070,139 @@ TIMESCALEDB_DDL_LIST = [
         """,
         "trade_date"
     ),
+
+    # 20. 东财行业板块指数日（dc_index）
+    (
+        """
+        CREATE TABLE IF NOT EXISTS sector_dc_index_daily (
+            ts_code        VARCHAR(16)  NOT NULL,
+            trade_date     DATE         NOT NULL,
+            name           VARCHAR(64),
+            leading_name   VARCHAR(64),
+            leading_code   VARCHAR(16),
+            pct_change     NUMERIC(12,4),
+            leading_pct    NUMERIC(12,4),
+            total_mv       NUMERIC(20,4),
+            turnover_rate  NUMERIC(12,4),
+            up_num         INT,
+            down_num       INT,
+            idx_type       VARCHAR(32),
+            industry_level VARCHAR(32),
+            updated_at     TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY (ts_code, trade_date)
+        )
+        """,
+        "trade_date"
+    ),
+
+    # 21. 东财行业板块日行情（dc_daily）
+    (
+        """
+        CREATE TABLE IF NOT EXISTS sector_dc_daily (
+            ts_code        VARCHAR(16)  NOT NULL,
+            trade_date     DATE         NOT NULL,
+            open           NUMERIC(16,4),
+            high           NUMERIC(16,4),
+            low            NUMERIC(16,4),
+            close          NUMERIC(16,4),
+            change         NUMERIC(16,4),
+            pct_change     NUMERIC(12,4),
+            vol            BIGINT,
+            amount         NUMERIC(24,4),
+            swing          NUMERIC(12,4),
+            turnover_rate  NUMERIC(12,4),
+            category       VARCHAR(32),
+            updated_at     TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY (ts_code, trade_date)
+        )
+        """,
+        "trade_date"
+    ),
+
+    # 22. 东财行业板块资金流向
+    (
+        """
+        CREATE TABLE IF NOT EXISTS sector_moneyflow_daily (
+            trade_date            DATE         NOT NULL,
+            content_type          VARCHAR(16)  NOT NULL,
+            ts_code               VARCHAR(16)  NOT NULL,
+            name                  VARCHAR(64),
+            pct_change            NUMERIC(12,4),
+            close                 NUMERIC(16,4),
+            net_amount            NUMERIC(24,4),
+            net_amount_rate       NUMERIC(12,4),
+            buy_elg_amount        NUMERIC(24,4),
+            buy_elg_amount_rate   NUMERIC(12,4),
+            buy_lg_amount         NUMERIC(24,4),
+            buy_lg_amount_rate    NUMERIC(12,4),
+            buy_md_amount         NUMERIC(24,4),
+            buy_md_amount_rate    NUMERIC(12,4),
+            buy_sm_amount         NUMERIC(24,4),
+            buy_sm_amount_rate    NUMERIC(12,4),
+            buy_sm_amount_stock   VARCHAR(64),
+            rank_no               INT,
+            updated_at            TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY (ts_code, trade_date, content_type)
+        )
+        """,
+        "trade_date"
+    ),
+
+    # 23. 东财板块成分股
+    (
+        """
+        CREATE TABLE IF NOT EXISTS sector_dc_member (
+            trade_date     DATE         NOT NULL,
+            ts_code        VARCHAR(16)  NOT NULL,
+            con_code       VARCHAR(16)  NOT NULL,
+            name           VARCHAR(64),
+            updated_at     TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY (ts_code, trade_date, con_code)
+        )
+        """,
+        "trade_date"
+    ),
+
+    # 24. 东财行业板块层级（成分包含推断：L1→L2→L3）
+    (
+        """
+        CREATE TABLE IF NOT EXISTS sector_dc_hierarchy (
+            child_code     VARCHAR(16)  NOT NULL,
+            parent_code    VARCHAR(16)  NOT NULL,
+            child_level    VARCHAR(32),
+            parent_level   VARCHAR(32),
+            child_name     VARCHAR(64),
+            parent_name    VARCHAR(64),
+            score          NUMERIC(8,4),
+            method         VARCHAR(32)  DEFAULT 'member_containment',
+            asof_date      DATE,
+            updated_at     TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY (child_code)
+        )
+        """,
+        None
+    ),
+
+    # 25. 个股当日/历史分时（1 分钟）
+    (
+        """
+        CREATE TABLE IF NOT EXISTS stock_intraday_mins (
+            ts_code        VARCHAR(16)    NOT NULL,
+            bar_time       TIMESTAMPTZ    NOT NULL,
+            trade_date     DATE           NOT NULL,
+            freq           VARCHAR(8)     NOT NULL DEFAULT '1min',
+            open           NUMERIC(12,4),
+            high           NUMERIC(12,4),
+            low            NUMERIC(12,4),
+            close          NUMERIC(12,4),
+            vol            BIGINT,
+            amount         NUMERIC(20,4),
+            avg_price      NUMERIC(12,4),
+            PRIMARY KEY (bar_time, ts_code)
+        )
+        """,
+        "bar_time"
+    ),
 ]
 
 # ─────────────────────────────────────────────────────────────────────
@@ -1084,6 +1264,11 @@ POSTGRES_INDEX_DDL_LIST = [
     "CREATE INDEX IF NOT EXISTS idx_express_code ON fin_express (ts_code, ann_date DESC)",
     # 财务-分红
     "CREATE INDEX IF NOT EXISTS idx_dividend_code ON fin_dividend (ts_code, end_date DESC)",
+    # 东财行业板块
+    "CREATE INDEX IF NOT EXISTS idx_sector_dc_index_date ON sector_dc_index_daily (trade_date)",
+    "CREATE INDEX IF NOT EXISTS idx_sector_dc_index_level ON sector_dc_index_daily (trade_date, industry_level)",
+    "CREATE INDEX IF NOT EXISTS idx_sector_member_code ON sector_dc_member (ts_code, trade_date)",
+    "CREATE INDEX IF NOT EXISTS idx_sector_hierarchy_parent ON sector_dc_hierarchy (parent_code)",
 ]
 
 # TimescaleDB Hypertable 专用索引
@@ -1127,6 +1312,8 @@ TIMESCALEDB_INDEX_DDL_LIST = [
     "CREATE INDEX IF NOT EXISTS idx_stk_limit_code ON ref_stk_limit_daily (ts_code, trade_date DESC)",
     # ref_suspend_d
     "CREATE INDEX IF NOT EXISTS idx_suspend_code ON ref_suspend_d (ts_code, trade_date DESC)",
+    # stock_intraday_mins
+    "CREATE INDEX IF NOT EXISTS idx_intraday_mins_code_date ON stock_intraday_mins (ts_code, trade_date, bar_time)",
 ]
 
 
@@ -1157,6 +1344,7 @@ class SchemaManager:
                 except Exception as e:
                     logger.error(f"PostgreSQL 表创建失败 (第{i+1}个): {e}")
                     success = False
+                    conn.rollback()
 
             # 2. 创建索引
             for idx_ddl in POSTGRES_INDEX_DDL_LIST:
@@ -1165,6 +1353,7 @@ class SchemaManager:
                     conn.commit()
                 except Exception as e:
                     logger.warning(f"PostgreSQL 索引创建失败: {e}")
+                    conn.rollback()
 
         if success:
             logger.info(f"✅ PostgreSQL: {len(POSTGRES_DDL_LIST)} 张表 + {len(POSTGRES_INDEX_DDL_LIST)} 个索引已确保")
@@ -1200,11 +1389,14 @@ class SchemaManager:
                 except Exception as e:
                     logger.error(f"TimescaleDB 表创建失败 (第{i+1}个): {e}")
                     success = False
+                    conn.rollback()
                     continue
 
-                # 3. 转换为 Hypertable（从 DDL 中提取表名）
+                # 3. 转换为 Hypertable（时间列为空则保持普通表）
                 try:
                     table_name = ddl.strip().split("CREATE TABLE IF NOT EXISTS ")[1].split(" ")[0].strip()
+                    if not time_col:
+                        continue
                     hypertable_sql = (
                         f"SELECT create_hypertable('{table_name}', '{time_col}', if_not_exists => TRUE)"
                     )
@@ -1213,6 +1405,7 @@ class SchemaManager:
                 except Exception as e:
                     logger.error(f"create_hypertable 失败 ({table_name}): {e}")
                     success = False
+                    conn.rollback()
 
             # 4. 创建索引
             for idx_ddl in TIMESCALEDB_INDEX_DDL_LIST:
@@ -1221,6 +1414,7 @@ class SchemaManager:
                     conn.commit()
                 except Exception as e:
                     logger.warning(f"TimescaleDB 索引创建失败: {e}")
+                    conn.rollback()
 
         if success:
             logger.info(

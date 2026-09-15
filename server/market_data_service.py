@@ -13,7 +13,9 @@ Market Data Service - 市场数据全量查询服务
   8. 研报一致预期: 1 table
 """
 
+import asyncio
 import logging
+import time
 from typing import Any, Optional
 from datetime import datetime
 
@@ -79,12 +81,21 @@ CORE_INDEX_CODES = {
     "000688.SH": "科创50",
 }
 
+KLINE_COLUMNS = [
+    "trade_date", "open", "high", "low", "close",
+    "pre_close", "change", "pct_chg", "vol", "amount",
+]
+
+_SUMMARY_CACHE_TTL = 60.0
+
 
 class MarketDataService:
     """市场数据服务 —— 直接查询 PostgreSQL"""
 
     def __init__(self):
         self._pg = None
+        self._summary_cache: Optional[dict] = None
+        self._summary_cache_at: float = 0.0
 
     @property
     def pg(self):
@@ -100,10 +111,10 @@ class MarketDataService:
     # ─── 综合摘要 ───────────────────────────────────────
 
     async def get_summary(self) -> dict:
-        """获取全部 30 张表的统计摘要"""
-        categories = []
-        all_ok = True
-        errors = []
+        """获取全部 30 张表的统计摘要（pg_class 近似行数，带短缓存）"""
+        now = time.monotonic()
+        if self._summary_cache and (now - self._summary_cache_at) < _SUMMARY_CACHE_TTL:
+            return self._summary_cache
 
         try:
             self.pg._check_initialized()
@@ -116,27 +127,42 @@ class MarketDataService:
                 "error": str(e),
             }
 
+        all_tables = [t for cat in TABLE_CATEGORIES.values() for t in cat["tables"]]
+        try:
+            counts = await self.pg.estimate_table_counts(all_tables)
+        except Exception as e:
+            logger.warning(f"近似行数失败，回退逐表 COUNT: {e}")
+            counts = {}
+            for table_name in all_tables:
+                try:
+                    counts[table_name] = await self.pg.count(table_name)
+                except Exception:
+                    counts[table_name] = -1
+
+        categories = []
+        errors = []
+        all_ok = True
         for cat_name, cat_info in TABLE_CATEGORIES.items():
             cat_tables = []
             cat_rows = 0
             for table_name in cat_info["tables"]:
-                try:
-                    cnt = await self.pg.count(table_name)
+                cnt = int(counts.get(table_name, 0) or 0)
+                if cnt < 0:
+                    cat_tables.append({
+                        "name": table_name,
+                        "rows": -1,
+                        "has_data": False,
+                        "error": "count failed",
+                    })
+                    errors.append(table_name)
+                    all_ok = False
+                else:
                     cat_tables.append({
                         "name": table_name,
                         "rows": cnt,
                         "has_data": cnt > 0,
                     })
                     cat_rows += cnt
-                except Exception as e:
-                    cat_tables.append({
-                        "name": table_name,
-                        "rows": -1,
-                        "has_data": False,
-                        "error": str(e),
-                    })
-                    errors.append(f"{table_name}: {e}")
-                    all_ok = False
 
             categories.append({
                 "category": cat_name,
@@ -146,14 +172,17 @@ class MarketDataService:
                 "table_count": len(cat_tables),
             })
 
-        total_rows = sum(c["total_rows"] for c in categories)
-        return {
+        payload = {
             "categories": categories,
             "total_tables": 30,
-            "total_rows": total_rows,
+            "total_rows": sum(c["total_rows"] for c in categories),
             "db_connected": all_ok,
             "errors": errors if errors else None,
+            "row_count_approx": True,
         }
+        self._summary_cache = payload
+        self._summary_cache_at = now
+        return payload
 
     # ─── K线数据 (核心) ─────────────────────────────────
 
@@ -179,9 +208,16 @@ class MarketDataService:
         if not table:
             return {"error": f"不支持的K线频率: {freq}，可选: {list(KLINE_TABLES.keys())}"}
 
+        if ts_code in CORE_INDEX_CODES:
+            return await self.get_index_kline(ts_code=ts_code, start=start, end=end, limit=limit)
+
         try:
+            from data_layer.storage.models import TABLE_MODEL_MAP
+            model = TABLE_MODEL_MAP.get(table)
+            cols = [c for c in KLINE_COLUMNS if model is not None and hasattr(model, c)]
             df = await self.pg.query(
                 table=table,
+                columns=cols or None,
                 ts_code=ts_code,
                 start_date=start,
                 end_date=end,
@@ -233,6 +269,7 @@ class MarketDataService:
         try:
             df = await self.pg.query(
                 table="index_daily",
+                columns=KLINE_COLUMNS,
                 ts_code=ts_code,
                 start_date=start,
                 end_date=end,
@@ -268,53 +305,54 @@ class MarketDataService:
     # ─── 索引快照 ───────────────────────────────────────
 
     async def get_indices_snapshot(self) -> dict:
-        """获取核心指数最新快照"""
+        """获取核心指数最新快照（一次查询，走 ts_code+trade_date 索引）"""
         codes = list(CORE_INDEX_CODES.keys())
-        results = []
+        empty_row = {
+            "trade_date": "", "close": 0, "open": 0, "high": 0, "low": 0,
+            "pre_close": 0, "change": 0, "pct_chg": 0, "vol": 0, "amount": 0,
+        }
+        try:
+            sql = """
+            SELECT DISTINCT ON (ts_code)
+                   ts_code, trade_date, close, open, high, low,
+                   pre_close, change, pct_chg, vol, amount
+            FROM index_daily
+            WHERE ts_code IN ('000001.SH','399001.SZ','000300.SH','399006.SZ','000688.SH')
+            ORDER BY ts_code, trade_date DESC
+            """
+            df = await self.pg.query_sql(sql)
+            by_code = {}
+            if df is not None and not df.empty:
+                for rec in self._df_to_records(df):
+                    by_code[rec.get("ts_code")] = rec
 
-        for code in codes:
-            try:
-                df = await self.pg.query(
-                    table="index_daily",
-                    ts_code=code,
-                    limit=1,
-                    order_by="trade_date",
-                    order_desc=True,
-                )
-                if df is not None and not df.empty:
-                    row = df.iloc[0]
-                    results.append({
-                        "ts_code": code,
-                        "name": CORE_INDEX_CODES[code],
-                        "trade_date": str(row.get("trade_date", ""))[:10],
-                        "close": float(row.get("close", 0) or 0),
-                        "open": float(row.get("open", 0) or 0),
-                        "high": float(row.get("high", 0) or 0),
-                        "low": float(row.get("low", 0) or 0),
-                        "pre_close": float(row.get("pre_close", 0) or 0),
-                        "change": float(row.get("change", 0) or 0),
-                        "pct_chg": float(row.get("pct_chg", 0) or 0),
-                        "vol": int(row.get("vol", 0) or 0),
-                        "amount": float(row.get("amount", 0) or 0),
-                    })
-                else:
-                    results.append({
-                        "ts_code": code,
-                        "name": CORE_INDEX_CODES[code],
-                        "trade_date": "",
-                        "close": 0,
-                        "open": 0, "high": 0, "low": 0, "pre_close": 0,
-                        "change": 0, "pct_chg": 0, "vol": 0, "amount": 0,
-                    })
-            except Exception as e:
-                logger.warning(f"查询指数 {code} 失败: {e}")
+            results = []
+            for code in codes:
+                row = by_code.get(code) or empty_row
                 results.append({
                     "ts_code": code,
                     "name": CORE_INDEX_CODES[code],
-                    "error": str(e),
+                    "trade_date": str(row.get("trade_date") or "")[:10],
+                    "close": float(row.get("close") or 0),
+                    "open": float(row.get("open") or 0),
+                    "high": float(row.get("high") or 0),
+                    "low": float(row.get("low") or 0),
+                    "pre_close": float(row.get("pre_close") or 0),
+                    "change": float(row.get("change") or 0),
+                    "pct_chg": float(row.get("pct_chg") or 0),
+                    "vol": int(row.get("vol") or 0),
+                    "amount": float(row.get("amount") or 0),
                 })
-
-        return {"indices": results, "total": len(results)}
+            return {"indices": results, "total": len(results)}
+        except Exception as e:
+            logger.error(f"查询指数快照失败: {e}")
+            return {
+                "indices": [
+                    {"ts_code": c, "name": n, **empty_row, "error": str(e)}
+                    for c, n in CORE_INDEX_CODES.items()
+                ],
+                "total": len(CORE_INDEX_CODES),
+            }
 
     # ─── 任意表数据 ─────────────────────────────────────
 
@@ -325,38 +363,65 @@ class MarketDataService:
         offset: int = 0,
         ts_code: Optional[str] = None,
     ) -> dict:
-        """获取任意表的预览数据"""
+        """获取任意表的预览数据。大表不用精确 COUNT，也不做全表 ORDER BY。"""
+        from data_layer.storage.models import TABLE_MODEL_MAP
+
+        if table_name not in TABLE_MODEL_MAP:
+            return {"error": f"未知表名: {table_name}", "table_name": table_name}
+
         try:
-            # 先获取行数
-            total_rows = await self.pg.count(table_name)
+            est = await self.pg.estimate_table_counts([table_name])
+            total_rows = int(est.get(table_name, 0) or 0)
 
-            # 查询数据
-            kwargs = {"table": table_name, "limit": limit, "offset": offset,
-                       "order_by": "trade_date", "order_desc": True}
+            model = TABLE_MODEL_MAP[table_name]
+            date_col = next(
+                (c for c in ("trade_date", "nav_date", "calc_date", "end_date", "cal_date")
+                 if hasattr(model, c)),
+                None,
+            )
+
             if ts_code:
-                kwargs["ts_code"] = ts_code
+                order_col = date_col or "ts_code"
+                df = await self.pg.query(
+                    table=table_name,
+                    ts_code=ts_code,
+                    limit=limit,
+                    offset=offset,
+                    order_by=order_col,
+                    order_desc=True,
+                )
+            elif date_col:
+                sql = (
+                    f"SELECT * FROM {table_name} "
+                    f"WHERE {date_col} = (SELECT MAX({date_col}) FROM {table_name}) "
+                    f"LIMIT :limit OFFSET :offset"
+                )
+                df = await self.pg.query_sql(sql, {"limit": limit, "offset": offset})
+            else:
+                df = await self.pg.query(
+                    table=table_name,
+                    limit=limit,
+                    offset=offset,
+                )
 
-            df = await self.pg.query(**kwargs)
-
-            columns = df.columns.tolist() if not df.empty else []
+            columns = df.columns.tolist() if df is not None and not df.empty else []
             rows = self._df_to_records(df)
 
-            # 获取表的模型列定义
-            from data_layer.storage.models import TABLE_MODEL_MAP
-            model = TABLE_MODEL_MAP.get(table_name)
             column_defs = []
-            if model and hasattr(model, '_cols'):
+            if model and hasattr(model, "_cols"):
                 column_defs = model._cols
 
+            preview_count = len(rows)
             return {
                 "table_name": table_name,
-                "columns": column_defs,
+                "columns": column_defs or columns,
                 "rows": rows,
                 "total_rows": total_rows,
-                "preview_count": len(rows),
+                "preview_count": preview_count,
                 "offset": offset,
                 "limit": limit,
-                "has_more": offset + limit < total_rows,
+                "has_more": preview_count >= limit,
+                "row_count_approx": True,
             }
 
         except ValueError as e:
@@ -380,33 +445,28 @@ class MarketDataService:
 
         result = {"ts_code": ts_code, "reports": {}}
 
-        for name, table in fin_tables.items():
+        async def _one(name: str, table: str):
             try:
                 df = await self.pg.query(
                     table=table,
                     ts_code=ts_code,
                     limit=20,
-                    order_by="end_date",
+                    order_by="end_date" if name != "forecast" else "ann_date",
                     order_desc=True,
                 )
                 if df is not None and not df.empty:
-                    result["reports"][name] = {
+                    return name, {
                         "table": table,
                         "count": len(df),
                         "data": self._df_to_records(df),
                     }
-                else:
-                    result["reports"][name] = {
-                        "table": table,
-                        "count": 0,
-                        "data": [],
-                    }
+                return name, {"table": table, "count": 0, "data": []}
             except Exception as e:
-                result["reports"][name] = {
-                    "table": table,
-                    "count": 0,
-                    "error": str(e),
-                }
+                return name, {"table": table, "count": 0, "error": str(e)}
+
+        pairs = await asyncio.gather(*[_one(n, t) for n, t in fin_tables.items()])
+        for name, payload in pairs:
+            result["reports"][name] = payload
 
         return result
 

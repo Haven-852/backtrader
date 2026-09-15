@@ -552,9 +552,11 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, onMounted, onUnmounted, nextTick, watch } from 'vue'
+import { ref, computed, onMounted, onUnmounted, onActivated, nextTick, watch } from 'vue'
 import axios from 'axios'
 import * as echarts from 'echarts'
+
+defineOptions({ name: 'MarketDashView' })
 
 // ─── 标签定义 ──────────────────────────────────────────
 
@@ -686,6 +688,7 @@ function selectStock(s: any) {
 function selectIndexForKline(idx: any) {
   currentStock.value = idx.ts_code
   selectedIndex.value = idx.ts_code
+  selectedIndexKline.value = idx.ts_code
   activeTab.value = 'kline'
   loadKline()
 }
@@ -1181,7 +1184,17 @@ function formatCell(val: any): string {
 // ─── 生命周期 ──────────────────────────────────────────
 
 onMounted(async () => {
-  await Promise.all([loadIndices(), loadSummary()])
+  await loadIndices()
+  if (!summaryData.value) loadSummary()
+})
+
+onActivated(() => {
+  nextTick(() => {
+    klineChart.value?.resize()
+    mfChartInst?.resize()
+    marginChartInst?.resize()
+    idxKlineChartInst?.resize()
+  })
 })
 
 onUnmounted(() => {
@@ -1192,13 +1205,19 @@ onUnmounted(() => {
 })
 
 watch(activeTab, (tab) => {
-  if (tab === 'summary') loadSummary()
-  else if (tab === 'kline') nextTick(() => loadKline())
-  else if (tab === 'reference') loadRefTable(selectedRefTable.value)
-  else if (tab === 'indices') nextTick(() => loadIndexKline(selectedIndexKline.value))
+  if (tab === 'summary') {
+    if (!summaryData.value && !summaryLoading.value) loadSummary()
+  } else if (tab === 'kline') {
+    nextTick(() => {
+      if (!klineData.value && !klineLoading.value) loadKline()
+      else klineChart.value?.resize()
+    })
+  } else if (tab === 'reference') {
+    if (!refTableData.value.length && !refTableLoading.value) loadRefTable(selectedRefTable.value)
+  } else if (tab === 'indices') {
+    nextTick(() => loadIndexKline(selectedIndexKline.value))
+  }
 })
-
-watch(currentTimeframe, () => loadKline())
 </script>
 
 <style scoped>

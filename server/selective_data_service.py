@@ -6,7 +6,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Sequence
 
 logger = logging.getLogger(__name__)
 
@@ -63,5 +63,61 @@ class SelectiveDataService:
             logger.warning("ensure_fresh 异常 %s: %s", ts_code, e)
             return {"ok": False, "error": str(e), "ts_code": ts_code}
 
+    async def ensure_range(
+        self,
+        ts_code: str,
+        start: str,
+        end: str,
+        extra_codes: Optional[Sequence[str]] = None,
+    ) -> Dict[str, Any]:
+        """对照交易日历检查区间覆盖，缺口则 Datahubco 补入 PostgreSQL"""
+        return await asyncio.to_thread(
+            self.fetcher.ensure_range,
+            ts_code,
+            start,
+            end,
+            extra_codes,
+        )
+
+    async def ensure_recent(self, ts_code: str, trading_days: int = 30) -> Dict[str, Any]:
+        return await asyncio.to_thread(self.fetcher.ensure_recent, ts_code, trading_days)
+
+    async def watchlist_add(
+        self,
+        ts_code: str,
+        name: Optional[str] = None,
+        short_name: Optional[str] = None,
+        kind: str = "stock",
+        industry: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        return await asyncio.to_thread(
+            self.fetcher.watchlist_add, ts_code, name, short_name, kind, industry
+        )
+
+    async def watchlist_remove(self, ts_code: str) -> Dict[str, Any]:
+        return await asyncio.to_thread(self.fetcher.watchlist_remove, ts_code)
+
+    async def watchlist_list(self) -> list:
+        return await asyncio.to_thread(self.fetcher.watchlist_list)
+
+    async def sync_watchlist_continuous(self) -> Dict[str, Any]:
+        return await asyncio.to_thread(self.fetcher.sync_watchlist_continuous)
+
 
 selective_data_service = SelectiveDataService()
+
+
+async def watchlist_continuous_loop(interval_sec: int = 300, first_delay: int = 15):
+    """后台持续同步自选股日线；名单以 PostgreSQL dash_watchlist 为准。"""
+    await asyncio.sleep(first_delay)
+    while True:
+        try:
+            result = await selective_data_service.sync_watchlist_continuous()
+            n = len(result.get("synced") or [])
+            if n:
+                logger.info("自选持续同步完成 %d 只", n)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("自选持续同步循环异常")
+        await asyncio.sleep(interval_sec)

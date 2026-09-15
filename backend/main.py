@@ -10,6 +10,7 @@ Yuxi 风格后端 - FastAPI (Vue3 Frontend)
 import os
 import sys
 import logging
+import asyncio
 
 # Add parent directory (project root) to sys.path so routers/server/data_layer can be imported
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -105,11 +106,25 @@ async def startup_event():
     logger.info(f"可用提供商: {[p['id'] for p in providers]}")
     logger.info("=" * 60)
 
+    try:
+        from server.selective_data_service import watchlist_continuous_loop
+        app.state.watchlist_task = asyncio.create_task(watchlist_continuous_loop())
+        logger.info("自选股持续日更循环已启动")
+    except Exception as e:
+        logger.warning(f"自选股持续日更循环启动失败: {e}")
+
 
 @app.on_event("shutdown")
 async def shutdown_event():
     """应用关闭时清理"""
     logger.info("AIquant Backtrader Agent Platform 正在关闭...")
+    task = getattr(app.state, "watchlist_task", None)
+    if task:
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
 
 
 # ─── 直接运行 ─────────────────────────────────────────

@@ -7,6 +7,8 @@ Datahubco 采集包
 from .client import DatahubcoClient
 from .selective import SelectiveDataFetcher, selective_fetcher
 from .continuous import ContinuousDataFetcher, continuous_fetcher
+from .sectors import SectorDataFetcher, sector_fetcher
+from .intraday import IntradayFetcher, intraday_fetcher
 
 __all__ = [
     "DatahubcoClient",
@@ -14,4 +16,8 @@ __all__ = [
     "selective_fetcher",
     "ContinuousDataFetcher",
     "continuous_fetcher",
+    "SectorDataFetcher",
+    "sector_fetcher",
+    "IntradayFetcher",
+    "intraday_fetcher",
 ]
