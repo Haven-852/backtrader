@@ -13,6 +13,7 @@ from .quant_agents import (
     BacktesterAgent, ExecutorAgent, QuantResearchAgent
 )
 from .deepseek_agent import DeepSeekAgent
+from .strategy.strategy_t0 import IntradayT0Agent
 
 
 class AgentFactory:
@@ -39,7 +40,9 @@ class AgentFactory:
         self.register("backtester", BacktesterAgent)
         self.register("executor", ExecutorAgent)
         self.register("quant_research", QuantResearchAgent)
-        self.register("deepseek", DeepSeekAgent)  # 新增 DeepSeek 智能体
+        self.register("deepseek", DeepSeekAgent)
+        self.register("intraday_t0", IntradayT0Agent)
+        self.register("t0_intraday", IntradayT0Agent)
     
     def register(self, agent_type: str, agent_class: Type[BaseAgent]):
         """注册智能体类型"""
@@ -60,7 +63,7 @@ class AgentFactory:
             "mainstream": ["langchain", "autogpt", "babyagi", "metagpt", "crewai", "swarm"],
             "quant_excellent": [
                 "signal_generator", "risk_manager", "portfolio_optimizer", 
-                "backtester", "executor", "quant_research"
+                "backtester", "executor", "quant_research", "intraday_t0"
             ],
             "all": list(self._registry.keys())
         }

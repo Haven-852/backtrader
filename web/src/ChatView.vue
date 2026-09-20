@@ -1,7 +1,56 @@
 <template>
   <div class="h-full flex bg-zinc-950">
-    <!-- Left: Chat Area -->
+    <!-- Left: Conversation History -->
+    <div class="w-56 flex-shrink-0 flex flex-col border-r border-zinc-800 bg-zinc-900/40 overflow-hidden">
+      <div class="flex-shrink-0 px-3 py-3 border-b border-zinc-800 flex items-center justify-between gap-2">
+        <div class="flex items-center gap-1.5 min-w-0">
+          <i class="fa-solid fa-clock-rotate-left text-zinc-400 text-xs"></i>
+          <h3 class="text-xs font-semibold text-zinc-300 truncate">历史对话</h3>
+        </div>
+        <button
+          @click="startNewChat"
+          class="text-[10px] px-2 py-1 rounded-md bg-blue-600/20 text-blue-400 border border-blue-500/30 hover:bg-blue-600/30 transition-colors"
+          title="新建对话"
+        >
+          <i class="fa-solid fa-plus mr-0.5"></i>新建
+        </button>
+      </div>
+      <div class="flex-1 overflow-auto p-2 space-y-1">
+        <div v-if="sessionsLoading" class="text-[11px] text-zinc-500 px-2 py-3">加载中…</div>
+        <div v-else-if="!sessions.length" class="text-[11px] text-zinc-600 px-2 py-3">暂无历史，发送消息后自动保存</div>
+        <div
+          v-for="s in sessions"
+          :key="s.id"
+          @click="openSession(s.id)"
+          :class="currentSessionId === s.id
+            ? 'bg-zinc-800 border-blue-500/40 text-zinc-100'
+            : 'bg-transparent border-transparent text-zinc-400 hover:bg-zinc-800/60 hover:text-zinc-200'"
+          class="group relative rounded-lg border px-2.5 py-2 cursor-pointer transition-all"
+        >
+          <div class="text-xs font-medium truncate pr-5">{{ s.title || '新对话' }}</div>
+          <div class="text-[10px] text-zinc-500 mt-0.5 flex items-center gap-1.5">
+            <span>{{ formatSessionTime(s.updated_at) }}</span>
+            <span v-if="s.message_count" class="tabular-nums">· {{ s.message_count }} 条</span>
+          </div>
+          <button
+            @click.stop="deleteSession(s.id)"
+            class="absolute top-1.5 right-1.5 opacity-0 group-hover:opacity-100 text-zinc-600 hover:text-red-400 transition-opacity p-1"
+            title="删除"
+          >
+            <i class="fa-solid fa-xmark text-[10px]"></i>
+          </button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Center: Chat Area -->
     <div class="flex-1 flex flex-col min-w-0">
+      <!-- Session title bar -->
+      <div v-if="currentSessionId" class="flex-shrink-0 px-4 py-2 border-b border-zinc-800/80 bg-zinc-900/30 flex items-center gap-2">
+        <i class="fa-solid fa-message text-zinc-500 text-xs"></i>
+        <span class="text-xs text-zinc-400 truncate">{{ currentSessionTitle }}</span>
+        <span class="text-[10px] text-zinc-600 font-mono truncate">{{ currentSessionId.slice(0, 8) }}…</span>
+      </div>
       <!-- Messages -->
       <div class="flex-1 overflow-auto p-4 lg:p-6">
         <div class="max-w-3xl mx-auto space-y-5">
@@ -131,10 +180,10 @@
               自动工具
             </label>
             <button
-              @click="clearChat"
+              @click="startNewChat"
               class="px-3 py-1.5 text-xs text-zinc-500 hover:text-zinc-300 transition-colors"
             >
-              <i class="fa-solid fa-trash-can mr-1"></i> 清空
+              <i class="fa-solid fa-plus mr-1"></i> 新对话
             </button>
           </div>
 
@@ -325,6 +374,21 @@ const selectedModel = ref('deepseek-chat')
 const loading = ref(false)
 const useTools = ref(true)
 
+// ─── Conversation persistence ────────────────────────
+interface ChatSession {
+  id: string
+  title: string
+  model?: string
+  message_count?: number
+  updated_at?: string
+  created_at?: string
+}
+
+const sessions = ref<ChatSession[]>([])
+const sessionsLoading = ref(false)
+const currentSessionId = ref<string | null>(null)
+const currentSessionTitle = ref('新对话')
+
 // ─── Skill Panel ─────────────────────────────────────
 const skills = ref<Skill[]>([])
 const activeSkill = ref<Skill | null>(null)
@@ -363,8 +427,96 @@ function formatContent(text: string): string {
     .replace(/\n/g, '<br>')
 }
 
-function formatTime(date: Date): string {
-  return date.toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' })
+function formatTime(date: Date | string | undefined): string {
+  if (!date) return ''
+  const d = date instanceof Date ? date : new Date(date)
+  if (Number.isNaN(d.getTime())) return ''
+  return d.toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' })
+}
+
+function formatSessionTime(iso?: string): string {
+  if (!iso) return ''
+  const d = new Date(iso.endsWith('Z') || iso.includes('+') ? iso : iso + 'Z')
+  if (Number.isNaN(d.getTime())) return String(iso).slice(0, 16)
+  const now = new Date()
+  const sameDay = d.toDateString() === now.toDateString()
+  if (sameDay) return d.toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' })
+  return d.toLocaleDateString('zh-CN', { month: '2-digit', day: '2-digit' })
+}
+
+async function persistSystemMessage(content: string, skillName?: string, data?: any, dataType?: string) {
+  if (!currentSessionId.value) return
+  try {
+    await axios.post(`/chat/sessions/${currentSessionId.value}/messages`, {
+      role: 'system',
+      content,
+      skill: skillName || null,
+      data: data ?? null,
+      data_type: dataType || null,
+    })
+    await loadSessions()
+  } catch (e) {
+    console.warn('系统消息落库失败', e)
+  }
+}
+
+// ─── Sessions ────────────────────────────────────────
+
+async function loadSessions() {
+  sessionsLoading.value = true
+  try {
+    const res = await axios.get('/chat/sessions')
+    sessions.value = res.data.sessions || []
+  } catch (e) {
+    console.warn('加载会话列表失败', e)
+  } finally {
+    sessionsLoading.value = false
+  }
+}
+
+async function openSession(sessionId: string) {
+  if (!sessionId || loading.value) return
+  try {
+    const res = await axios.get(`/chat/sessions/${sessionId}`)
+    const session = res.data.session
+    if (!session) return
+    currentSessionId.value = session.id
+    currentSessionTitle.value = session.title || '对话'
+    if (session.model) selectedModel.value = session.model
+    const loaded = (session.messages || []).map((m: any) => ({
+      role: m.role,
+      content: m.content || '',
+      time: m.created_at || m.time ? new Date(m.created_at || m.time) : new Date(),
+      skill: m.skill,
+      data: m.data,
+      dataType: m.data_type || m.dataType,
+      toolTrace: m.tool_trace || m.toolTrace || [],
+    }))
+    messages.value = loaded.length ? loaded : []
+    if (!loaded.length) onMountedInit()
+  } catch (e: any) {
+    addMessage('assistant', `❌ 无法加载会话：${e?.response?.data?.detail || e.message || e}`)
+  }
+}
+
+async function deleteSession(sessionId: string) {
+  if (!sessionId) return
+  try {
+    await axios.delete(`/chat/sessions/${sessionId}`)
+    if (currentSessionId.value === sessionId) {
+      startNewChat()
+    }
+    await loadSessions()
+  } catch (e: any) {
+    console.warn('删除会话失败', e)
+  }
+}
+
+function startNewChat() {
+  currentSessionId.value = null
+  currentSessionTitle.value = '新对话'
+  messages.value = []
+  onMountedInit()
 }
 
 // ─── Chat ────────────────────────────────────────────
@@ -378,17 +530,29 @@ async function sendMessage() {
   loading.value = true
 
   try {
-    const history = messages.value
-      .filter(m => m.role === 'user' || m.role === 'assistant')
-      .slice(-10)
-      .map(m => ({ role: m.role, content: m.content }))
+    const history = currentSessionId.value
+      ? [] // 后端从 PostgreSQL 读取上下文
+      : messages.value
+          .filter(m => m.role === 'user' || m.role === 'assistant')
+          .filter(m => !String(m.content || '').startsWith('👋 欢迎'))
+          .slice(0, -1)
+          .slice(-10)
+          .map(m => ({ role: m.role, content: m.content }))
 
     const res = await axios.post('/chat/messages', {
       query: msg,
       model: selectedModel.value,
       history,
       use_tools: useTools.value,
+      session_id: currentSessionId.value,
+      persist: true,
     })
+    if (res.data.session_id) {
+      currentSessionId.value = res.data.session_id
+      if (!currentSessionTitle.value || currentSessionTitle.value === '新对话') {
+        currentSessionTitle.value = msg.length > 40 ? msg.slice(0, 39) + '…' : msg
+      }
+    }
     addMessage(
       'assistant',
       res.data.content || '（空回复）',
@@ -397,6 +561,7 @@ async function sendMessage() {
       undefined,
       res.data.tool_trace || [],
     )
+    await loadSessions()
   } catch (e: any) {
     const detail = e?.response?.data?.detail || ''
     addMessage('assistant', `❌ 后端服务未响应。${detail || '请确保 backend 已启动 (端口 8000)。'}`)
@@ -406,8 +571,7 @@ async function sendMessage() {
 }
 
 function clearChat() {
-  messages.value = []
-  onMountedInit()
+  startNewChat()
 }
 
 // ─── Skill Panel ─────────────────────────────────────
@@ -479,53 +643,60 @@ async function executeTool() {
     .map(p => `${p.label}: ${toolInputs[p.name]}`)
     .join(', ')
 
-  addMessage('system', `🔧 执行 **${toolName}**${paramDesc ? '\n' + paramDesc : ''}`, toolName)
+  const execText = `🔧 执行 **${toolName}**${paramDesc ? '\n' + paramDesc : ''}`
+  addMessage('system', execText, toolName)
+  await persistSystemMessage(execText, toolName)
 
   try {
     const res = await axios.post(`/skills/${skillId}/${toolId}`, payload)
     const data = res.data
 
     if (data.ok === false) {
-      addMessage('system', `❌ ${data.error || '执行失败'}`, toolName)
+      const errText = `❌ ${data.error || '执行失败'}`
+      addMessage('system', errText, toolName)
+      await persistSystemMessage(errText, toolName)
     } else if (toolId === 'list-tables') {
-      addMessage('system',
-        `📋 共找到 **${data.count}** 张用户表：\n${data.tables?.map((t: any) => `\`${t.tablename}\``).join(', ')}`,
-        toolName,
-        data.tables,
-        'tables'
-      )
+      const text = `📋 共找到 **${data.count}** 张用户表：\n${data.tables?.map((t: any) => `\`${t.tablename}\``).join(', ')}`
+      addMessage('system', text, toolName, data.tables, 'tables')
+      await persistSystemMessage(text, toolName, data.tables, 'tables')
     } else if (toolId === 'info-table') {
       if (data.schema_ddl) {
         addMessage('system', `📊 表结构信息：`, toolName, data, 'schema')
+        await persistSystemMessage('📊 表结构信息：', toolName, data, 'schema')
       } else if (data.columns) {
-        addMessage('system',
-          `📊 字段信息（${data.tables?.join(', ')}）：\n${data.columns?.map((c: any) => `\`${c.table}.${c.column_name}\` — ${c.data_type}${c.is_nullable === 'YES' ? ' (可空)' : ''}`).join('\n')}`,
-          toolName
-        )
+        const text = `📊 字段信息（${data.tables?.join(', ')}）：\n${data.columns?.map((c: any) => `\`${c.table}.${c.column_name}\` — ${c.data_type}${c.is_nullable === 'YES' ? ' (可空)' : ''}`).join('\n')}`
+        addMessage('system', text, toolName)
+        await persistSystemMessage(text, toolName)
       }
     } else if (toolId === 'query-check') {
-      addMessage('system',
-        data.valid ? `✅ SQL 语法正确` : `⚠️ SQL 问题：\n${data.message}`,
-        toolName,
-        data,
-        'sql-check'
-      )
+      const text = data.valid ? `✅ SQL 语法正确` : `⚠️ SQL 问题：\n${data.message}`
+      addMessage('system', text, toolName, data, 'sql-check')
+      await persistSystemMessage(text, toolName, data, 'sql-check')
     } else if (toolId === 'query-exec') {
-      const cols = data.columns || []
       const rows = data.rows || []
       if (rows.length) {
-        addMessage('system', `⚡ 查询成功，返回 ${data.row_count} 行结果`, toolName, data, 'query-result')
+        const text = `⚡ 查询成功，返回 ${data.row_count} 行结果`
+        addMessage('system', text, toolName, data, 'query-result')
+        await persistSystemMessage(text, toolName, data, 'query-result')
       } else {
-        addMessage('system', `⚡ 查询成功，但未返回数据`, toolName)
+        const text = `⚡ 查询成功，但未返回数据`
+        addMessage('system', text, toolName)
+        await persistSystemMessage(text, toolName)
       }
     } else if (toolId === 'query-nl') {
-      addMessage('system', data.error || data.suggestion || '查询完成', toolName)
+      const text = data.error || data.suggestion || '查询完成'
+      addMessage('system', text, toolName)
+      await persistSystemMessage(text, toolName)
     } else {
-      addMessage('system', JSON.stringify(data, null, 2), toolName)
+      const text = JSON.stringify(data, null, 2)
+      addMessage('system', text, toolName)
+      await persistSystemMessage(text, toolName, data)
     }
   } catch (e: any) {
     const detail = e?.response?.data?.detail || e.message || String(e)
-    addMessage('system', `❌ 执行失败: ${detail}`, toolName)
+    const text = `❌ 执行失败: ${detail}`
+    addMessage('system', text, toolName)
+    await persistSystemMessage(text, toolName)
   } finally {
     skillExecuting.value = false
   }
@@ -538,12 +709,12 @@ function onMountedInit() {
 
 **可用模型**：DeepSeek Chat · DeepSeek Reasoner · GPT-4o · Claude · Ollama 本地
 
-**💡 新功能**：右侧「技能面板」支持 SQL 数据库工具箱 —
-点击即可浏览表结构、执行查询、校验 SQL，无需手动编写代码。`)
+**💡 提示**：左侧可查看并继续历史对话；发送消息后自动写入 PostgreSQL。右侧「技能面板」可直接查库与跑工具。`)
 }
 
 onMounted(() => {
   loadSkills()
+  loadSessions()
   onMountedInit()
 })
 </script>

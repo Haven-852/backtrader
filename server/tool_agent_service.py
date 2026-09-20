@@ -17,8 +17,8 @@ from server.chat_service import ChatRequest, ChatResponse, chat_service
 
 logger = logging.getLogger(__name__)
 
-MAX_TOOL_ROUNDS = 5
-MAX_TOOL_RESULT_CHARS = 8000
+MAX_TOOL_ROUNDS = 8
+MAX_TOOL_RESULT_CHARS = 24000
 
 
 def _truncate_result(obj: Any, max_chars: int = MAX_TOOL_RESULT_CHARS) -> str:
@@ -189,7 +189,52 @@ class ToolAgentService:
                         "content": _truncate_result(result),
                     })
 
-            # 超过轮次
+            # 工具轮次用尽：再要一轮纯文字结论，避免「已经查到却不回答」
+            if tool_trace:
+                messages.append({
+                    "role": "user",
+                    "content": (
+                        "工具查询已经结束。请根据上面的工具结果，用中文直接回答用户问题。"
+                        "不要再调用任何工具。若结果不完整，说明缺什么，仍要给出已有结论。"
+                    ),
+                })
+                payload = {
+                    "model": actual_model,
+                    "messages": messages,
+                    "temperature": request.temperature,
+                    "max_tokens": request.max_tokens,
+                    "tool_choice": "none",
+                }
+                try:
+                    resp = await client.post(
+                        provider.get_chat_url(),
+                        headers=provider.get_headers(),
+                        json=payload,
+                    )
+                    if resp.status_code < 400:
+                        data = resp.json()
+                        usage = data.get("usage") or {}
+                        for k in ("prompt_tokens", "completion_tokens", "total_tokens"):
+                            total_usage[k] = total_usage.get(k, 0) + int(usage.get(k) or 0)
+                        choice = (data.get("choices") or [{}])[0]
+                        content = (choice.get("message") or {}).get("content") or ""
+                        if content.strip():
+                            return ChatResponse(
+                                content=content,
+                                model=data.get("model", actual_model),
+                                provider=request.provider,
+                                usage={
+                                    **total_usage,
+                                    "tools_enabled": True,
+                                    "tool_trace": tool_trace,
+                                    "tool_rounds": MAX_TOOL_ROUNDS,
+                                    "synthesized_after_limit": True,
+                                },
+                                finish_reason=choice.get("finish_reason") or "stop",
+                            )
+                except Exception:
+                    logger.exception("轮次用尽后的文字总结失败")
+
             return ChatResponse(
                 content="工具调用轮次已达上限，请缩小问题范围后重试。",
                 model=actual_model,

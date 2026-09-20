@@ -98,6 +98,9 @@ async def startup_event():
         from data_layer.storage import pg_manager
         pg_manager.initialize()
         logger.info("PostgreSQL 市场数据管理器 (pg_manager) 初始化成功")
+        from agents.conversation import conversation_store
+        await conversation_store.ensure_ready()
+        logger.info("Agent 对话表 (agent_chat_*) 已就绪")
     except Exception as e:
         logger.warning(f"PostgreSQL 市场数据管理器初始化失败: {e}")
 

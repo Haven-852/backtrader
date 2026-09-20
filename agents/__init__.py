@@ -13,11 +13,14 @@ Backtrader 多智能体系统 (Multi-Agent System)
 from .agent_factory import AgentFactory
 from .orchestrator import MultiAgentOrchestrator
 from .base_agent import BaseAgent
+from .conversation import conversation_store, ConversationStore
 
 __all__ = [
     'AgentFactory',
     'MultiAgentOrchestrator',
     'BaseAgent',
+    'ConversationStore',
+    'conversation_store',
     'create_quant_team'
 ]
 

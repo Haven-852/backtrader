@@ -12,6 +12,9 @@ from typing import Any, Dict, List, Optional, Tuple
 _TOOLS_DIR = os.path.dirname(os.path.abspath(__file__))
 _HANDBOOK_PATH = os.path.join(_TOOLS_DIR, "HANDBOOK.md")
 
+from agents.strategy.strategy_t0.skill_spec import T0_SKILL  # noqa: E402
+from tools.quantskill_runtime import build_all_quantskill_entries  # noqa: E402
+
 SKILL_REGISTRY: Dict[str, Dict[str, Any]] = {
     "sql-toolkit": {
         "id": "sql-toolkit",
@@ -144,8 +147,349 @@ SKILL_REGISTRY: Dict[str, Dict[str, Any]] = {
 
 ⚠️ 安全限制：仅允许 SELECT 查询，禁止 INSERT/UPDATE/DELETE/DROP 等写操作。
 """,
-    }
+    },
+    "datahubco-data": {
+        "id": "datahubco-data",
+        "name": "Datahubco 行情补数",
+        "icon": "cloud-download",
+        "category": "数据获取",
+                "desc": (
+                    "PostgreSQL 优先读取日线/分钟行情；库内缺失时自动用 Datahubco 拉取、入库并返回。"
+                    "也可强制只读库或只读远端（可选写回）。"
+                ),
+        "enabled": True,
+        "tools": [
+            {
+                "id": "list-datasets",
+                "name": "📚 列出数据集",
+                "desc": "查看支持的 dataset、对应 PG 表与 Datahubco API，以及 source 模式说明",
+                "params": [],
+                "returns": "datasets / sources",
+                "openai_parameters": {"type": "object", "properties": {}, "required": []},
+            },
+            {
+                "id": "coverage",
+                "name": "🔎 覆盖检查",
+                "desc": "只查 PostgreSQL 是否已有该代码的行情覆盖，不触发远端",
+                "params": [
+                    {"name": "ts_code", "label": "代码", "type": "text", "required": True, "placeholder": "000001.SZ"},
+                    {"name": "dataset", "label": "数据集", "type": "text", "required": False, "placeholder": "stock_daily"},
+                    {"name": "start_date", "label": "开始日", "type": "text", "required": False, "placeholder": "20240101"},
+                    {"name": "end_date", "label": "结束日", "type": "text", "required": False, "placeholder": "20241231"},
+                ],
+                "returns": "coverage / sufficient",
+                "openai_parameters": {
+                    "type": "object",
+                    "properties": {
+                        "ts_code": {"type": "string", "description": "股票/指数/板块代码，如 000001.SZ"},
+                        "dataset": {
+                            "type": "string",
+                            "description": "stock_daily/stock_weekly/stock_monthly/stock_mins/index_daily/etf_daily/sector_dc_index/sector_dc_daily",
+                            "default": "stock_daily",
+                        },
+                        "start_date": {"type": "string", "description": "YYYYMMDD 或 YYYY-MM-DD"},
+                        "end_date": {"type": "string", "description": "YYYYMMDD 或 YYYY-MM-DD"},
+                        "trade_date": {"type": "string", "description": "分钟数据用交易日 YYYYMMDD"},
+                    },
+                    "required": ["ts_code"],
+                },
+            },
+            {
+                "id": "get-bars",
+                "name": "📈 获取行情",
+                "desc": (
+                    "默认 source=auto：库内有则直接返回；不足则 Datahubco 拉取并写入 PG 再返回。"
+                    "source=pg 只读库；source=datahubco 强制远端，write_back 控制是否入库。"
+                    "分钟分时请优先用 get-mins，或 dataset=stock_mins。"
+                ),
+                "params": [
+                    {"name": "ts_code", "label": "代码", "type": "text", "required": True, "placeholder": "600519.SH"},
+                    {"name": "dataset", "label": "数据集", "type": "text", "required": False, "placeholder": "stock_daily"},
+                    {"name": "start_date", "label": "开始日", "type": "text", "required": False, "placeholder": "20240101"},
+                    {"name": "end_date", "label": "结束日", "type": "text", "required": False, "placeholder": "20241231"},
+                    {"name": "limit", "label": "条数", "type": "number", "required": False, "placeholder": "120"},
+                    {"name": "source", "label": "来源", "type": "text", "required": False, "placeholder": "auto|pg|datahubco"},
+                    {"name": "write_back", "label": "写回库", "type": "boolean", "required": False, "placeholder": "true"},
+                ],
+                "returns": "data / source_used / upserted",
+                "openai_parameters": {
+                    "type": "object",
+                    "properties": {
+                        "ts_code": {"type": "string", "description": "代码，缺后缀会自动补 .SH/.SZ"},
+                        "dataset": {
+                            "type": "string",
+                            "description": "stock_daily（默认）/ weekly / monthly / stock_mins / index_daily / etf_daily / sector_dc_index / sector_dc_daily",
+                            "default": "stock_daily",
+                        },
+                        "start_date": {"type": "string", "description": "可选 YYYYMMDD"},
+                        "end_date": {"type": "string", "description": "可选 YYYYMMDD"},
+                        "trade_date": {"type": "string", "description": "dataset=stock_mins 时的交易日"},
+                        "limit": {"type": "integer", "description": "返回条数上限，默认 120，最大 2000", "default": 120},
+                        "source": {
+                            "type": "string",
+                            "enum": ["auto", "pg", "datahubco"],
+                            "description": "auto=库优先缺则补；pg=只读库；datahubco=强制远端",
+                            "default": "auto",
+                        },
+                        "write_back": {
+                            "type": "boolean",
+                            "description": "远端拉取后是否写入 PostgreSQL，默认 true",
+                            "default": True,
+                        },
+                        "auto_sync": {
+                            "type": "boolean",
+                            "description": "auto 模式下是否在覆盖不足时自动补数，默认 true",
+                            "default": True,
+                        },
+                    },
+                    "required": ["ts_code"],
+                },
+            },
+            {
+                "id": "get-mins",
+                "name": "⏱️ 获取分钟分时",
+                "desc": (
+                    "获取个股 1 分钟分时（stock_intraday_mins）。"
+                    "默认 source=auto：库内足够直接返回；不足则 Datahubco/当日实时源拉取并写入 Timescale。"
+                    "source=pg 只读库；source=datahubco 强制远端。"
+                ),
+                "params": [
+                    {"name": "ts_code", "label": "代码", "type": "text", "required": True, "placeholder": "000001.SZ"},
+                    {"name": "trade_date", "label": "交易日", "type": "text", "required": False, "placeholder": "20260917"},
+                    {"name": "limit", "label": "条数", "type": "number", "required": False, "placeholder": "500"},
+                    {"name": "source", "label": "来源", "type": "text", "required": False, "placeholder": "auto|pg|datahubco"},
+                    {"name": "write_back", "label": "写回库", "type": "boolean", "required": False, "placeholder": "true"},
+                    {"name": "include_auction", "label": "含集合竞价", "type": "boolean", "required": False, "placeholder": "true"},
+                ],
+                "returns": "data / source_used / upserted",
+                "openai_parameters": {
+                    "type": "object",
+                    "properties": {
+                        "ts_code": {"type": "string", "description": "股票代码，如 000001.SZ 或 000001"},
+                        "trade_date": {
+                            "type": "string",
+                            "description": "交易日 YYYYMMDD / YYYY-MM-DD；省略则用当前会话交易日",
+                        },
+                        "limit": {
+                            "type": "integer",
+                            "description": "返回分钟根数上限，默认 500（约一天），最大 2500",
+                            "default": 500,
+                        },
+                        "source": {
+                            "type": "string",
+                            "enum": ["auto", "pg", "datahubco"],
+                            "description": "auto=库优先缺则补；pg=只读库；datahubco=强制远端",
+                            "default": "auto",
+                        },
+                        "write_back": {
+                            "type": "boolean",
+                            "description": "远端拉取后是否写入 stock_intraday_mins，默认 true",
+                            "default": True,
+                        },
+                        "include_auction": {
+                            "type": "boolean",
+                            "description": "是否包含集合竞价分钟，默认 true",
+                            "default": True,
+                        },
+                    },
+                    "required": ["ts_code"],
+                },
+            },
+            {
+                "id": "ensure-and-get",
+                "name": "✅ 确保并获取",
+                "desc": "快捷：等价于 get-bars/get-mins(source=auto, write_back=true)，确保有数据后返回",
+                "params": [
+                    {"name": "ts_code", "label": "代码", "type": "text", "required": True, "placeholder": "000001.SZ"},
+                    {"name": "dataset", "label": "数据集", "type": "text", "required": False, "placeholder": "stock_daily 或 stock_mins"},
+                    {"name": "limit", "label": "条数", "type": "number", "required": False, "placeholder": "120"},
+                    {"name": "trade_date", "label": "交易日", "type": "text", "required": False, "placeholder": "分钟数据用"},
+                ],
+                "returns": "data / upserted",
+                "openai_parameters": {
+                    "type": "object",
+                    "properties": {
+                        "ts_code": {"type": "string", "description": "代码"},
+                        "dataset": {
+                            "type": "string",
+                            "description": "默认 stock_daily；分钟用 stock_mins",
+                            "default": "stock_daily",
+                        },
+                        "limit": {"type": "integer", "description": "默认 120（分钟建议 500）", "default": 120},
+                        "trade_date": {"type": "string", "description": "dataset=stock_mins 时的交易日"},
+                    },
+                    "required": ["ts_code"],
+                },
+            },
+            {
+                "id": "get-sector-members",
+                "name": "🏢 板块成分股",
+                "desc": (
+                    "读取东财行业板块成分股（dc_member）。"
+                    "默认库优先，缺则 Datahubco 拉取并写入 sector_dc_member；"
+                    "返回成分列表并标注 is_st / is_suspended。"
+                ),
+                "params": [
+                    {"name": "ts_code", "label": "板块代码", "type": "text", "required": True, "placeholder": "BK1035.DC"},
+                    {"name": "trade_date", "label": "交易日", "type": "text", "required": False, "placeholder": "20260918"},
+                    {"name": "source", "label": "来源", "type": "text", "required": False, "placeholder": "auto|pg|datahubco"},
+                    {"name": "write_back", "label": "写回库", "type": "boolean", "required": False, "placeholder": "true"},
+                    {"name": "limit", "label": "条数", "type": "number", "required": False, "placeholder": "500"},
+                ],
+                "returns": "members / st_count / suspended_count",
+                "openai_parameters": {
+                    "type": "object",
+                    "properties": {
+                        "ts_code": {
+                            "type": "string",
+                            "description": "东财板块代码，如 BK1035.DC 或 BK1035",
+                        },
+                        "trade_date": {
+                            "type": "string",
+                            "description": "交易日 YYYYMMDD / YYYY-MM-DD；省略用会话 asof",
+                        },
+                        "source": {
+                            "type": "string",
+                            "enum": ["auto", "pg", "datahubco"],
+                            "description": "auto=库优先缺则补；pg=只读库；datahubco=强制远端",
+                            "default": "auto",
+                        },
+                        "write_back": {
+                            "type": "boolean",
+                            "description": "远端拉取后是否写入 sector_dc_member，默认 true",
+                            "default": True,
+                        },
+                        "limit": {
+                            "type": "integer",
+                            "description": "返回成分上限，默认 500",
+                            "default": 500,
+                        },
+                        "include_flags": {
+                            "type": "boolean",
+                            "description": "是否标注 is_st / is_suspended，默认 true",
+                            "default": True,
+                        },
+                    },
+                    "required": ["ts_code"],
+                },
+            },
+            {
+                "id": "filter-st-suspend",
+                "name": "🧹 剔除ST与停牌",
+                "desc": (
+                    "从板块成分或股票列表中剔除 ST 股与停牌股。"
+                    "可传板块 ts_code，或 ts_codes / members；"
+                    "返回 kept（可交易）与 removed（被剔除）。"
+                ),
+                "params": [
+                    {"name": "ts_code", "label": "板块代码", "type": "text", "required": False, "placeholder": "BK1035.DC"},
+                    {"name": "trade_date", "label": "交易日", "type": "text", "required": False, "placeholder": "20260918"},
+                    {"name": "exclude_st", "label": "剔除ST", "type": "boolean", "required": False, "placeholder": "true"},
+                    {"name": "exclude_suspend", "label": "剔除停牌", "type": "boolean", "required": False, "placeholder": "true"},
+                ],
+                "returns": "kept / removed / ts_codes_kept",
+                "openai_parameters": {
+                    "type": "object",
+                    "properties": {
+                        "ts_code": {
+                            "type": "string",
+                            "description": "东财板块代码；与 ts_codes/members 三选一",
+                        },
+                        "ts_codes": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "description": "股票代码列表，如 [\"000001.SZ\",\"600519.SH\"]",
+                        },
+                        "members": {
+                            "type": "array",
+                            "items": {"type": "object"},
+                            "description": "已有成分对象列表（需含 ts_code，可选 name）",
+                        },
+                        "trade_date": {
+                            "type": "string",
+                            "description": "判断停牌用的交易日",
+                        },
+                        "exclude_st": {
+                            "type": "boolean",
+                            "description": "是否剔除 ST/*ST，默认 true",
+                            "default": True,
+                        },
+                        "exclude_suspend": {
+                            "type": "boolean",
+                            "description": "是否剔除停牌，默认 true",
+                            "default": True,
+                        },
+                        "source": {
+                            "type": "string",
+                            "enum": ["auto", "pg", "datahubco"],
+                            "description": "按板块拉取成分时的来源，默认 auto",
+                            "default": "auto",
+                        },
+                        "write_back": {
+                            "type": "boolean",
+                            "description": "按板块缺数补拉时是否入库，默认 true",
+                            "default": True,
+                        },
+                        "limit": {
+                            "type": "integer",
+                            "description": "返回条数上限，默认 500",
+                            "default": 500,
+                        },
+                        "return_removed": {
+                            "type": "boolean",
+                            "description": "是否返回被剔除列表，默认 true",
+                            "default": True,
+                        },
+                    },
+                    "required": [],
+                },
+            },
+            {
+                "id": "remote-query",
+                "name": "🌐 直接调 Datahubco",
+                "desc": "按 api 名直接请求 Datahubco OpenAPI；可选 write_dataset 写回对应 PG 表",
+                "params": [
+                    {"name": "api", "label": "API", "type": "text", "required": True, "placeholder": "daily 或 stk_mins"},
+                    {"name": "params", "label": "参数 JSON", "type": "textarea", "required": False, "placeholder": "{\"ts_code\":\"000001.SZ\",\"start_date\":\"20240101\"}"},
+                    {"name": "write_dataset", "label": "写回数据集", "type": "text", "required": False, "placeholder": "stock_daily"},
+                    {"name": "limit", "label": "返回条数", "type": "number", "required": False, "placeholder": "200"},
+                ],
+                "returns": "data / upserted",
+                "openai_parameters": {
+                    "type": "object",
+                    "properties": {
+                        "api": {"type": "string", "description": "Datahubco API，如 daily / weekly / stk_mins / index_daily / dc_index / dc_daily / dc_member"},
+                        "params": {
+                            "type": "object",
+                            "description": "查询参数对象，如 {\"ts_code\":\"000001.SZ\",\"start_date\":\"20240101\",\"end_date\":\"20241231\"}",
+                        },
+                        "write_dataset": {
+                            "type": "string",
+                            "description": "可选，写入的 dataset 名（如 stock_daily / stock_mins）",
+                        },
+                        "limit": {"type": "integer", "description": "返回记录上限，默认 200", "default": 200},
+                    },
+                    "required": ["api"],
+                },
+            },
+        ],
+        "instructions": """
+**Datahubco 行情补数**：需要个股/指数/ETF/板块行情或分钟分时时优先用本技能，不要先 list-tables。
+
+1. 日线/周线/月线：`get-bars` / `ensure-and-get`（source=auto）：库里有就直接返回；没有或过旧则拉 Datahubco → 写入 PG → 返回。
+2. **1 分钟分时**：用 `get-mins`（或 dataset=stock_mins）。库内足够直接返回；不足则远端补数入库。
+3. **东财行业板块成分**：`get-sector-members`（板块代码如 BK1035.DC）。
+4. **剔除 ST/停牌**：`filter-st-suspend`（可接板块代码或股票列表）。
+5. 只要库内结果、禁止远端：`source=pg`。
+6. 强制用 Datahubco：`source=datahubco`；不入库设 `write_back=false`。
+7. 先确认覆盖可用 `coverage`；任意 OpenAPI 用 `remote-query`（分钟 API 为 stk_mins，成分 API 为 dc_member）。
+""",
+    },
+    "t0-intraday": T0_SKILL,
 }
+
+# QuantSkills 外部技能包（市场复盘 / 期货 DeepView / A股个股档案）
+SKILL_REGISTRY.update(build_all_quantskill_entries())
 
 
 def get_handbook(max_chars: int = 12000) -> str:
@@ -260,10 +604,11 @@ def build_agent_system_prompt(extra: Optional[str] = None) -> str:
 {chr(10).join(catalog_lines)}
 
 ## 行为要求
-1. 缺数据 → 先选手册中的技能与工具 → 再 function call。
-2. 不知道表/字段 → 先 list_tables / info_table。
-3. 拿到工具结果后，用中文简洁回答用户；可引用关键数字。
-4. 若工具失败，说明原因并给出下一步建议。
+1. 缺数据 → 先选手册中的**专用技能**。测某日高低命中：先 `t0_intraday__load_day`，再 `t0_intraday__hit_test`（含 A/B/C/D 组合）。禁止先 list_tables，禁止用 SQL 代替 hit-test。结论看 combo_ranking。
+2. 需要个股/指数/ETF/板块日线或 **1 分钟分时**：优先 `datahubco_data__get_bars` / `datahubco_data__get_mins`（默认库优先，缺则 Datahubco 补数入库）。不要先 list_tables。
+3. 只有没有专用技能、且不知道表名时，才 list_tables / info_table。
+4. 拿到工具结果后必须用中文给出结论（卖点、依据、捕获率）；不要为了「再确认」继续查 SQL。
+5. 若工具失败，说明原因并给出下一步建议。
 """
     if extra:
         prompt += f"\n## 额外系统说明\n{extra}\n"

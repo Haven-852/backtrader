@@ -24,11 +24,18 @@ PostgreSQL ORM 模型与管理器
 
 from .manager import pg_manager, PostgresManager
 from .models import Base as MarketDataBase
+from .chat_models import AgentChatSession, AgentChatMessage, CHAT_MODELS
+from .conversation_repo import conversation_repo, ConversationRepository
 
 __all__ = [
     "pg_manager",
     "PostgresManager",
     "MarketDataBase",
+    "AgentChatSession",
+    "AgentChatMessage",
+    "CHAT_MODELS",
+    "conversation_repo",
+    "ConversationRepository",
 ]
 
 __version__ = "1.0.0"
