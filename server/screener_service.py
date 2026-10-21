@@ -2,6 +2,7 @@
 策略选股：用日线判断 asof 当日状态。
 A 类（观察池）：大跌后缩量筑底、靠近 20 日低点、MA5 走平 —— 只观察，不直接买入。
 B 类：升势回踩 MA5（反转候选，可推荐）。
+C 类：趋势回踩结构止损（MA10/MA20 升势里缩量回踩，次日开盘买）。
 放量下跌直接抛弃。缺数则从 Datahubco 拉取日线写入 stock_daily。
 """
 
@@ -24,6 +25,7 @@ from data_layer.collectors.datahubco.selective import (
     selective_fetcher,
 )
 from data_layer.db_manager import storage_manager
+from server.structure_pullback import classify_last as classify_structure_pullback
 
 logger = logging.getLogger(__name__)
 
@@ -112,7 +114,7 @@ class ScreenerService:
                 reason       TEXT,
                 decline_days INT,
                 expect_up_days INT,
-                PRIMARY KEY (run_id, ts_code)
+                PRIMARY KEY (run_id, ts_code, setup_type)
             )
             """,
             "ALTER TABLE strategy_screener_hit ADD COLUMN IF NOT EXISTS setup_type VARCHAR(8)",
@@ -125,10 +127,20 @@ class ScreenerService:
             "CREATE INDEX IF NOT EXISTS idx_screener_hit_asof ON strategy_screener_hit (trade_date, below_pct DESC)",
             "CREATE INDEX IF NOT EXISTS idx_screener_hit_setup ON strategy_screener_hit (setup_type, score DESC)",
             "CREATE INDEX IF NOT EXISTS idx_stock_daily_date ON stock_daily (trade_date)",
+            "ALTER TABLE strategy_screener_hit ALTER COLUMN setup_type SET DEFAULT 'A'",
+            "UPDATE strategy_screener_hit SET setup_type = 'A' WHERE setup_type IS NULL OR setup_type = ''",
+            "ALTER TABLE strategy_screener_hit DROP CONSTRAINT IF EXISTS strategy_screener_hit_pkey",
+            "ALTER TABLE strategy_screener_hit ADD PRIMARY KEY (run_id, ts_code, setup_type)",
         ]
         with self.engine.begin() as conn:
             for sql in ddl:
-                conn.execute(sa_text(sql))
+                try:
+                    conn.execute(sa_text(sql))
+                except Exception as e:
+                    msg = str(e).lower()
+                    if "already exists" in msg or "multiple primary keys" in msg:
+                        continue
+                    raise
 
     def _ensure_stock_basic(self) -> int:
         if not self.engine:
@@ -785,6 +797,7 @@ class ScreenerService:
         include_a: bool,
         include_b: bool,
         limit: int,
+        include_c: bool = False,
     ) -> pd.DataFrame:
         if not universe:
             return pd.DataFrame()
@@ -809,41 +822,55 @@ class ScreenerService:
 
         hits_b: List[Dict[str, Any]] = []
         hits_a: List[Dict[str, Any]] = []
+        hits_c: List[Dict[str, Any]] = []
         for code, g in raw.groupby("ts_code", sort=False):
-            classified = self._classify_one(g, asof)
-            if not classified:
-                continue
-            setup = classified["setup_type"]
-            if setup == "B" and not include_b:
-                continue
-            if setup == "A" and not include_a:
-                continue
             meta = info.get(code) or {}
-            row = {
-                "ts_code": code,
-                "name": meta.get("name") or code,
-                "market": meta.get("market") or "",
-                "industry": meta.get("industry") or "",
-                "is_st": bool(meta.get("is_st")),
-                "trade_date": asof.isoformat(),
-                **classified,
-            }
-            if setup == "B":
-                hits_b.append(row)
-            else:
-                hits_a.append(row)
+
+            def _pack(classified: Dict[str, Any]) -> Dict[str, Any]:
+                return {
+                    "ts_code": code,
+                    "name": meta.get("name") or code,
+                    "market": meta.get("market") or "",
+                    "industry": meta.get("industry") or "",
+                    "is_st": bool(meta.get("is_st")),
+                    "trade_date": asof.isoformat(),
+                    **classified,
+                }
+
+            if include_a or include_b:
+                classified = self._classify_one(g, asof)
+                if classified:
+                    setup = classified["setup_type"]
+                    if setup == "B" and include_b:
+                        hits_b.append(_pack(classified))
+                    elif setup == "A" and include_a:
+                        hits_a.append(_pack(classified))
+            if include_c:
+                c_hit = classify_structure_pullback(g, asof)
+                if c_hit:
+                    hits_c.append(_pack(c_hit))
 
         hits_b.sort(key=lambda r: float(r["score"]), reverse=True)
         hits_a.sort(key=lambda r: float(r["score"]), reverse=True)
+        hits_c.sort(key=lambda r: float(r.get("risk_fraction_signal") or 99))
         limit = max(1, int(limit))
-        if include_b and include_a:
-            take_b = min(len(hits_b), max(1, int(limit * 0.67)))
-            take_a = min(len(hits_a), max(0, limit - take_b))
-        elif include_b:
-            take_b, take_a = min(len(hits_b), limit), 0
-        else:
-            take_b, take_a = 0, min(len(hits_a), limit)
-        picked = hits_b[:take_b] + hits_a[:take_a]
+        n_types = int(include_a) + int(include_b) + int(include_c)
+        share = max(1, limit // max(1, n_types))
+        take_b = min(len(hits_b), share if include_b else 0)
+        take_a = min(len(hits_a), share if include_a else 0)
+        take_c = min(len(hits_c), share if include_c else 0)
+        leftover = limit - take_b - take_a - take_c
+        if leftover > 0 and include_c:
+            extra = min(len(hits_c) - take_c, leftover)
+            take_c += extra
+            leftover -= extra
+        if leftover > 0 and include_b:
+            extra = min(len(hits_b) - take_b, leftover)
+            take_b += extra
+            leftover -= extra
+        if leftover > 0 and include_a:
+            take_a += min(len(hits_a) - take_a, leftover)
+        picked = hits_b[:take_b] + hits_a[:take_a] + hits_c[:take_c]
         if not picked:
             return pd.DataFrame()
         return pd.DataFrame(picked).reset_index(drop=True)
@@ -905,9 +932,9 @@ class ScreenerService:
                         "VALUES (:run_id, :ts_code, :name, :market, :industry, :is_st, :trade_date, "
                         ":close, :ma5, :below_pct, :setup_type, :score, :label, :pct_chg, :reason, "
                         ":decline_days, :expect_up_days) "
-                        "ON CONFLICT (run_id, ts_code) DO UPDATE SET "
+                        "ON CONFLICT (run_id, ts_code, setup_type) DO UPDATE SET "
                         "close = EXCLUDED.close, ma5 = EXCLUDED.ma5, below_pct = EXCLUDED.below_pct, "
-                        "setup_type = EXCLUDED.setup_type, score = EXCLUDED.score, "
+                        "score = EXCLUDED.score, "
                         "label = EXCLUDED.label, pct_chg = EXCLUDED.pct_chg, reason = EXCLUDED.reason, "
                         "decline_days = EXCLUDED.decline_days, expect_up_days = EXCLUDED.expect_up_days"
                     ),
@@ -928,11 +955,12 @@ class ScreenerService:
         include_b: bool = True,
         limit: int = 60,
         fill: bool = True,
+        include_c: bool = False,
     ) -> Dict[str, Any]:
         if not self.engine:
             return {"ok": False, "error": "PostgreSQL 未连接"}
-        if not include_a and not include_b:
-            return {"ok": False, "error": "请至少选择 A 类观察池或 B 类升势回踩"}
+        if not include_a and not include_b and not include_c:
+            return {"ok": False, "error": "请至少选择 A 观察池、B 升势回踩或 C 趋势回踩"}
         self._ensure_tables()
         self.selective.ensure_trade_cal()
         ctx = self.selective.session_context()
@@ -954,6 +982,7 @@ class ScreenerService:
             "include_cdr": include_cdr,
             "include_a": include_a,
             "include_b": include_b,
+            "include_c": include_c,
             "lookback": LOOKBACK_BARS,
         }
         basic_n = self._ensure_stock_basic()
@@ -975,7 +1004,7 @@ class ScreenerService:
             fill_report["enabled"] = True
         filled = int(fill_report.get("rows") or 0)
 
-        hits = self._screen_setups(asof_d, universe, include_a, include_b, limit)
+        hits = self._screen_setups(asof_d, universe, include_a, include_b, limit, include_c=include_c)
         run_id = self._save_run(asof_d, {**filters, "fill": fill_report}, hits, filled)
         records: List[Dict[str, Any]] = []
         if not hits.empty:
@@ -998,14 +1027,24 @@ class ScreenerService:
                         "pct_chg": None if pd.isna(r["pct_chg"]) else round(float(r["pct_chg"]), 3),
                         "decline_days": None if "decline_days" not in r or pd.isna(r["decline_days"]) else int(r["decline_days"]),
                         "expect_up_days": None if "expect_up_days" not in r or pd.isna(r["expect_up_days"]) else int(r["expect_up_days"]),
+                        "ma10": None if "ma10" not in r or pd.isna(r["ma10"]) else round(float(r["ma10"]), 4),
+                        "ma20": None if "ma20" not in r or pd.isna(r["ma20"]) else round(float(r["ma20"]), 4),
+                        "atr14": None if "atr14" not in r or pd.isna(r["atr14"]) else round(float(r["atr14"]), 4),
+                        "structure_low": None if "structure_low" not in r or pd.isna(r["structure_low"]) else round(float(r["structure_low"]), 4),
+                        "signal_stop": None if "signal_stop" not in r or pd.isna(r["signal_stop"]) else round(float(r["signal_stop"]), 4),
+                        "risk_fraction_signal": None if "risk_fraction_signal" not in r or pd.isna(r["risk_fraction_signal"]) else round(float(r["risk_fraction_signal"]), 5),
+                        "vol_pullback": None if "vol_pullback" not in r or pd.isna(r["vol_pullback"]) else round(float(r["vol_pullback"]), 4),
                     }
                 )
         hits_b = [x for x in records if x["setup_type"] == "B"]
         hits_a = [x for x in records if x["setup_type"] == "A"]
+        hits_c = [x for x in records if x["setup_type"] == "C"]
         fill_errors = fill_report.get("errors") or []
         note = (
-            "A=观察池（大跌后缩量筑底、贴MA5、靠近20日低点，只观察不买入）；"
-            "B=升势回踩可推荐。观察池 reason 含低点/颈线/基准量，供后续盯起飞。"
+            "A=观察池（大跌后缩量筑底，只观察不买入）；"
+            "B=升势回踩 MA5 可推荐；"
+            "C=趋势回踩结构止损：MA10>MA20 升势里缩量回踩 MA10，"
+            "收盘出信号、次日开盘买，止损在近10日结构低点，T+1 后才能卖，最多持 5 日。"
         )
         if fill:
             fetched_n = len(fill_report.get("days_fetched") or [])
@@ -1032,9 +1071,11 @@ class ScreenerService:
             "hit_count": len(records),
             "hit_count_b": len(hits_b),
             "hit_count_a": len(hits_a),
+            "hit_count_c": len(hits_c),
             "hits": records,
             "hits_b": hits_b,
             "hits_a": hits_a,
+            "hits_c": hits_c,
             "source": "datahubco",
             "table": "stock_daily",
             "note": note,

@@ -168,14 +168,27 @@ class StrategyCycleService:
         else:
             exec_price = "same_close"  # 演示用，存在前视
 
-        signals = self._generate_signals(strategy_id, df, params)
-        result = self._simulate(
-            df,
-            signals,
-            cash=cash,
-            exec_price=exec_price,
-            params=params,
-        )
+        if strategy_id == "structure_pullback":
+            from server.structure_pullback import backtest as sp_backtest, trades_to_sim_result
+
+            dates = [str(d)[:10] for d in df["trade_date"].tolist()]
+            trades = sp_backtest(
+                df,
+                max_holding=int(params.get("max_holding", 5)),
+                atr_multiple=float(params.get("atr_multiple", 2.5)),
+                trigger_r=float(params.get("trigger_r", 2.0)),
+                slippage_bps=float(params.get("slippage_bps", 5)),
+            )
+            result = trades_to_sim_result(trades, cash, dates)
+        else:
+            signals = self._generate_signals(strategy_id, df, params)
+            result = self._simulate(
+                df,
+                signals,
+                cash=cash,
+                exec_price=exec_price,
+                params=params,
+            )
 
         # 基准简单 buy&hold
         bench_ret = 0.0
@@ -187,7 +200,10 @@ class StrategyCycleService:
 
         walk_rows: List[Dict[str, Any]] = []
         if walk_forward:
-            walk_rows = self._walk_forward(df, strategy_id, params, cash, exec_price)
+            if strategy_id == "structure_pullback":
+                walk_rows = self._walk_forward_structure(df, params, cash)
+            else:
+                walk_rows = self._walk_forward(df, strategy_id, params, cash, exec_price)
 
         # 开关执行摘要（前端回测结果区展示）
         guard_meta = next((o for o in BACKTEST_OPTIONS if o["key"] == "lookback_guard"), {})
@@ -246,6 +262,12 @@ class StrategyCycleService:
             "walk_forward_rows": walk_rows,
             "options_applied": options_applied,
             "params": params,
+            "note": (
+                "趋势回踩：收盘信号、次日开盘买、T+1 才能卖；"
+                "不含佣金/印花税/涨跌停无法成交/停牌。填充模型为初步近似。"
+                if strategy_id == "structure_pullback"
+                else None
+            ),
         }
 
     def _merge_params(self, strat: Dict[str, Any], override: Dict[str, Any]) -> Dict[str, Any]:
@@ -544,6 +566,58 @@ class StrategyCycleService:
             if len(train_df) >= 20:
                 tsig = self._generate_signals(strategy_id, train_df, params)
                 tsim = self._simulate(train_df, tsig, cash=cash, exec_price=exec_price, params=params)
+                train_ret = tsim["total_return"]
+            rows.append(
+                {
+                    "fold": f + 1,
+                    "train_ret": train_ret,
+                    "test_ret": sim["total_return"],
+                    "test_dd": sim["max_drawdown"],
+                }
+            )
+        return rows
+
+    def _walk_forward_structure(
+        self,
+        df: pd.DataFrame,
+        params: Dict[str, Any],
+        cash: float,
+        folds: int = 3,
+    ) -> List[Dict[str, Any]]:
+        from server.structure_pullback import backtest as sp_backtest, trades_to_sim_result
+
+        n = len(df)
+        if n < 90:
+            return []
+        chunk = n // (folds + 1)
+        rows = []
+        for f in range(folds):
+            train_end = chunk * (f + 1)
+            test_end = min(n, train_end + chunk)
+            test_df = df.iloc[train_end:test_end].reset_index(drop=True)
+            if len(test_df) < 30:
+                continue
+            test_dates = [str(d)[:10] for d in test_df["trade_date"].tolist()]
+            test_trades = sp_backtest(
+                test_df,
+                max_holding=int(params.get("max_holding", 5)),
+                atr_multiple=float(params.get("atr_multiple", 2.5)),
+                trigger_r=float(params.get("trigger_r", 2.0)),
+                slippage_bps=float(params.get("slippage_bps", 5)),
+            )
+            sim = trades_to_sim_result(test_trades, cash, test_dates)
+            train_df = df.iloc[max(0, train_end - chunk) : train_end].reset_index(drop=True)
+            train_ret = 0.0
+            if len(train_df) >= 30:
+                train_dates = [str(d)[:10] for d in train_df["trade_date"].tolist()]
+                train_trades = sp_backtest(
+                    train_df,
+                    max_holding=int(params.get("max_holding", 5)),
+                    atr_multiple=float(params.get("atr_multiple", 2.5)),
+                    trigger_r=float(params.get("trigger_r", 2.0)),
+                    slippage_bps=float(params.get("slippage_bps", 5)),
+                )
+                tsim = trades_to_sim_result(train_trades, cash, train_dates)
                 train_ret = tsim["total_return"]
             rows.append(
                 {

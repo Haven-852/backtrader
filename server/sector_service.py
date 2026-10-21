@@ -70,6 +70,23 @@ class SectorService:
         except Exception:
             return None
 
+    def _member_coverage(self, ts_code: str, trade_date: date) -> tuple:
+        """返回 (成分数量, 已有现价数量)。"""
+        if not self.engine or not trade_date:
+            return 0, 0
+        try:
+            with self.engine.connect() as conn:
+                row = conn.execute(
+                    sa_text(
+                        "SELECT COUNT(*), COUNT(close) "
+                        "FROM sector_dc_member WHERE ts_code=:c AND trade_date=:d"
+                    ),
+                    {"c": ts_code, "d": trade_date},
+                ).fetchone()
+            return int(row[0] or 0), int(row[1] or 0)
+        except Exception:
+            return 0, 0
+
     def _count_on_date(self, table: str, trade_date: date) -> int:
         if not self.engine:
             return 0
@@ -437,13 +454,21 @@ class SectorService:
                 })
                 cur = row[3]
         return {"ok": True, "ts_code": ts_code, "path": path}
+
     def get_members(
         self,
         ts_code: str,
         trade_date: Optional[str] = None,
         auto_fetch: bool = True,
     ) -> Dict[str, Any]:
-        """板块成分股 + 当日个股行情（stock_daily）。"""
+        """板块成分股 + 行情。
+
+        现价/涨跌幅/成交额优先级：
+        1) 与成分同一天的 stock_daily
+        2) 东财成分快照（sector_dc_member.close/pct_chg/amount）
+        3) 该股不晚于 asof 的最近一条 stock_daily
+        库里名单不全或报价覆盖不足时，点击会从东财 clist 刷新。
+        """
         ts_code = (ts_code or "").strip().upper()
         if not ts_code:
             return {"ok": False, "error": "缺少 ts_code", "members": []}
@@ -455,42 +480,82 @@ class SectorService:
         asof: date = meta["asof_date"]
         latest = self._latest_trade_date()
         use_date = latest if latest and latest < asof else asof
-        ymd = use_date.strftime("%Y%m%d")
+        asof_ymd = asof.strftime("%Y%m%d")
 
         if not self.engine:
             return {"ok": False, "error": "数据库未连接", "members": []}
 
-        # 读库；空则拉远端
-        with self.engine.connect() as conn:
-            cnt = conn.execute(
-                sa_text(
-                    "SELECT COUNT(*) FROM sector_dc_member WHERE ts_code=:c AND trade_date=:d"
-                ),
-                {"c": ts_code, "d": use_date},
-            ).scalar()
+        cnt, quoted = self._member_coverage(ts_code, use_date)
+        if not cnt:
+            with self.engine.connect() as conn:
+                latest_m = conn.execute(
+                    sa_text("SELECT MAX(trade_date) FROM sector_dc_member WHERE ts_code=:c"),
+                    {"c": ts_code},
+                ).scalar()
+            if latest_m:
+                use_date = latest_m
+                cnt, quoted = self._member_coverage(ts_code, use_date)
 
-        if (not cnt or cnt == 0) and auto_fetch:
+        # 名单为空才拉远端。已有名单时用最近日线回填现价，避免点击被东财超时拖死。
+        need_refresh = auto_fetch and cnt == 0
+        if need_refresh:
+            refreshed = False
             try:
-                mdf = sector_fetcher.fetch_members(ts_code, ymd)
-                if not mdf.empty:
-                    mdf = mdf.loc[mdf["trade_date"] == use_date] if "trade_date" in mdf.columns else mdf
-                    sector_fetcher.upsert_members(mdf)
+                em = sector_fetcher.fetch_eastmoney_members(ts_code, asof_ymd)
+                if em is not None and not em.empty:
+                    sector_fetcher.upsert_members(em)
+                    use_date = asof
+                    refreshed = True
             except Exception as e:
-                logger.warning("拉取成分股失败 %s: %s", ts_code, e)
+                logger.warning("东财刷新成分股失败 %s: %s", ts_code, e)
+            if not refreshed:
+                try:
+                    mdf = sector_fetcher.fetch_members(ts_code, asof_ymd)
+                    if mdf is not None and not mdf.empty:
+                        sector_fetcher.upsert_members(mdf)
+                        use_date = asof
+                except Exception as e:
+                    logger.warning("拉取成分股失败 %s: %s", ts_code, e)
+            cnt, quoted = self._member_coverage(ts_code, use_date)
+            if not cnt:
+                with self.engine.connect() as conn:
+                    latest_m = conn.execute(
+                        sa_text(
+                            "SELECT MAX(trade_date) FROM sector_dc_member WHERE ts_code=:c"
+                        ),
+                        {"c": ts_code},
+                    ).scalar()
+                if latest_m:
+                    use_date = latest_m
 
         sql = sa_text(
             """
             SELECT
                 m.con_code AS ts_code,
                 COALESCE(b.name, m.name) AS name,
-                d.close, d.open, d.high, d.low,
-                d.pre_close, d.change, d.pct_chg, d.vol, d.amount
+                COALESCE(d.close, m.close, ld.close) AS close,
+                COALESCE(d.open, ld.open) AS open,
+                COALESCE(d.high, ld.high) AS high,
+                COALESCE(d.low, ld.low) AS low,
+                COALESCE(d.pre_close, ld.pre_close) AS pre_close,
+                COALESCE(d.change, ld.change) AS change,
+                COALESCE(d.pct_chg, m.pct_chg, ld.pct_chg) AS pct_chg,
+                COALESCE(d.vol, ld.vol) AS vol,
+                COALESCE(d.amount, m.amount, ld.amount) AS amount,
+                COALESCE(d.trade_date, ld.trade_date) AS quote_date
             FROM sector_dc_member m
             LEFT JOIN ref_stock_basic b ON b.ts_code = m.con_code
             LEFT JOIN stock_daily d
               ON d.ts_code = m.con_code AND d.trade_date = m.trade_date
+            LEFT JOIN LATERAL (
+                SELECT close, open, high, low, pre_close, change, pct_chg, vol, amount, trade_date
+                FROM stock_daily
+                WHERE ts_code = m.con_code AND trade_date <= :d
+                ORDER BY trade_date DESC
+                LIMIT 1
+            ) ld ON TRUE
             WHERE m.ts_code = :c AND m.trade_date = :d
-            ORDER BY d.pct_chg DESC NULLS LAST, m.con_code
+            ORDER BY COALESCE(d.pct_chg, m.pct_chg, ld.pct_chg) DESC NULLS LAST, m.con_code
             """
         )
         try:
@@ -498,8 +563,8 @@ class SectorService:
         except Exception as e:
             return {"ok": False, "error": str(e), "members": [], "ts_code": ts_code}
 
-        # 板块元信息
         sector_name = ts_code
+        sector_meta: Dict[str, Any] = {}
         try:
             with self.engine.connect() as conn:
                 row = conn.execute(
@@ -509,6 +574,14 @@ class SectorService:
                     ),
                     {"c": ts_code, "d": use_date},
                 ).fetchone()
+                if not row:
+                    row = conn.execute(
+                        sa_text(
+                            "SELECT name, pct_change, leading_name, leading_code FROM sector_dc_index_daily "
+                            "WHERE ts_code=:c ORDER BY trade_date DESC LIMIT 1"
+                        ),
+                        {"c": ts_code},
+                    ).fetchone()
                 if row:
                     sector_name = row[0] or ts_code
                     sector_meta = {
@@ -517,35 +590,41 @@ class SectorService:
                         "leading": row[2],
                         "leading_code": row[3],
                     }
-                else:
-                    sector_meta = {}
         except Exception:
             sector_meta = {}
 
         members = []
+        quoted_out = 0
         for _, r in df.iterrows():
+            close = _ser(r.get("close"))
+            pct_chg = _ser(r.get("pct_chg"))
+            amount = _ser(r.get("amount"))
+            if close is not None or pct_chg is not None or amount is not None:
+                quoted_out += 1
             members.append({
                 "ts_code": r["ts_code"],
                 "name": r.get("name"),
-                "close": _ser(r.get("close")),
+                "close": close,
                 "open": _ser(r.get("open")),
                 "high": _ser(r.get("high")),
                 "low": _ser(r.get("low")),
                 "pre_close": _ser(r.get("pre_close")),
                 "change": _ser(r.get("change")),
-                "pct_chg": _ser(r.get("pct_chg")),
+                "pct_chg": pct_chg,
                 "vol": _ser(r.get("vol")),
-                "amount": _ser(r.get("amount")),
+                "amount": amount,
+                "quote_date": _ser(r.get("quote_date")),
             })
 
         return {
             "ok": True,
             "ts_code": ts_code,
             "name": sector_name,
-            "trade_date": use_date.isoformat(),
+            "trade_date": use_date.isoformat() if hasattr(use_date, "isoformat") else str(use_date),
             "sector": sector_meta,
             "members": members,
             "count": len(members),
+            "quoted_count": quoted_out,
             "session": meta,
         }
 
@@ -560,6 +639,24 @@ class SectorService:
 
     async def rebuild_hierarchy_async(self, **kwargs) -> Dict[str, Any]:
         return await asyncio.to_thread(self.rebuild_hierarchy, **kwargs)
+
+    def sync_all_members(self, trade_date: Optional[str] = None) -> Dict[str, Any]:
+        from data_layer.collectors.datahubco.sectors import sector_fetcher
+
+        sector_fetcher.ensure_tables()
+        return sector_fetcher.sync_all_members(trade_date=trade_date)
+
+    async def sync_all_members_async(self, **kwargs) -> Dict[str, Any]:
+        return await asyncio.to_thread(self.sync_all_members, **kwargs)
+
+    def backfill_klines(self, lookback_days: int = 500) -> Dict[str, Any]:
+        from data_layer.collectors.datahubco.sectors import sector_fetcher
+
+        sector_fetcher.ensure_tables()
+        return sector_fetcher.backfill_all_industry_klines(lookback_days=lookback_days)
+
+    async def backfill_klines_async(self, **kwargs) -> Dict[str, Any]:
+        return await asyncio.to_thread(self.backfill_klines, **kwargs)
 
 
 sector_service = SectorService()

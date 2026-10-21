@@ -13,7 +13,7 @@ POST /chat/sessions/{id}/messages - 追加单条消息（技能面板等）
 
 from fastapi import APIRouter, HTTPException, Query
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, SecretStr
 from typing import List, Dict, Optional, Any
 from datetime import datetime
 
@@ -37,6 +37,9 @@ class MessageRequest(BaseModel):
     session_id: Optional[str] = Field(None, description="会话 ID；空则新建并落库")
     persist: bool = Field(default=True, description="是否写入 PostgreSQL")
     user_id: str = Field(default="default", description="用户标识")
+    profile_id: Optional[int] = Field(None, description="已保存的用户模型配置 ID")
+    api_key: Optional[SecretStr] = Field(None, description="本次对话使用的 API Key（未保存配置时）")
+    base_url: Optional[str] = Field(None, description="兼容接口 Base URL")
     agent_mode: Optional[str] = Field(
         None, description="Agent 模式：paper_trade=纸面交易（仅纸面工具）"
     )
@@ -83,6 +86,49 @@ class AppendMessageRequest(BaseModel):
     tool_trace: Optional[List[Any]] = None
 
 
+def _secret_text(value) -> Optional[str]:
+    if value is None:
+        return None
+    if isinstance(value, SecretStr):
+        text = value.get_secret_value()
+    else:
+        text = str(value)
+    text = text.strip()
+    return text or None
+
+
+class LlmProfilePayload(BaseModel):
+    name: Optional[str] = None
+    provider: str = "deepseek"
+    model: str
+    api_key: Optional[SecretStr] = None
+    base_url: Optional[str] = None
+    temperature: float = Field(default=0.7, ge=0.0, le=2.0)
+    max_tokens: int = Field(default=4096, ge=1, le=128000)
+    enabled: bool = True
+    is_active: bool = False
+
+
+class LlmProfilePatch(BaseModel):
+    name: Optional[str] = None
+    provider: Optional[str] = None
+    model: Optional[str] = None
+    api_key: Optional[SecretStr] = None
+    base_url: Optional[str] = None
+    temperature: Optional[float] = Field(default=None, ge=0.0, le=2.0)
+    max_tokens: Optional[int] = Field(default=None, ge=1, le=128000)
+    enabled: Optional[bool] = None
+    is_active: Optional[bool] = None
+
+
+class LlmTestPayload(BaseModel):
+    provider: str = "deepseek"
+    model: str = ""
+    api_key: Optional[SecretStr] = None
+    base_url: Optional[str] = None
+    profile_id: Optional[int] = None
+
+
 # ─── 路由 ─────────────────────────────────────────────
 
 @router.post("/messages", response_model=MessageResponse)
@@ -116,6 +162,10 @@ async def send_message(request: MessageRequest):
             agent_mode=request.agent_mode,
             tool_skills=request.tool_skills,
             context=ctx,
+            user_id=request.user_id,
+            profile_id=request.profile_id,
+            api_key=_secret_text(request.api_key),
+            base_url=request.base_url,
         )
 
         if request.use_tools:
@@ -230,6 +280,10 @@ async def send_message_stream(request: MessageRequest):
         system_prompt=request.system_prompt,
         temperature=request.temperature,
         max_tokens=request.max_tokens,
+        user_id=request.user_id,
+        profile_id=request.profile_id,
+        api_key=_secret_text(request.api_key),
+        base_url=request.base_url,
     )
 
     async def event_generator():
@@ -265,6 +319,109 @@ async def get_models():
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"获取模型列表失败: {str(e)}")
+
+
+@router.get("/llm-profiles")
+async def list_llm_profiles(user_id: str = Query(default="default")):
+    """当前用户已保存的大模型配置 + 厂商预设。"""
+    try:
+        from server.llm_profile_service import llm_profile_service
+
+        return llm_profile_service.catalog(user_id)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"读取模型配置失败: {e}")
+
+
+@router.post("/llm-profiles")
+async def create_llm_profile(body: LlmProfilePayload, user_id: str = Query(default="default")):
+    try:
+        from server.llm_profile_service import llm_profile_service
+
+        data = body.model_dump()
+        data["api_key"] = _secret_text(body.api_key)
+        profile = llm_profile_service.create(data, user_id=user_id)
+        return {"ok": True, "profile": profile}
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"保存模型配置失败: {e}")
+
+
+@router.patch("/llm-profiles/{profile_id}")
+async def update_llm_profile(profile_id: int, body: LlmProfilePatch, user_id: str = Query(default="default")):
+    try:
+        from server.llm_profile_service import llm_profile_service
+
+        data = body.model_dump(exclude_unset=True)
+        if "api_key" in data:
+            data["api_key"] = _secret_text(body.api_key)
+        profile = llm_profile_service.update(
+            profile_id,
+            data,
+            user_id=user_id,
+        )
+        if not profile:
+            raise HTTPException(status_code=404, detail="模型配置不存在")
+        return {"ok": True, "profile": profile}
+    except HTTPException:
+        raise
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"更新模型配置失败: {e}")
+
+
+@router.delete("/llm-profiles/{profile_id}")
+async def delete_llm_profile(profile_id: int, user_id: str = Query(default="default")):
+    try:
+        from server.llm_profile_service import llm_profile_service
+
+        ok = llm_profile_service.delete(profile_id, user_id=user_id)
+        if not ok:
+            raise HTTPException(status_code=404, detail="模型配置不存在")
+        return {"ok": True, "deleted": profile_id}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"删除模型配置失败: {e}")
+
+
+@router.post("/llm-profiles/{profile_id}/activate")
+async def activate_llm_profile(profile_id: int, user_id: str = Query(default="default")):
+    try:
+        from server.llm_profile_service import llm_profile_service
+
+        profile = llm_profile_service.activate(profile_id, user_id=user_id)
+        if not profile:
+            raise HTTPException(status_code=404, detail="模型配置不存在")
+        return {"ok": True, "profile": profile}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"切换模型失败: {e}")
+
+
+@router.post("/llm-test")
+async def test_llm_config(body: LlmTestPayload, user_id: str = Query(default="default")):
+    """用表单或已保存配置探测连通性。"""
+    try:
+        from server.llm_profile_service import llm_profile_service
+
+        payload = body.model_dump()
+        payload["api_key"] = _secret_text(body.api_key)
+        if body.profile_id:
+            raw = llm_profile_service.get_raw(int(body.profile_id), user_id)
+            if not raw:
+                raise HTTPException(status_code=404, detail="模型配置不存在")
+            payload["provider"] = payload.get("provider") or raw["provider"]
+            payload["model"] = payload.get("model") or raw["model"]
+            payload["api_key"] = (payload.get("api_key") or raw.get("api_key") or "")
+            payload["base_url"] = payload.get("base_url") or raw.get("base_url")
+        return await llm_profile_service.test_config(payload)
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"测试失败: {e}")
 
 
 @router.get("/sessions")

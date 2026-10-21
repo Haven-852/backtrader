@@ -50,15 +50,14 @@ services:
     networks:
       - backtrader-network
 
-  # Storage Layer (从 docker-compose.storage.yml 合并)
+  # Storage Layer：bind-mount 到 ./data/docker/*（宿主机 E:），抗 Docker Desktop vhdx 重建
   influxdb:
     image: influxdb:2.7
     container_name: backtrader-influxdb
     ports:
       - "8086:8086"
     volumes:
-      - influxdb-data:/var/lib/influxdb2
-      - ./data/influxdb:/var/lib/influxdb2
+      - ./data/docker/influxdb:/var/lib/influxdb2
     environment:
       - DOCKER_INFLUXDB_INIT_MODE=setup
       - DOCKER_INFLUXDB_INIT_USERNAME=admin
@@ -76,7 +75,7 @@ services:
     ports:
       - "15432:5432"
     volumes:
-      - postgres-data:/var/lib/postgresql/data
+      - ./data/docker/postgres:/var/lib/postgresql/data
     environment:
       - POSTGRES_USER=quant
       - POSTGRES_PASSWORD=backtrader123
@@ -92,20 +91,21 @@ services:
     ports:
       - "16379:6379"
     volumes:
-      - redis-data:/data
-    command: redis-server --appendonly yes
+      - ./data/docker/redis:/data
+    command: redis-server --appendonly yes --dir /data
     restart: unless-stopped
     networks:
       - backtrader-network
 
   minio:
-    image: quay.io/minio/minio:latest
+    # quay.io 常报 unauthorized；改用 Docker Hub
+    image: minio/minio:latest
     container_name: backtrader-minio
     ports:
       - "9000:9000"
       - "9001:9001"
     volumes:
-      - minio-data:/data
+      - ./data/docker/minio:/data
     environment:
       - MINIO_ROOT_USER=quant
       - MINIO_ROOT_PASSWORD=backtrader123
@@ -121,7 +121,7 @@ services:
       - "18123:8123"
       - "19000:9000"
     volumes:
-      - clickhouse-data:/var/lib/clickhouse
+      - ./data/docker/clickhouse:/var/lib/clickhouse
     ulimits:
       nofile:
         soft: 262144
@@ -149,9 +149,4 @@ networks:
   backtrader-network:
     driver: bridge
 
-volumes:
-  influxdb-data:
-  postgres-data:
-  redis-data:
-  minio-data:
-  clickhouse-data:
+# 业务数据已改为 ./data/docker/* 宿主机目录，不再使用命名卷（避免随 vhdx 丢失）

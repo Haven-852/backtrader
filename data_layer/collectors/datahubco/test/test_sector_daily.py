@@ -107,24 +107,43 @@ def fetch_dc_index(
 ) -> Dict[str, pd.DataFrame]:
     """东财板块指数：涨跌幅 / 领涨股 / 涨跌家数。"""
     out: Dict[str, pd.DataFrame] = {}
-    # 一次拉全日，再按 idx_type 拆分（网关对 idx_type 过滤不稳定时更稳）
-    all_df = client.query("dc_index", trade_date=trade_date)
-    if all_df.empty:
-        logger.warning("dc_index 空结果 trade_date=%s", trade_date)
-        return out
 
-    if "idx_type" not in all_df.columns:
-        out["全部"] = all_df
-        return out
-
-    for t in idx_types:
-        part = all_df.loc[all_df["idx_type"] == t].copy()
-        if part.empty:
-            logger.warning("dc_index 无类型 %s", t)
-            continue
+    def _sort_part(part: pd.DataFrame) -> pd.DataFrame:
         if "pct_change" in part.columns:
             part = part.sort_values("pct_change", ascending=False)
-        out[t] = part.reset_index(drop=True)
+        return part.reset_index(drop=True)
+
+    # 网关现要求 idx_type；全日拉取仅作兜底。
+    all_df = pd.DataFrame()
+    try:
+        all_df = client.query("dc_index", trade_date=trade_date)
+    except Exception as e:
+        logger.warning("dc_index 全日拉取失败，改按类型请求: %s", e)
+
+    if not all_df.empty:
+        if "idx_type" not in all_df.columns:
+            out["全部"] = all_df
+            return out
+        for t in idx_types:
+            part = all_df.loc[all_df["idx_type"] == t].copy()
+            if part.empty:
+                continue
+            out[t] = _sort_part(part)
+        if out:
+            return out
+
+    for t in idx_types:
+        try:
+            part = client.query("dc_index", trade_date=trade_date, idx_type=t)
+        except Exception as e:
+            logger.warning("dc_index(%s) 失败: %s", t, e)
+            continue
+        if part is None or part.empty:
+            logger.warning("dc_index 无类型 %s", t)
+            continue
+        out[t] = _sort_part(part)
+    if not out:
+        logger.warning("dc_index 空结果 trade_date=%s", trade_date)
     return out
 
 

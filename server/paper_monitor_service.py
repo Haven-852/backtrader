@@ -84,7 +84,6 @@ MONITOR_CONFIG_DEFAULTS: Dict[str, Any] = {
     "monitor_cooldown_minutes": 45,
     "monitor_use_llm": True,
     "monitor_model": "deepseek-chat",
-    "monitor_report_prompt": "",
     "monitor_enable_daily_drop": True,
     "monitor_enable_daily_rise": True,
     "monitor_enable_peak_pullback": True,
@@ -95,14 +94,46 @@ MONITOR_CONFIG_DEFAULTS: Dict[str, Any] = {
 }
 
 DEFAULT_REPORT_PROMPT = (
-    "请输出一份中文 Markdown 监控简报，结构必须如下：\n"
-    "1. 标题用 `# 自选股监控简报 · 日期`。\n"
-    "2. 二级标题 `## 为什么会出现这些情况`，用 3～8 句话说明触发原因。"
-    "可以合理推断，但要标明不确定。\n"
-    "3. `## 触发明细`，用列表列出每只股票、规则、现价、昨收和成本。\n"
-    "4. `## 个股简析`，对每只触发股票各写一小段。\n"
-    "5. `## 关注建议`，只写观察点，强调风险，不做荐股承诺。"
+    "触发「成本止盈」或「冲高回落」（高点要抛）时，对每只相关股票按下面栏目写简报。"
+    "其他规则触发的股票也用同一结构。价格、涨跌幅、资金和财务数字只能来自本次给出的监控事实或工具返回。"
+    "工具没返回的成交额、涨停家数、资金、公告和财务指标不要编造。\n"
+    "缺数时调用 datahubco-data，source 用 auto，write_back 用 true，补到库里再写：\n"
+    "- 近5个交易日股价不够：datahubco_data__get_bars，dataset=stock_daily，补这5天。\n"
+    "- 当天股价变化：datahubco_data__get_mins，trade_date 用本次交易日，用分时说明当天怎么走。\n"
+    "- 近23个交易日资金流：datahubco_data__get_fund_data，dataset=moneyflow。"
+    "金额统一写成万元。返回单位若是元，先除以10000；若已是万元，不要再除。"
+    "如果区间结果里缺少最近一个交易日，对这一天单独再调一次，source 用 datahubco，不要把缺的这一天写成没有数据。\n"
+    "- 近60个交易日日线：datahubco_data__get_bars，dataset=stock_daily，覆盖60个交易日后再写日线特征。\n"
+    "- 各公司基本面必须实际调用 datahubco_data__get_fund_data，dataset 依次为 fina_indicator、income、balancesheet。"
+    "库里没有也不能直接写未取到，要先向 Datahubco 取。只写工具实际返回的最近一期。三次都失败才写未取到，并写明失败原因。\n"
+    "栏目顺序必须是：\n"
+    "1. 标题 `# 自选股监控简报 · 日期`。\n"
+    "2. `## 触发`：股票、规则、现价、昨收、成本。\n"
+    "3. `## 近5日股价`：最近5个交易日的价格和涨跌变化。"
+    "用这5个交易日的收盘价计算五日均线（算术平均）。"
+    "写出现价相对五日均线的位置，高出或低于多少个百分点，算法是 (现价/五日均线-1)×100。"
+    "高出达到或超过 5 个百分点时，写明当前股价已经处于短期高位，注意控制仓位。"
+    "没有达到时，只写实际高出或低于的百分点，不要写成高位。\n"
+    "4. `## 当日分时`：根据分时说明当天股价发生了什么变化。\n"
+    "5. `## 近23日资金流`：近23个交易日的资金流变化，单位万元。\n"
+    "6. `## 近60日日线特征`：近60个交易日的日线特征。\n"
+    "7. `## 未来三日`：后面三个交易日可能出现的变化和判断特征。"
+    "必须标明这是根据已有数据做的判断，不写具体点位承诺。\n"
+    "8. `## 综合结论`：把价格、分时、资金和日线收成一段结论。\n"
+    "9. `## 基本面`：各公司的基本情况。\n"
+    "10. `## 现阶段强势板块`：调用 sector_intraday__l2_tone，trade_date 用本次交易日，top_n 用 10。"
+    "该工具按涨跌幅绝对值排序，下跌板块也会出现。只保留 pct_change_daily 大于 0 的板块，按涨幅从高到低取 5 个，作为现阶段强势 Top5。"
+    "上涨不足 5 个就写实际个数，不要用下跌板块凑数。板块涨跌幅只使用工具返回值。\n"
+    "每个板块下面再写 3 只强势股票：先用返回的 leading_name，其余用 datahubco_data__get_sector_members 取成分，"
+    "再用 datahubco_data__get_bars 的当日涨跌排序，取涨幅最高的 3 只。成分或涨幅没返回就少写，不要编造股票。\n"
+    "这 3 只里哪些有主力资金注入：对每只调用 datahubco_data__get_fund_data，dataset=moneyflow，看最近一个交易日净流入。"
+    "金额写成万元。净流入为正才写迎来主力注入，没有返回或为负就写未注入，不要推断。\n"
+    "每只再写最近 3 个交易日的股价变化（get_bars，dataset=stock_daily）和当天分时变化（get_mins）。"
+    "分时没返回就写未取到。\n"
+    "不要输出 JSON，不要用代码块包裹全文。"
 )
+REPORT_PART_CHARS = 2000
+REPORT_MAX_PARTS = 3
 
 
 def _f(v: Any, default: float = 0.0) -> float:
@@ -208,7 +239,6 @@ class PaperMonitorService:
         settings = self._cfg()
         return {
             "ok": True,
-            "default_report_prompt": DEFAULT_REPORT_PROMPT,
             "settings": settings,
             "channels": paper_alert_service.available_channels(),
             "pool_count": self.list_pool(active_only=True).get("count", 0),
@@ -223,8 +253,6 @@ class PaperMonitorService:
             if k not in pcs.DEFAULT_CONFIG:
                 pcs.DEFAULT_CONFIG[k] = v
         clean = {k: patch[k] for k in patch if k in MONITOR_CONFIG_DEFAULTS}
-        if isinstance(clean.get("monitor_report_prompt"), str):
-            clean["monitor_report_prompt"] = clean["monitor_report_prompt"].strip()[:2000]
         if clean:
             paper_cycle_service.update_config(clean)
         return self.get_settings()
@@ -580,16 +608,46 @@ class PaperMonitorService:
     # ------------------------------------------------------------------ #
     # LLM markdown
     # ------------------------------------------------------------------ #
+    def _report_head(self, text: str, limit: int = REPORT_PART_CHARS) -> str:
+        if len(text) <= limit:
+            return text
+        cut = text[:limit]
+        nl = cut.rfind("\n")
+        if nl >= int(limit * 0.6):
+            return cut[:nl].rstrip()
+        return cut.rstrip()
+
+    async def _ask_report(self, query: str, model: str) -> str:
+        from server.chat_service import ChatRequest
+        from server.tool_agent_service import tool_agent_service
+
+        resp = await tool_agent_service.chat_with_tools(ChatRequest(
+            query=query,
+            model=model or "deepseek-chat",
+            temperature=0.3,
+            max_tokens=4000,
+            tool_skills=["datahubco-data", "sector-intraday"],
+            system_prompt=(
+                "你是A股监控简报助手。按写作要求写 Markdown。"
+                "板块强弱调用 sector_intraday__l2_tone。"
+                "个股日线、分时、资金流和基本面调用写作要求里点名的 datahubco-data 工具，补数后再写。"
+                "工具没有返回的数字不要编造。语气克制，不做荐股承诺。"
+            ),
+        ))
+        if getattr(resp, "provider", "") in ("fallback", "error"):
+            return ""
+        text = (resp.content or "").strip()
+        if text.startswith("模型调用失败"):
+            return ""
+        return text
+
     async def _llm_markdown(
         self,
         triggers: List[Dict[str, Any]],
         asof: date,
         model: str,
-        report_prompt: str = "",
     ) -> Tuple[str, str, str]:
         """返回 (why_summary, markdown, raw_or_error)"""
-        from server.chat_service import ChatRequest, chat_service
-
         lines = []
         for t in triggers:
             lines.append(
@@ -597,30 +655,31 @@ class PaperMonitorService:
                 f"现价{t.get('price')} 昨收{t.get('pre_close')} 成本{t.get('cost_basis')} "
                 f"日内{((t.get('day_chg_pct') or 0)*100):.2f}% 备注:{t.get('note') or '-'}"
             )
-        structure = (report_prompt or "").strip() or DEFAULT_REPORT_PROMPT
         prompt = (
             f"交易日 {asof.isoformat()}。下面是系统已经算好的监控事实，价格、涨跌幅和规则名必须原样使用：\n"
             + "\n".join(lines)
-            + "\n\n没有给出的成交额、涨停家数、资金流向和公告不要编造。"
-            "不要输出 JSON，不要用代码块包裹全文。\n\n"
-            "写作要求：\n"
-            + structure
-        )
-        req = ChatRequest(
-            query=prompt,
-            model=model or "deepseek-chat",
-            temperature=0.3,
-            max_tokens=2200,
-            system_prompt=(
-                "你是A股监控简报助手。只根据给出的监控事实，按写作要求整理 Markdown。"
-                "语气克制，不做荐股承诺。"
-            ),
+            + "\n\n写作要求：\n"
+            + DEFAULT_REPORT_PROMPT
         )
         try:
-            resp = await chat_service.chat(req)
-            raw = (resp.content or "").strip()
-            if not raw or getattr(resp, "provider", "") == "fallback":
+            raw = await self._ask_report(prompt, model)
+            if not raw:
                 return self._fallback_markdown(triggers, asof)
+            parts = [raw]
+            while len(parts) < REPORT_MAX_PARTS and len(parts[-1]) > REPORT_PART_CHARS:
+                head = self._report_head(parts[-1])
+                parts[-1] = head
+                more = await self._ask_report(
+                    "下面这份简报已在约2000字处截断。不要重复已写内容，只输出截断之后的新增正文，"
+                    "补完还没写完的栏目：近5日股价、五日均线位置、当日分时、近23日资金流、近60日日线特征、未来三日、综合结论、基本面、现阶段强势板块。"
+                    "缺数继续调用写作要求里点名的工具。不要编造。\n\n"
+                    f"已写内容：\n{head}",
+                    model,
+                )
+                if not more:
+                    break
+                parts.append(more.strip())
+            raw = "\n\n".join(p for p in parts if p).strip()
             why = self._extract_why(raw)
             if not raw.startswith("#"):
                 raw = f"# 自选股监控简报 · {asof.isoformat()}\n\n{raw}"
@@ -632,7 +691,7 @@ class PaperMonitorService:
 
     def _extract_why(self, md: str) -> str:
         m = re.search(
-            r"##\s*为什么会出现这些情况\s*\n+([\s\S]*?)(?=\n##\s|\Z)",
+            r"##\s*(?:综合结论|为什么会出现这些情况)\s*\n+([\s\S]*?)(?=\n##\s|\Z)",
             md,
         )
         if m:
@@ -851,12 +910,7 @@ class PaperMonitorService:
         do_llm = cfg.get("monitor_use_llm", True) if use_llm is None else bool(use_llm)
         model = str(cfg.get("monitor_model") or "deepseek-chat")
         if do_llm:
-            why, markdown, _raw = await self._llm_markdown(
-                triggers,
-                asof,
-                model,
-                str(cfg.get("monitor_report_prompt") or ""),
-            )
+            why, markdown, _raw = await self._llm_markdown(triggers, asof, model)
         else:
             why, markdown, _raw = self._fallback_markdown(triggers, asof)
             model = "rules"
@@ -864,11 +918,10 @@ class PaperMonitorService:
         title = f"自选股监控简报 · {asof.isoformat()} · {len(triggers)}条触发"
         # 企微 markdown 有长度限制，推送用裁剪版；完整内容入库
         push_body = markdown
-        if len(push_body) > 3500:
+        if len(push_body) > 5500:
             push_body = (
-                f"**{title}**\n\n## 为什么会出现这些情况\n{why}\n\n"
-                f"（全文过长已截断，请在系统「监控简报」查看完整 Markdown）\n\n"
-                + markdown[:2800]
+                markdown[:5200].rstrip()
+                + "\n\n（后文过长，请在系统「监控简报」查看全文）"
             )
 
         notify_res: Dict[str, Any] = {"ok": False, "results": [], "skipped": not notify}

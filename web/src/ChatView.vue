@@ -60,14 +60,18 @@
             <div :class="msg.role === 'user'
               ? 'bg-blue-600 text-white max-w-[80%] px-4 py-2.5 rounded-2xl rounded-tr-md'
               : msg.role === 'system' 
-                ? 'bg-zinc-800/80 max-w-[80%] px-4 py-2.5 rounded-2xl rounded-tl-md border border-zinc-700' 
-                : 'bg-zinc-800/80 max-w-[80%] px-4 py-2.5 rounded-2xl rounded-tl-md'"
+                ? 'bg-zinc-800/80 max-w-[92%] px-4 py-2.5 rounded-2xl rounded-tl-md border border-zinc-700' 
+                : 'bg-zinc-800/80 max-w-[92%] px-4 py-2.5 rounded-2xl rounded-tl-md'"
             >
               <!-- 系统消息中的 skill 标识 -->
               <div v-if="msg.role === 'system' && msg.skill" class="flex items-center gap-1.5 mb-1.5">
                 <span class="text-xs px-1.5 py-0.5 rounded bg-blue-600/20 text-blue-400">{{ msg.skill }}</span>
               </div>
-              <div class="text-sm leading-relaxed" v-html="formatContent(msg.content)"></div>
+              <div
+                class="text-sm leading-relaxed"
+                :class="msg.role === 'user' ? '' : 'md-body'"
+                v-html="formatMessageHtml(msg.role, msg.content)"
+              ></div>
               <!-- 工具调用轨迹 -->
               <div v-if="msg.toolTrace?.length" class="mt-2 space-y-1.5">
                 <div class="text-[10px] text-amber-400/90 font-medium tracking-wide">🔧 工具调用</div>
@@ -181,17 +185,7 @@
         <div class="max-w-3xl mx-auto">
           <!-- Model Selector -->
           <div class="flex gap-2 mb-3 flex-wrap items-center">
-            <button
-              v-for="model in quickModels"
-              :key="model.id"
-              @click="selectedModel = model.id"
-              :class="selectedModel === model.id
-                ? 'bg-blue-600/20 text-blue-400 border-blue-500/30'
-                : 'bg-zinc-800 text-zinc-500 hover:text-zinc-300 border-transparent'"
-              class="px-3 py-1.5 rounded-lg text-xs border transition-all"
-            >
-              {{ model.name }}
-            </button>
+            <LlmModelPicker ref="llmPicker" @update:model="selectedModel = $event" />
             <div class="flex-1"></div>
             <label class="flex items-center gap-1.5 text-xs text-zinc-400 cursor-pointer select-none mr-2">
               <input v-model="useTools" type="checkbox" class="rounded border-zinc-600 bg-zinc-800 text-blue-500 focus:ring-blue-500/40" />
@@ -210,7 +204,7 @@
             <textarea
               v-model="inputMessage"
               @keydown.enter.exact.prevent="sendMessage"
-              placeholder="输入消息... 支持 DeepSeek · GPT · Claude 等多模型"
+              placeholder="输入消息… 可在左下角选择并配置自己的大模型"
               rows="1"
               class="flex-1 bg-zinc-800 border border-zinc-700 focus:border-blue-500 rounded-2xl px-4 py-2.5 outline-none text-sm resize-none"
             ></textarea>
@@ -358,6 +352,8 @@
 <script setup lang="ts">
 import { ref, onMounted, reactive } from 'vue'
 import axios from 'axios'
+import { formatMessageHtml } from './lib/markdown'
+import LlmModelPicker from './LlmModelPicker.vue'
 
 interface Message {
   role: string
@@ -389,6 +385,7 @@ interface Tool {
 const messages = ref<Message[]>([])
 const inputMessage = ref('')
 const selectedModel = ref('deepseek-chat')
+const llmPicker = ref<any>(null)
 const loading = ref(false)
 const useTools = ref(true)
 
@@ -417,15 +414,6 @@ const fillState = ref<Record<string, string>>({})
 const showHandbook = ref(false)
 const handbookContent = ref('')
 const handbookPath = ref('')
-
-const quickModels = [
-  { id: 'deepseek-chat', name: 'DeepSeek' },
-  { id: 'deepseek-reasoner', name: 'DeepSeek R1' },
-  { id: 'gpt-4o-mini', name: 'GPT-4o Mini' },
-  { id: 'claude-3-sonnet', name: 'Claude' },
-  { id: 'ollama', name: 'Ollama 本地' },
-  { id: 'qwen3:8b', name: 'Qwen3 本地' },
-]
 
 // ─── Helpers ─────────────────────────────────────────
 
@@ -470,14 +458,6 @@ function addMessage(role: string, content: string, skillName?: string, data?: an
   messages.value.push({ role, content, time: new Date(), skill: skillName, data, dataType, toolTrace })
 }
 
-function formatContent(text: string): string {
-  if (!text) return ''
-  return String(text)
-    .replace(/\*\*(.*?)\*\*/g, '<strong class="text-blue-400">$1</strong>')
-    .replace(/\*(.*?)\*/g, '<em>$1</em>')
-    .replace(/`([^`]+)`/g, '<code class="bg-zinc-700 px-1 py-0.5 rounded text-xs text-emerald-300">$1</code>')
-    .replace(/\n/g, '<br>')
-}
 
 function formatTime(date: Date | string | undefined): string {
   if (!date) return ''
@@ -593,7 +573,7 @@ async function sendMessage() {
 
     const res = await axios.post('/chat/messages', {
       query: msg,
-      model: selectedModel.value,
+      ...(llmPicker.value?.chatPayload?.() || { model: selectedModel.value }),
       history,
       use_tools: useTools.value,
       session_id: currentSessionId.value,
@@ -770,7 +750,7 @@ async function executeTool() {
 function onMountedInit() {
   addMessage('assistant', `👋 欢迎使用 AIquant 多模型对话平台！
 
-**可用模型**：DeepSeek Chat · DeepSeek Reasoner · GPT-4o · Claude · Ollama 本地
+左下角可选择并配置自己的大模型（DeepSeek、GPT、Claude、Grok、Ollama，或通义 / 智谱 / Kimi 等 OpenAI 兼容接口）。填入 API Key 并勾选启用后，对话就会走你选中的那套参数。
 
 **💡 提示**：左侧可查看并继续历史对话；发送消息后自动写入 PostgreSQL。右侧「技能面板」可直接查库与跑工具。`)
 }

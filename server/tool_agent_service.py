@@ -14,6 +14,8 @@ import httpx
 
 import tools
 from tools.executor import execute_tool
+from dataclasses import replace
+
 from server.chat_service import ChatRequest, ChatResponse, chat_service
 
 logger = logging.getLogger(__name__)
@@ -125,7 +127,7 @@ class ToolAgentService:
         return out
 
     async def chat_with_tools(self, request: ChatRequest) -> ChatResponse:
-        provider, actual_model = chat_service._resolve_provider(request.model)
+        provider, actual_model = chat_service.resolve_for_request(request)
 
         if not provider:
             return await chat_service.chat(request)
@@ -135,21 +137,14 @@ class ToolAgentService:
         # Anthropic / Ollama：暂用「手册注入 + 普通对话」，不走原生 tools
         from server.chat_service import AnthropicProvider, OllamaProvider
         if isinstance(provider, (AnthropicProvider, OllamaProvider)):
-            patched = ChatRequest(
-                query=request.query,
-                model=request.model,
-                provider=request.provider,
+            patched = replace(
+                request,
                 stream=False,
-                history=request.history,
                 system_prompt=system_prompt + (
                     "\n当前通道不支持原生 function calling。"
                     "请用文字说明你想调用的工具与参数，或建议切换 DeepSeek / OpenAI。"
                 ),
-                temperature=request.temperature,
-                max_tokens=request.max_tokens,
-                agent_mode=request.agent_mode,
                 tool_skills=skill_ids,
-                context=request.context,
             )
             resp = await chat_service.chat(patched)
             resp.usage = {**(resp.usage or {}), "tools_enabled": False, "reason": "provider_no_tools", "agent_mode": mode}
@@ -158,15 +153,7 @@ class ToolAgentService:
         openai_tools = tools.get_openai_tools(skill_ids=skill_ids)
         if not openai_tools:
             out = await chat_service.chat(
-                ChatRequest(
-                    query=request.query,
-                    model=request.model,
-                    provider=request.provider,
-                    history=request.history,
-                    system_prompt=system_prompt,
-                    temperature=request.temperature,
-                    max_tokens=request.max_tokens,
-                )
+                replace(request, system_prompt=system_prompt, stream=False)
             )
             out.usage = {**(out.usage or {}), "tools_enabled": False, "reason": "no_tools"}
             return out
@@ -200,15 +187,7 @@ class ToolAgentService:
                 if resp.status_code >= 400:
                     err_text = resp.text[:300]
                     logger.warning(f"tools 调用失败，降级普通对话: {resp.status_code} {err_text}")
-                    fallback = ChatRequest(
-                        query=request.query,
-                        model=request.model,
-                        provider=request.provider,
-                        history=request.history,
-                        system_prompt=system_prompt,
-                        temperature=request.temperature,
-                        max_tokens=request.max_tokens,
-                    )
+                    fallback = replace(request, system_prompt=system_prompt, stream=False)
                     out = await chat_service.chat(fallback)
                     out.usage = {
                         **(out.usage or {}),

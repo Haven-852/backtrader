@@ -54,7 +54,7 @@ class StorageManager:
                     url=url,
                     token=config.influx_token or "supersecretadmin token",
                     org=config.influx_org or "quant",
-                    timeout=10_000,  # ms
+                    timeout=3_000,  # ms — 避免 health 探测拖死 API
                 )
                 self._connections['influx'] = client
                 self._connections['influx_org'] = config.influx_org or "quant"
@@ -111,12 +111,19 @@ class StorageManager:
         """获取 MinIO 客户端"""
         if 'minio' not in self._connections:
             try:
+                import urllib3
                 from minio import Minio
+
+                http = urllib3.PoolManager(
+                    timeout=urllib3.Timeout(connect=2.0, read=3.0),
+                    retries=False,
+                )
                 client = Minio(
                     endpoint=config.minio["endpoint"],
                     access_key=config.minio["access_key"],
                     secret_key=config.minio["secret_key"],
                     secure=config.minio["secure"],
+                    http_client=http,
                 )
                 # 测试连接：列出 buckets
                 client.list_buckets()

@@ -41,6 +41,14 @@ class DatahubcoClient:
             )
         logger.info("DatahubcoClient 就绪 · base=%s", self.base_url)
 
+    @staticmethod
+    def _error_msg(resp: requests.Response) -> str:
+        try:
+            payload = resp.json()
+            return str(payload.get("msg") or resp.text[:300])
+        except Exception:
+            return (resp.text or "")[:300]
+
     def query(self, api: str, **params: Any) -> pd.DataFrame:
         """
         GET /{api} → DataFrame
@@ -55,13 +63,27 @@ class DatahubcoClient:
             "X-Request-Id": f"backtrader-{api}",
         }
         resp = requests.get(url, headers=headers, params=clean, timeout=self.timeout)
+        if resp.status_code == 400:
+            msg = self._error_msg(resp)
+            # GET 查询串有时吃掉中文必填项（如 idx_type=行业板块），改 POST JSON 再试一次。
+            if "required parameter" in msg.lower() and clean:
+                logger.warning(
+                    "%s GET 缺参，改 POST json · keys=%s · %s",
+                    api,
+                    sorted(clean.keys()),
+                    msg,
+                )
+                resp = requests.post(
+                    url,
+                    headers=headers,
+                    json=clean,
+                    timeout=self.timeout,
+                )
         if not resp.ok:
-            try:
-                payload = resp.json()
-                msg = payload.get("msg") or resp.text[:300]
-            except Exception:
-                msg = (resp.text or "")[:300]
-            raise RuntimeError(f"Datahubco {api} HTTP {resp.status_code}: {msg}")
+            msg = self._error_msg(resp)
+            raise RuntimeError(
+                f"Datahubco {api} HTTP {resp.status_code}: {msg} · params={sorted(clean.keys())}"
+            )
         payload = resp.json()
         code = payload.get("code")
         if code not in (0, "0", None):

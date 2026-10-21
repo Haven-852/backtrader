@@ -296,6 +296,32 @@ async def rebuild_sector_hierarchy(
         raise HTTPException(status_code=500, detail=f"重建行业层级失败: {str(e)}")
 
 
+@router.post("/sector-members/sync-all")
+async def sync_all_sector_members(
+    trade_date: Optional[str] = Query(None),
+):
+    """补齐一/二/三级全部板块成分股（Datahubco 失败则走东财 clist）"""
+    try:
+        from server.sector_service import sector_service
+
+        return await sector_service.sync_all_members_async(trade_date=trade_date)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"同步板块成分失败: {str(e)}")
+
+
+@router.post("/sector-kline/backfill")
+async def backfill_sector_klines(
+    lookback_days: int = Query(500, ge=60, le=2000),
+):
+    """给全部东财行业板块补历史日K"""
+    try:
+        from server.sector_service import sector_service
+
+        return await sector_service.backfill_klines_async(lookback_days=lookback_days)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"补板块K线失败: {str(e)}")
+
+
 @router.get("/etf-kline")
 async def get_etf_kline(
     ts_code: str = Query(..., description="ETF代码（如 510050.SH）"),

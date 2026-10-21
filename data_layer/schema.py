@@ -56,6 +56,24 @@ POSTGRES_DDL_LIST = [
     )
     """,
 
+    # 2b. 全市场股票清单（供 fill_batch 等按 offset/limit 切片；含 board_type）
+    """
+    CREATE TABLE IF NOT EXISTS ref_market_universe (
+        ts_code        VARCHAR(16)  PRIMARY KEY,
+        symbol         VARCHAR(10)  NOT NULL,
+        name           VARCHAR(50),
+        area           VARCHAR(20),
+        industry       VARCHAR(50),
+        market         VARCHAR(10),
+        board_type     VARCHAR(16)  NOT NULL,   -- 主板 / 科创板 / 创业板 / 北交所 / ST
+        exchange       VARCHAR(8),              -- SH / SZ / BJ
+        list_date      DATE,
+        list_status    VARCHAR(1)   NOT NULL DEFAULT 'L',
+        is_hs          VARCHAR(1),
+        updated_at     TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    )
+    """,
+
     # 3. 股票更名记录
     """
     CREATE TABLE IF NOT EXISTS ref_stock_namechange (
@@ -1182,6 +1200,24 @@ POSTGRES_DDL_LIST = [
     )
     """,
     """
+    CREATE TABLE IF NOT EXISTS user_llm_profile (
+        id            SERIAL PRIMARY KEY,
+        user_id       VARCHAR(64) NOT NULL DEFAULT 'default',
+        name          VARCHAR(80) NOT NULL,
+        provider      VARCHAR(32) NOT NULL,
+        model         VARCHAR(128) NOT NULL,
+        api_key       TEXT,
+        base_url      VARCHAR(256),
+        temperature   NUMERIC(4,2) DEFAULT 0.7,
+        max_tokens    INT DEFAULT 4096,
+        enabled       BOOLEAN DEFAULT TRUE,
+        is_active     BOOLEAN DEFAULT FALSE,
+        extra         JSONB,
+        created_at    TIMESTAMPTZ DEFAULT NOW(),
+        updated_at    TIMESTAMPTZ DEFAULT NOW()
+    )
+    """,
+    """
     CREATE TABLE IF NOT EXISTS trading_accounts (
         id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
         user_id     UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -1755,6 +1791,58 @@ POSTGRES_DDL_LIST = [
         created_at          TIMESTAMPTZ NOT NULL DEFAULT NOW()
     )
     """,
+    """
+    CREATE TABLE IF NOT EXISTS intraday_prediction (
+        id                  BIGSERIAL PRIMARY KEY,
+        experiment_id       VARCHAR(64) NOT NULL,
+        stock_code          VARCHAR(16) NOT NULL,
+        prediction_time     TIMESTAMPTZ NOT NULL,
+        p_up_first          DOUBLE PRECISION,
+        p_down_first        DOUBLE PRECISION,
+        p_neutral           DOUBLE PRECISION,
+        expected_upside_pct DOUBLE PRECISION,
+        expected_downside_pct DOUBLE PRECISION,
+        signal              VARCHAR(32),
+        model_version       VARCHAR(80) NOT NULL,
+        feature_version     VARCHAR(40) NOT NULL,
+        data_snapshot_id    VARCHAR(80),
+        dataset_type        VARCHAR(20),
+        created_at          TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS intraday_model_run (
+        id                  BIGSERIAL PRIMARY KEY,
+        experiment_id       VARCHAR(64) NOT NULL,
+        model_version       VARCHAR(80) NOT NULL,
+        train_start         TIMESTAMPTZ,
+        train_end           TIMESTAMPTZ,
+        validation_start    TIMESTAMPTZ,
+        validation_end      TIMESTAMPTZ,
+        test_start          TIMESTAMPTZ,
+        test_end            TIMESTAMPTZ,
+        parameters          JSONB,
+        metrics             JSONB,
+        code_version        VARCHAR(40),
+        status              VARCHAR(40) NOT NULL,
+        created_at          TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS intraday_label (
+        id                  BIGSERIAL PRIMARY KEY,
+        experiment_id       VARCHAR(64) NOT NULL,
+        stock_code          VARCHAR(16) NOT NULL,
+        bar_time            TIMESTAMPTZ NOT NULL,
+        label               VARCHAR(20) NOT NULL,
+        label_version       VARCHAR(40) NOT NULL,
+        horizon             INT NOT NULL,
+        barrier_atr_mult    DOUBLE PRECISION NOT NULL,
+        atr_window          INT NOT NULL,
+        dataset_type        VARCHAR(20),
+        generated_at        TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    )
+    """,
 ]
 
 # ─────────────────────────────────────────────────────────────────────
@@ -2223,6 +2311,9 @@ TIMESCALEDB_DDL_LIST = [
             ts_code        VARCHAR(16)  NOT NULL,
             con_code       VARCHAR(16)  NOT NULL,
             name           VARCHAR(64),
+            close          NUMERIC(16,4),
+            pct_chg        NUMERIC(12,4),
+            amount         NUMERIC(24,4),
             updated_at     TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             PRIMARY KEY (ts_code, trade_date, con_code)
         )
@@ -2245,6 +2336,20 @@ TIMESCALEDB_DDL_LIST = [
             asof_date      DATE,
             updated_at     TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             PRIMARY KEY (child_code)
+        )
+        """,
+        None
+    ),
+
+    # 24b. 东财行业板块目录（一级/二级/三级代码与名称）
+    (
+        """
+        CREATE TABLE IF NOT EXISTS ref_sector_dc_basic (
+            ts_code        VARCHAR(16)  PRIMARY KEY,
+            name           VARCHAR(64),
+            industry_level VARCHAR(32),
+            idx_type       VARCHAR(32)  DEFAULT '行业板块',
+            updated_at     TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
         """,
         None
@@ -2309,6 +2414,99 @@ TIMESCALEDB_DDL_LIST = [
         """,
         "end_date"
     ),
+
+    # 28. LightGBM 日频训练特征表（价格/量能/行业/市场 + OHLC 辅助列 + 标签）
+    # y_high / y_low 为标签，不可作输入特征；open/high/low/close 仅采集，不作 LightGBM 特征
+    (
+        """
+        CREATE TABLE IF NOT EXISTS ml_train_daily (
+            symbol                  VARCHAR(16)   NOT NULL,
+            trade_date              DATE          NOT NULL,
+            industry_code           VARCHAR(32),
+            industry_name           VARCHAR(64),
+            -- 价格与趋势
+            ret_1                   NUMERIC(16,8),
+            ret_3                   NUMERIC(16,8),
+            ret_5                   NUMERIC(16,8),
+            ret_10                  NUMERIC(16,8),
+            ret_20                  NUMERIC(16,8),
+            ret_60                  NUMERIC(16,8),
+            close_ma5               NUMERIC(16,8),
+            close_ma10              NUMERIC(16,8),
+            close_ma20              NUMERIC(16,8),
+            ma5_ma20                NUMERIC(16,8),
+            atr_5_pct               NUMERIC(16,8),
+            atr_14_pct              NUMERIC(16,8),
+            volatility_5            NUMERIC(16,8),
+            volatility_10           NUMERIC(16,8),
+            volatility_20           NUMERIC(16,8),
+            range_1                 NUMERIC(16,8),
+            range_mean_5            NUMERIC(16,8),
+            range_mean_20           NUMERIC(16,8),
+            upper_shadow            NUMERIC(16,8),
+            lower_shadow            NUMERIC(16,8),
+            body_pct                NUMERIC(16,8),
+            close_location          NUMERIC(16,8),
+            high_20_ratio           NUMERIC(16,8),
+            low_20_ratio            NUMERIC(16,8),
+            -- 量能与换手
+            volume_ratio_5          NUMERIC(16,8),
+            volume_ratio_20         NUMERIC(16,8),
+            amount_ratio_20         NUMERIC(16,8),
+            turnover_rate           NUMERIC(16,8),
+            turnover_ma5            NUMERIC(16,8),
+            turnover_ma20           NUMERIC(16,8),
+            turnover_std20          NUMERIC(16,8),
+            price_volume_corr20     NUMERIC(16,8),
+            log_amount              NUMERIC(16,8),
+            log_float_mv            NUMERIC(16,8),
+            log_total_mv            NUMERIC(16,8),
+            listing_age             NUMERIC(12,4),
+            board_type              VARCHAR(16),
+            industry_l1             VARCHAR(64),
+            beta_60                 NUMERIC(16,8),
+            turnover_mean_60        NUMERIC(16,8),
+            volatility_mean_60      NUMERIC(16,8),
+            limit_touch_count_20    INT,
+            -- 市场环境
+            hs300_ret_1             NUMERIC(16,8),
+            hs300_ret_5             NUMERIC(16,8),
+            zz1000_ret_5            NUMERIC(16,8),
+            market_volatility_20    NUMERIC(16,8),
+            market_amount_ratio     NUMERIC(16,8),
+            market_adv_decl_ratio   NUMERIC(16,8),
+            market_limit_up_count   INT,
+            market_limit_down_count INT,
+            size_style_spread       NUMERIC(16,8),
+            -- 行业相对
+            industry_ret_1          NUMERIC(16,8),
+            industry_ret_5          NUMERIC(16,8),
+            industry_ret_20         NUMERIC(16,8),
+            industry_vol_20         NUMERIC(16,8),
+            industry_amount_ratio   NUMERIC(16,8),
+            industry_breadth        NUMERIC(16,8),
+            stock_excess_ret_5      NUMERIC(16,8),
+            industry_rank_ret_5     NUMERIC(16,8),
+            stock_rank_industry     NUMERIC(16,8),
+            -- 当日现象（供 LightGBM 学习一字/停牌）
+            session_flag            VARCHAR(16),
+            is_one_word             SMALLINT,
+            is_halted               SMALLINT,
+            -- 当日 OHLC（采集用，不作 LightGBM 输入特征）
+            open                    NUMERIC(12,4),
+            high                    NUMERIC(12,4),
+            low                     NUMERIC(12,4),
+            close                   NUMERIC(12,4),
+            -- 训练标签：次日高低相对当日收盘；最后一根允许空
+            y_high                  NUMERIC(16,8),
+            y_low                   NUMERIC(16,8),
+            train_ready             SMALLINT,
+            updated_at              TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY (symbol, trade_date)
+        )
+        """,
+        "trade_date"
+    ),
 ]
 
 # ─────────────────────────────────────────────────────────────────────
@@ -2316,11 +2514,14 @@ TIMESCALEDB_DDL_LIST = [
 # ─────────────────────────────────────────────────────────────────────
 
 POSTGRES_INDEX_DDL_LIST = [
+    "CREATE INDEX IF NOT EXISTS idx_user_llm_profile_user ON user_llm_profile (user_id, is_active DESC, id)",
     # 交易日历
     "CREATE INDEX IF NOT EXISTS idx_trade_cal_date ON ref_trade_cal (cal_date DESC)",
     # 证券主档
     "CREATE INDEX IF NOT EXISTS idx_stock_industry ON ref_stock_basic (industry)",
     "CREATE INDEX IF NOT EXISTS idx_stock_status ON ref_stock_basic (list_status)",
+    "CREATE INDEX IF NOT EXISTS idx_market_universe_board ON ref_market_universe (board_type, list_status)",
+    "CREATE INDEX IF NOT EXISTS idx_market_universe_status ON ref_market_universe (list_status, ts_code)",
     # 股票更名
     "CREATE INDEX IF NOT EXISTS idx_namechange_code ON ref_stock_namechange (ts_code, start_date DESC)",
     # 新股发行
@@ -2394,7 +2595,10 @@ POSTGRES_INDEX_DDL_LIST = [
     "CREATE INDEX IF NOT EXISTS idx_sector_dc_index_date ON sector_dc_index_daily (trade_date)",
     "CREATE INDEX IF NOT EXISTS idx_sector_dc_index_level ON sector_dc_index_daily (trade_date, industry_level)",
     "CREATE INDEX IF NOT EXISTS idx_sector_member_code ON sector_dc_member (ts_code, trade_date)",
+    "CREATE INDEX IF NOT EXISTS idx_sector_member_con ON sector_dc_member (con_code, trade_date)",
+    "CREATE INDEX IF NOT EXISTS idx_sector_dc_daily_code ON sector_dc_daily (ts_code, trade_date DESC)",
     "CREATE INDEX IF NOT EXISTS idx_sector_hierarchy_parent ON sector_dc_hierarchy (parent_code)",
+    "CREATE INDEX IF NOT EXISTS idx_ref_sector_dc_level ON ref_sector_dc_basic (industry_level)",
     # 纸面交易
     "CREATE INDEX IF NOT EXISTS idx_paper_account_status ON paper_account (status)",
     "CREATE INDEX IF NOT EXISTS idx_paper_position_code ON paper_position (ts_code)",
@@ -2471,6 +2675,15 @@ TIMESCALEDB_INDEX_DDL_LIST = [
     "CREATE INDEX IF NOT EXISTS idx_market_regime_date ON market_regime (trade_date DESC)",
     "CREATE INDEX IF NOT EXISTS idx_market_event_memory ON market_event (memory_id, event_time)",
     "CREATE INDEX IF NOT EXISTS idx_market_hypothesis_status ON market_hypothesis (status, verify_on)",
+    "CREATE INDEX IF NOT EXISTS idx_intraday_prediction_model ON intraday_prediction (model_version, stock_code, prediction_time)",
+    "CREATE INDEX IF NOT EXISTS idx_intraday_model_run_exp ON intraday_model_run (experiment_id, created_at DESC)",
+    "CREATE INDEX IF NOT EXISTS idx_intraday_label_exp ON intraday_label (experiment_id, label_version, stock_code, bar_time)",
+    # ml_train_daily 训练表
+    "CREATE INDEX IF NOT EXISTS idx_ml_train_daily_date ON ml_train_daily (trade_date DESC)",
+    "CREATE INDEX IF NOT EXISTS idx_ml_train_daily_industry ON ml_train_daily (industry_code, trade_date DESC)",
+    "CREATE INDEX IF NOT EXISTS idx_ml_train_daily_board ON ml_train_daily (board_type, trade_date DESC)",
+    "CREATE INDEX IF NOT EXISTS idx_ml_train_daily_ready ON ml_train_daily (train_ready, trade_date DESC)",
+    "CREATE INDEX IF NOT EXISTS idx_ml_train_daily_date_symbol ON ml_train_daily (trade_date, symbol)",
 ]
 
 
@@ -2493,6 +2706,19 @@ class SchemaManager:
         """
         success = True
         with engine.connect() as conn:
+            # 0. 扩展：部分知识库表依赖 pgvector / gen_random_uuid
+            for ext_sql in (
+                "CREATE EXTENSION IF NOT EXISTS vector",
+                'CREATE EXTENSION IF NOT EXISTS "uuid-ossp"',
+                "CREATE EXTENSION IF NOT EXISTS pgcrypto",
+            ):
+                try:
+                    conn.execute(text(ext_sql))
+                    conn.commit()
+                except Exception as e:
+                    logger.warning(f"扩展安装跳过 ({ext_sql}): {e}")
+                    conn.rollback()
+
             # 1. 创建所有表
             for i, ddl in enumerate(POSTGRES_DDL_LIST):
                 try:

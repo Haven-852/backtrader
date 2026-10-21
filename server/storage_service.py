@@ -3,8 +3,12 @@ Storage Service - 多后端存储层状态监控
 支持: PostgreSQL · InfluxDB · Redis · MinIO
 """
 
+import asyncio
+import csv
+import io
 import sys, os, logging
-from typing import Dict, Any, List
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeout
+from typing import Dict, Any, List, Callable, TypeVar
 from datetime import datetime, date, time
 
 import pandas as pd
@@ -13,13 +17,32 @@ from sqlalchemy import text as sa_text
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from data_layer.db_manager import storage_manager
 from server.column_labels import enrich_columns
+from server.hidden_tables import is_hidden_pg_table
 
 logger = logging.getLogger(__name__)
+
+T = TypeVar("T")
+_PROBE_TIMEOUT_S = 2.5
+
+
+def _with_timeout(fn: Callable[[], T], timeout: float = _PROBE_TIMEOUT_S, fallback: T = None) -> T:
+    """单后端探测超时，避免 MinIO/Influx 拖死整个 /storage/status。"""
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        fut = pool.submit(fn)
+        try:
+            return fut.result(timeout=timeout)
+        except FuturesTimeout:
+            logger.warning("storage probe timeout after %.1fs: %s", timeout, getattr(fn, "__name__", fn))
+            return fallback
+        except Exception as e:
+            logger.warning("storage probe error: %s", e)
+            return fallback
 
 # ─── PostgreSQL 表描述 ─────────────────────────────────
 PG_TABLES_INFO: Dict[str, Dict[str, str]] = {
     "ref_trade_cal": {"name":"交易日历","category":"参照数据","desc":"各交易所开休市日期","source":"Tushare trade_cal"},
     "ref_stock_basic": {"name":"股票主档","category":"参照数据","desc":"全市场证券基本信息","source":"Tushare stock_basic"},
+    "ref_market_universe": {"name":"全市场股票清单","category":"参照数据","desc":"在册股票代码+board_type，供 fill_batch 读池","source":"Datahubco stock_basic"},
     "ref_stock_namechange": {"name":"股票更名记录","category":"参照数据","desc":"历史名称变更记录","source":"Tushare namechange"},
     "ref_new_share": {"name":"新股发行","category":"参照数据","desc":"IPO发行信息","source":"Tushare new_share"},
     "ref_index_basic": {"name":"指数主档","category":"参照数据","desc":"指数基本信息","source":"Tushare index_basic"},
@@ -84,9 +107,16 @@ PG_TABLES_INFO: Dict[str, Dict[str, str]] = {
     "sector_dc_index_daily": {"name":"东财行业板块指数","category":"板块行情","desc":"涨跌幅/领涨股/涨跌家数/层级","source":"Datahubco dc_index"},
     "sector_dc_daily": {"name":"东财行业板块日K","category":"板块行情","desc":"板块OHLC/成交额","source":"Datahubco dc_daily"},
     "sector_moneyflow_daily": {"name":"东财板块资金流","category":"板块行情","desc":"主力净流入等","source":"Datahubco moneyflow_ind_dc"},
-    "sector_dc_member": {"name":"东财板块成分","category":"板块行情","desc":"板块成分股列表","source":"Datahubco dc_member"},
+    "sector_dc_member": {"name":"东财板块成分","category":"板块行情","desc":"板块成分股列表","source":"Datahubco dc_member / 东财 clist"},
     "sector_dc_hierarchy": {"name":"东财板块层级","category":"板块行情","desc":"东财行业板块父子层级","source":"Datahubco"},
+    "ref_sector_dc_basic": {"name":"东财行业板块目录","category":"板块行情","desc":"一/二/三级板块代码、名称、层级","source":"sector_dc_index_daily"},
     "stock_intraday_mins": {"name":"个股分钟分时","category":"行情K线","desc":"1分钟分时OHLC/成交量，盘中盈亏用此价","source":"Datahubco / 东财腾讯"},
+    "ml_train_daily": {
+        "name": "训练表",
+        "category": "模型训练",
+        "desc": "LightGBM 日频特征：价格/量能/行业市场相对；y_high/y_low=次日高低相对当日收盘；session_flag 标一字/停牌；训练请筛 train_ready=1",
+        "source": "由日线/基本面/板块合成",
+    },
     "stock_hk_hold": {"name":"北向持股","category":"特色指标","desc":"沪深股通持股数量与占比","source":"Datahubco hk_hold"},
     "stock_top10_holders": {"name":"十大股东","category":"财务数据","desc":"上市公司十大股东明细","source":"Datahubco top10_holders"},
     "stock_limit_list_daily": {"name":"涨跌停榜","category":"特色指标","desc":"涨停/跌停/炸板明细","source":"Datahubco limit_list_d"},
@@ -153,8 +183,8 @@ class StorageService:
 
     # ─── 统一状态检查 ─────────────────────────────────
 
-    async def get_storage_status(self) -> Dict[str, Any]:
-        """获取所有存储后端的连接状态（各后端独立探测，互不拖死）"""
+    def _probe_storage_status(self) -> Dict[str, Any]:
+        """同步探测（须在线程池跑，避免堵死 uvicorn 事件循环）。"""
         services: Dict[str, Any] = {}
 
         # PostgreSQL
@@ -178,153 +208,281 @@ class StorageService:
                 "port": 15432, "desc": f"连接失败: {str(e)[:80]}",
             }
 
-        # InfluxDB
-        try:
+        # InfluxDB（短超时，避免 health/鉴权卡住）
+        def _probe_influx() -> Dict[str, Any]:
             influx = storage_manager.get_influx_client()
             if not influx:
-                services["influxdb"] = {
+                return {
                     "name": "InfluxDB", "status": "disconnected",
                     "port": 8086, "desc": "未初始化",
                 }
-            else:
-                health = influx.health()
-                ok = getattr(health, "status", None) == "pass" or str(getattr(health, "status", "")).lower() in ("pass", "ok")
-                # health 偶发超时：再用 org/bucket 探测兜底
-                if not ok:
-                    try:
-                        orgs = list(influx.organizations_api().find_organizations(org=storage_manager._connections.get("influx_org") or "quant") or [])
-                        ok = True
-                    except Exception:
-                        try:
-                            buckets = influx.buckets_api().find_buckets()
-                            ok = buckets is not None
-                        except Exception:
-                            ok = False
-                services["influxdb"] = {
-                    "name": "InfluxDB",
-                    "status": "online" if ok else "error",
-                    "port": 8086,
-                    "desc": "高频行情 & 分钟线" if ok else f"health={getattr(health, 'status', health)}",
-                }
-        except Exception as e:
-            services["influxdb"] = {
-                "name": "InfluxDB", "status": "error",
-                "port": 8086, "desc": f"连接失败: {str(e)[:60]}",
+            health = influx.health()
+            ok = getattr(health, "status", None) == "pass" or str(
+                getattr(health, "status", "")
+            ).lower() in ("pass", "ok")
+            return {
+                "name": "InfluxDB",
+                "status": "online" if ok else "error",
+                "port": 8086,
+                "desc": "高频行情 & 分钟线" if ok else f"health={getattr(health, 'status', health)}",
             }
 
+        services["influxdb"] = _with_timeout(
+            _probe_influx,
+            fallback={
+                "name": "InfluxDB", "status": "error",
+                "port": 8086, "desc": "探测超时（可能 token/网络异常）",
+            },
+        )
+
         # Redis
-        try:
+        def _probe_redis() -> Dict[str, Any]:
             redis = storage_manager.get_redis_client()
             if not redis:
-                services["redis"] = {
+                return {
                     "name": "Redis", "status": "disconnected",
                     "port": 16379, "desc": "未初始化或无法连接",
                 }
-            else:
-                redis.ping()
-                services["redis"] = {
-                    "name": "Redis", "status": "online",
-                    "port": 16379, "desc": "实时缓存",
-                }
-        except Exception as e:
-            services["redis"] = {
-                "name": "Redis", "status": "error",
-                "port": 16379, "desc": str(e)[:60],
+            redis.ping()
+            return {
+                "name": "Redis", "status": "online",
+                "port": 16379, "desc": "实时缓存",
             }
 
-        # MinIO
-        try:
+        services["redis"] = _with_timeout(
+            _probe_redis,
+            fallback={
+                "name": "Redis", "status": "error",
+                "port": 16379, "desc": "探测超时",
+            },
+        )
+
+        # MinIO（容器未起时 TCP 默认超时很长，必须限时）
+        def _probe_minio() -> Dict[str, Any]:
             minio = storage_manager.get_minio_client()
             if not minio:
-                services["minio"] = {
+                return {
                     "name": "MinIO", "status": "disconnected",
                     "port": 9000, "desc": "未初始化或无法连接",
                 }
-            else:
-                count = len(minio.list_buckets())
-                services["minio"] = {
-                    "name": "MinIO", "status": "online",
-                    "port": 9000, "desc": f"数据湖 ({count} buckets)",
-                }
-        except Exception as e:
-            services["minio"] = {
-                "name": "MinIO", "status": "error",
-                "port": 9000, "desc": str(e)[:60],
+            count = len(minio.list_buckets())
+            return {
+                "name": "MinIO", "status": "online",
+                "port": 9000, "desc": f"数据湖 ({count} buckets)",
             }
+
+        services["minio"] = _with_timeout(
+            _probe_minio,
+            timeout=2.0,
+            fallback={
+                "name": "MinIO", "status": "disconnected",
+                "port": 9000, "desc": "未启动或探测超时（可选服务）",
+            },
+        )
 
         return services
 
+    async def get_storage_status(self) -> Dict[str, Any]:
+        """获取所有存储后端的连接状态（各后端独立探测，互不拖死）"""
+        return await asyncio.to_thread(self._probe_storage_status)
+
     # ─── PostgreSQL ───────────────────────────────────
 
-    async def get_pg_tables(self) -> List[Dict]:
+    def _list_pg_tables_sync(self) -> List[Dict]:
+        """列表只用估算行数，禁止对超表做全表 COUNT（会堵死 API）。"""
         engine = self.engine
-        if not engine: return self._pg_fallback()
+        if not engine:
+            return self._pg_fallback()
 
         try:
-            tsql = "SELECT table_name FROM information_schema.tables WHERE table_schema='public' AND table_type='BASE TABLE' ORDER BY table_name"
+            tsql = (
+                "SELECT table_name FROM information_schema.tables "
+                "WHERE table_schema='public' AND table_type='BASE TABLE' ORDER BY table_name"
+            )
             tdf = pd.read_sql(sa_text(tsql), engine)
-            if tdf.empty: return self._pg_fallback()
+            if tdf.empty:
+                return self._pg_fallback()
 
-            esql = "SELECT c.relname AS t, c.reltuples::bigint AS n FROM pg_class c JOIN pg_namespace ns ON ns.oid=c.relnamespace WHERE ns.nspname='public' AND c.relkind='r'"
-            edf = pd.read_sql(sa_text(esql), engine)
-            emap = {r["t"]: int(r["n"]) if r["n"] and r["n"]>0 else 0 for _, r in edf.iterrows()}
+            # 普通表：pg_class.reltuples；Timescale 超表父表常为 0，改用 chunk 估算之和
+            esql = """
+                SELECT c.relname AS t,
+                       COALESCE(
+                         (
+                           SELECT SUM(GREATEST(cc.reltuples, 0))::bigint
+                           FROM timescaledb_information.chunks ch
+                           JOIN pg_class cc
+                             ON cc.relname = ch.chunk_name
+                           JOIN pg_namespace nn
+                             ON nn.oid = cc.relnamespace AND nn.nspname = ch.chunk_schema
+                           WHERE ch.hypertable_schema = 'public'
+                             AND ch.hypertable_name = c.relname
+                         ),
+                         GREATEST(c.reltuples, 0)::bigint
+                       ) AS n
+                FROM pg_class c
+                JOIN pg_namespace ns ON ns.oid = c.relnamespace
+                WHERE ns.nspname = 'public' AND c.relkind = 'r'
+            """
+            try:
+                edf = pd.read_sql(sa_text(esql), engine)
+            except Exception:
+                edf = pd.read_sql(
+                    sa_text(
+                        "SELECT c.relname AS t, GREATEST(c.reltuples, 0)::bigint AS n "
+                        "FROM pg_class c JOIN pg_namespace ns ON ns.oid=c.relnamespace "
+                        "WHERE ns.nspname='public' AND c.relkind='r'"
+                    ),
+                    engine,
+                )
+            emap = {r["t"]: int(r["n"] or 0) for _, r in edf.iterrows()}
+
+            custom_meta = {}
+            try:
+                from server.custom_table_service import custom_table_service
+
+                custom_meta = custom_table_service.meta_map()
+            except Exception:
+                custom_meta = {}
 
             results = []
             for _, row in tdf.iterrows():
                 tn = row["table_name"]
-                approx = emap.get(tn, 0)
-                actual = approx
-                if actual <= 0:
-                    try:
-                        actual = int(pd.read_sql(sa_text(f'SELECT COUNT(*) AS c FROM "{tn}"'), engine)["c"].iloc[0])
-                    except: pass
-                info = PG_TABLES_INFO.get(tn, {})
-                results.append({"name": tn, "label": info.get("name", tn),
-                                "category": info.get("category","其他"),
-                                "desc": info.get("desc",""), "source": info.get("source",""),
-                                "rows": actual, "has_data": actual>0})
-            results.sort(key=lambda x: (x["category"], not x["has_data"], -x["rows"]))
+                if is_hidden_pg_table(tn):
+                    continue
+                approx = max(0, int(emap.get(tn, 0)))
+                info = PG_TABLES_INFO.get(tn) or custom_meta.get(tn) or {}
+                results.append({
+                    "name": tn,
+                    "label": info.get("name", tn),
+                    "category": info.get("category", "其他"),
+                    "desc": info.get("desc", ""),
+                    "source": info.get("source", ""),
+                    "rows": approx,
+                    "has_data": approx > 0,
+                    "rows_approx": True,
+                    "custom": tn in custom_meta,
+                })
+            results.sort(key=lambda x: (
+                0 if x.get("custom") else 1,
+                x["category"],
+                not x["has_data"],
+                -x["rows"],
+            ))
             return results
         except Exception as e:
             logger.error(f"PG: {e}")
             return self._pg_fallback()
 
+    async def get_pg_tables(self) -> List[Dict]:
+        return await asyncio.to_thread(self._list_pg_tables_sync)
+
     def _pg_fallback(self):
         return [{"name": tn, "label": i.get("name",tn), "category": i.get("category","其他"),
                  "desc": i.get("desc",""), "source": i.get("source",""), "rows":-1, "has_data":False}
-                for tn, i in PG_TABLES_INFO.items()]
+                for tn, i in PG_TABLES_INFO.items() if not is_hidden_pg_table(tn)]
 
-    async def get_pg_preview(self, table: str, limit: int=50, offset: int=0):
+    def _pg_preview_sync(self, table: str, limit: int = 50, offset: int = 0):
         engine = self.engine
-        if not engine: return {"error":"数据库未连接"}
-        if not table.replace("_","").isalnum(): return {"error":f"非法表名: {table}"}
+        if not engine:
+            return {"error": "数据库未连接"}
+        if is_hidden_pg_table(table):
+            return {"error": "内部配置表不在存储层展示"}
+        if not table.replace("_", "").isalnum():
+            return {"error": f"非法表名: {table}"}
         limit = max(1, min(limit, 1000))
         offset = max(0, offset)
 
         try:
-            col_sql = "SELECT column_name,data_type,is_nullable FROM information_schema.columns WHERE table_schema='public' AND table_name=:t ORDER BY ordinal_position"
+            col_sql = (
+                "SELECT column_name,data_type,is_nullable FROM information_schema.columns "
+                "WHERE table_schema='public' AND table_name=:t ORDER BY ordinal_position"
+            )
             cdf = pd.read_sql(sa_text(col_sql), engine, params={"t": table})
-            if cdf.empty: return {"error": f"表 {table} 不存在"}
-            cols = [{"name":r["column_name"],"type":r["data_type"],"nullable":r["is_nullable"]=="YES"} for _,r in cdf.iterrows()]
+            if cdf.empty:
+                return {"error": f"表 {table} 不存在"}
+            cols = [
+                {"name": r["column_name"], "type": r["data_type"], "nullable": r["is_nullable"] == "YES"}
+                for _, r in cdf.iterrows()
+            ]
             cols = enrich_columns(cols, table)
 
             try:
                 rsql = f'SELECT * FROM "{table}" ORDER BY 1 LIMIT {limit} OFFSET {offset}'
                 rdf = pd.read_sql(sa_text(rsql), engine)
-            except:
+            except Exception:
                 rsql = f'SELECT * FROM "{table}" LIMIT {limit} OFFSET {offset}'
                 rdf = pd.read_sql(sa_text(rsql), engine)
 
             rows = [{c: _ser(r[c]) for c in rdf.columns} for _, r in rdf.iterrows()]
-            total = int(pd.read_sql(sa_text(f'SELECT COUNT(*) AS c FROM "{table}"'), engine)["c"].iloc[0])
 
-            info = PG_TABLES_INFO.get(table, {"name":table,"category":"其他","desc":"","source":""})
-            return {"name": table, "label": info.get("name",table), "info": info,
-                    "columns": cols, "rows": rows, "total_rows": total,
-                    "preview_count": len(rows), "offset": offset, "limit": limit,
-                    "has_more": (offset+limit)<total}
+            # 大表/超表避免精确 COUNT(*)；用估算，必要时再精确小表
+            total = 0
+            try:
+                est = pd.read_sql(
+                    sa_text(
+                        """
+                        SELECT COALESCE(
+                          (
+                            SELECT SUM(GREATEST(cc.reltuples, 0))::bigint
+                            FROM timescaledb_information.chunks ch
+                            JOIN pg_class cc ON cc.relname = ch.chunk_name
+                            JOIN pg_namespace nn
+                              ON nn.oid = cc.relnamespace AND nn.nspname = ch.chunk_schema
+                            WHERE ch.hypertable_schema = 'public' AND ch.hypertable_name = :t
+                          ),
+                          (
+                            SELECT GREATEST(c.reltuples, 0)::bigint
+                            FROM pg_class c
+                            JOIN pg_namespace ns ON ns.oid = c.relnamespace
+                            WHERE ns.nspname = 'public' AND c.relname = :t
+                          ),
+                          0
+                        ) AS n
+                        """
+                    ),
+                    engine,
+                    params={"t": table},
+                )
+                total = int(est["n"].iloc[0] or 0)
+            except Exception:
+                total = 0
+            if total <= 0 and len(rows) < limit:
+                total = offset + len(rows)
+            elif total <= 0:
+                # 小表才允许精确计数
+                try:
+                    total = int(
+                        pd.read_sql(sa_text(f'SELECT COUNT(*) AS c FROM "{table}"'), engine)["c"].iloc[0]
+                    )
+                except Exception:
+                    total = offset + len(rows) + (1 if len(rows) >= limit else 0)
+
+            info = PG_TABLES_INFO.get(table)
+            if not info:
+                try:
+                    from server.custom_table_service import custom_table_service
+
+                    info = custom_table_service.meta_map().get(table)
+                except Exception:
+                    info = None
+            info = info or {"name": table, "category": "其他", "desc": "", "source": ""}
+            return {
+                "name": table,
+                "label": info.get("name", table),
+                "info": info,
+                "columns": cols,
+                "rows": rows,
+                "total_rows": total,
+                "preview_count": len(rows),
+                "offset": offset,
+                "limit": limit,
+                "has_more": (offset + limit) < total or (len(rows) >= limit and total <= 0),
+            }
         except Exception as e:
             return {"error": str(e)}
+
+    async def get_pg_preview(self, table: str, limit: int = 50, offset: int = 0):
+        return await asyncio.to_thread(self._pg_preview_sync, table, limit, offset)
 
     # ─── InfluxDB ─────────────────────────────────────
 
@@ -559,6 +717,184 @@ class StorageService:
         elif backend == "minio":
             return await self.get_minio_preview(name, limit)
         return {"error": f"未知后端: {backend}"}
+
+    def _pg_export_rows_sync(self, table: str, limit: int = 50000) -> Dict[str, Any]:
+        """拉取用于导出的行（上限保护，避免超大表撑爆内存）。"""
+        engine = self.engine
+        if not engine:
+            return {"error": "数据库未连接"}
+        if is_hidden_pg_table(table):
+            return {"error": "内部配置表不在存储层展示"}
+        if not table.replace("_", "").isalnum():
+            return {"error": f"非法表名: {table}"}
+        limit = max(1, min(int(limit or 50000), 100_000))
+        try:
+            col_sql = (
+                "SELECT column_name FROM information_schema.columns "
+                "WHERE table_schema='public' AND table_name=:t ORDER BY ordinal_position"
+            )
+            cdf = pd.read_sql(sa_text(col_sql), engine, params={"t": table})
+            if cdf.empty:
+                return {"error": f"表 {table} 不存在"}
+            columns = [str(x) for x in cdf["column_name"].tolist()]
+            # 多取 1 行判断是否截断
+            fetch_n = limit + 1
+            try:
+                rsql = f'SELECT * FROM "{table}" ORDER BY 1 LIMIT {fetch_n}'
+                rdf = pd.read_sql(sa_text(rsql), engine)
+            except Exception:
+                rsql = f'SELECT * FROM "{table}" LIMIT {fetch_n}'
+                rdf = pd.read_sql(sa_text(rsql), engine)
+            truncated = len(rdf) > limit
+            if truncated:
+                rdf = rdf.iloc[:limit]
+            rows = [{c: _ser(r[c]) for c in rdf.columns} for _, r in rdf.iterrows()]
+            info = PG_TABLES_INFO.get(table)
+            if not info:
+                try:
+                    from server.custom_table_service import custom_table_service
+
+                    info = custom_table_service.meta_map().get(table)
+                except Exception:
+                    info = None
+            label = (info or {}).get("name") or table
+            return {
+                "name": table,
+                "label": label,
+                "columns": columns,
+                "rows": rows,
+                "row_count": len(rows),
+                "truncated": truncated,
+                "limit": limit,
+            }
+        except Exception as e:
+            return {"error": str(e)}
+
+    @staticmethod
+    def _cell_text(val: Any) -> str:
+        if val is None:
+            return ""
+        if isinstance(val, bool):
+            return "true" if val else "false"
+        if isinstance(val, (dict, list)):
+            import json
+
+            return json.dumps(val, ensure_ascii=False)
+        return str(val)
+
+    def _format_csv(self, columns: List[str], rows: List[Dict[str, Any]]) -> str:
+        buf = io.StringIO()
+        writer = csv.writer(buf, lineterminator="\n")
+        writer.writerow(columns)
+        for row in rows:
+            writer.writerow([self._cell_text(row.get(c)) for c in columns])
+        # Excel 友好：UTF-8 BOM
+        return "\ufeff" + buf.getvalue()
+
+    def _format_markdown(
+        self,
+        *,
+        name: str,
+        label: str,
+        columns: List[str],
+        rows: List[Dict[str, Any]],
+        truncated: bool,
+        limit: int,
+    ) -> str:
+        def esc(s: str) -> str:
+            return s.replace("|", "\\|").replace("\n", "<br>")
+
+        lines = [
+            f"# {label}",
+            "",
+            f"- 表名: `{name}`",
+            f"- 导出行数: {len(rows)}" + (f"（已截断，上限 {limit}）" if truncated else ""),
+            f"- 导出时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
+            "",
+        ]
+        if not columns:
+            lines.append("_无列_")
+            return "\n".join(lines) + "\n"
+        lines.append("| " + " | ".join(esc(c) for c in columns) + " |")
+        lines.append("| " + " | ".join("---" for _ in columns) + " |")
+        for row in rows:
+            lines.append("| " + " | ".join(esc(self._cell_text(row.get(c))) for c in columns) + " |")
+        lines.append("")
+        return "\n".join(lines)
+
+    async def export_table(
+        self,
+        backend: str,
+        name: str,
+        fmt: str = "csv",
+        limit: int = 50000,
+    ) -> Dict[str, Any]:
+        """
+        导出数据项为 csv / markdown。
+        返回: {content, filename, media_type, row_count, truncated} 或 {error}
+        """
+        fmt_n = (fmt or "csv").strip().lower()
+        if fmt_n in ("md", "markdown"):
+            fmt_n = "markdown"
+        if fmt_n not in ("csv", "markdown"):
+            return {"error": "format 仅支持 csv 或 markdown"}
+
+        if backend == "postgresql":
+            data = await asyncio.to_thread(self._pg_export_rows_sync, name, limit)
+        else:
+            # 非 PG：复用预览（上限仍受各后端自身限制）
+            preview = await self.get_preview(backend, name, limit=min(limit, 1000), offset=0)
+            if "error" in preview:
+                data = preview
+            else:
+                cols = [c["name"] if isinstance(c, dict) else str(c) for c in (preview.get("columns") or [])]
+                if not cols and preview.get("rows"):
+                    cols = list(preview["rows"][0].keys())
+                data = {
+                    "name": preview.get("name") or name,
+                    "label": preview.get("label") or name,
+                    "columns": cols,
+                    "rows": preview.get("rows") or [],
+                    "row_count": len(preview.get("rows") or []),
+                    "truncated": bool(preview.get("has_more")),
+                    "limit": limit,
+                }
+
+        if "error" in data:
+            return data
+
+        columns = data["columns"]
+        rows = data["rows"]
+        table = data["name"]
+        label = data.get("label") or table
+        truncated = bool(data.get("truncated"))
+        safe = "".join(ch if ch.isalnum() or ch in "-_" else "_" for ch in table) or "export"
+
+        if fmt_n == "csv":
+            content = self._format_csv(columns, rows)
+            filename = f"{safe}.csv"
+            media_type = "text/csv; charset=utf-8"
+        else:
+            content = self._format_markdown(
+                name=table,
+                label=label,
+                columns=columns,
+                rows=rows,
+                truncated=truncated,
+                limit=int(data.get("limit") or limit),
+            )
+            filename = f"{safe}.md"
+            media_type = "text/markdown; charset=utf-8"
+
+        return {
+            "content": content,
+            "filename": filename,
+            "media_type": media_type,
+            "row_count": len(rows),
+            "truncated": truncated,
+            "format": fmt_n,
+            "name": table,
+        }
 
     async def get_backend_stats(self, backend: str) -> Dict:
         """获取指定后端的统计信息"""

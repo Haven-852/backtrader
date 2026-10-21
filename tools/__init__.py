@@ -114,6 +114,90 @@ SKILL_REGISTRY: Dict[str, Dict[str, Any]] = {
                 },
             },
             {
+                "id": "list-custom-tables",
+                "name": "🧩 自定义表目录",
+                "desc": "列出用户通过「AI 建表」创建、可供大模型查询的表（u_ 前缀）",
+                "params": [],
+                "returns": "table_name / label / columns",
+                "openai_parameters": {"type": "object", "properties": {}, "required": []},
+            },
+            {
+                "id": "create-custom-table",
+                "name": "✨ AI 建表",
+                "desc": (
+                    "用自然语言描述业务表需求，调用已保存大模型设计 DDL 并在 PostgreSQL 创建 "
+                    "（表名自动 u_ 前缀）。建好后可用 list-tables / info-table / query-exec。"
+                    "系统表不可创建覆盖。"
+                ),
+                "params": [
+                    {
+                        "name": "prompt",
+                        "label": "需求描述",
+                        "type": "textarea",
+                        "required": True,
+                        "placeholder": "例如：记录每日盯盘笔记，含股票代码、日期、情绪分、备注",
+                    },
+                    {
+                        "name": "dry_run",
+                        "label": "仅预览",
+                        "type": "text",
+                        "required": False,
+                        "placeholder": "true=只设计不建表",
+                    },
+                ],
+                "returns": "table_name / ddl / columns",
+                "openai_parameters": {
+                    "type": "object",
+                    "properties": {
+                        "prompt": {
+                            "type": "string",
+                            "description": "自然语言描述要创建的表（用途与字段）",
+                        },
+                        "dry_run": {
+                            "type": "boolean",
+                            "description": "true 时只返回设计不落库",
+                        },
+                        "table_name": {
+                            "type": "string",
+                            "description": "可选强制表名，须 u_ 开头",
+                        },
+                        "profile_id": {
+                            "type": "integer",
+                            "description": "可选大模型配置 ID",
+                        },
+                    },
+                    "required": ["prompt"],
+                },
+            },
+            {
+                "id": "delete-custom-table",
+                "name": "🗑️ 删除自定义表",
+                "desc": (
+                    "仅删除用户自己通过 AI 建表创建的表（u_* 且已登记）。"
+                    "系统内置表一律拒绝，无 DROP/ALTER 权限。"
+                ),
+                "params": [
+                    {
+                        "name": "table_name",
+                        "label": "表名",
+                        "type": "text",
+                        "required": True,
+                        "placeholder": "u_my_notes",
+                    }
+                ],
+                "returns": "deleted / hint",
+                "openai_parameters": {
+                    "type": "object",
+                    "properties": {
+                        "table_name": {
+                            "type": "string",
+                            "description": "要删除的自定义表名，必须是 u_ 前缀且为自己创建",
+                        }
+                    },
+                    "required": ["table_name"],
+                },
+            },
+            {
                 "id": "query-nl",
                 "name": "💬 自然语言查询",
                 "desc": "输入自然语言问题（能力有限时请改用 list/info + query-exec）",
@@ -369,6 +453,321 @@ SKILL_REGISTRY: Dict[str, Dict[str, Any]] = {
                         },
                     },
                     "required": ["ts_code"],
+                },
+            },
+            {
+                "id": "fill-market-universe",
+                "name": "📋 全市场股票清单",
+                "desc": (
+                    "从 Datahubco stock_basic 分页拉取全市场 list_status=L 代码，"
+                    "写入 ref_market_universe（含 board_type=主板/科创板/创业板/北交所/ST），"
+                    "并同步 ref_stock_basic。fill_batch 从此表按 offset/limit 读股票池。"
+                    "先 action=fill，再去 fill_batch。"
+                ),
+                "params": [
+                    {"name": "action", "label": "动作", "type": "text", "required": False, "placeholder": "fill|status|ensure_schema"},
+                    {"name": "list_status", "label": "上市状态", "type": "text", "required": False, "placeholder": "L"},
+                    {"name": "page_size", "label": "分页大小", "type": "number", "required": False, "placeholder": "5000"},
+                    {"name": "sync_stock_basic", "label": "同步主档", "type": "text", "required": False, "placeholder": "默认true"},
+                ],
+                "returns": "listed_rows / by_board_type / ready_for_fill_batch",
+                "openai_parameters": {
+                    "type": "object",
+                    "properties": {
+                        "action": {
+                            "type": "string",
+                            "enum": ["fill", "status", "ensure_schema"],
+                            "description": "fill=分页拉全量写入；status=看行数与板块分布；ensure_schema=建表",
+                        },
+                        "list_status": {
+                            "type": "string",
+                            "description": "上市状态，默认 L",
+                        },
+                        "page_size": {
+                            "type": "integer",
+                            "description": "单页行数，默认5000（Datahubco上限）",
+                        },
+                        "sync_stock_basic": {
+                            "type": "boolean",
+                            "description": "是否同步写入 ref_stock_basic，默认 true",
+                        },
+                        "max_pages": {
+                            "type": "integer",
+                            "description": "最多分页数，默认20",
+                        },
+                    },
+                    "required": [],
+                },
+            },
+            {
+                "id": "fill-ml-train-daily",
+                "name": "🧠 训练表采集",
+                "desc": (
+                    "采集 ml_train_daily（千万级友好：先 check_env，再按股票循环）。"
+                    "P01–P11：次日标签、表内截面、滚动不填0、一字/停牌、停牌占位、train_ready。"
+                    "全市场前请先 fill-market-universe；推荐 fill_complete / fill_batch（读 ref_market_universe）。"
+                    "训练只用 train_ready=1。board_type=主板/科创板/创业板/北交所/ST。"
+                ),
+                "params": [
+                    {"name": "action", "label": "动作", "type": "text", "required": False, "placeholder": "check_env|fill_complete|fill_one|fill_batch|local_polish|check_null|status"},
+                    {"name": "ts_code", "label": "股票代码", "type": "text", "required": False, "placeholder": "000001.SZ"},
+                    {"name": "start_date", "label": "开始日", "type": "text", "required": False, "placeholder": "2016-01-01"},
+                    {"name": "end_date", "label": "结束日", "type": "text", "required": False, "placeholder": "留空=今天"},
+                    {"name": "limit", "label": "批大小", "type": "number", "required": False, "placeholder": "fill_batch股票数 / check_null本批行数"},
+                    {"name": "offset", "label": "偏移", "type": "number", "required": False, "placeholder": "0"},
+                    {"name": "from_row", "label": "起始行号", "type": "number", "required": False, "placeholder": "check_null用，留空=续查"},
+                    {"name": "reset", "label": "重置检查", "type": "text", "required": False, "placeholder": "check_null时填 true 从头查"},
+                    {"name": "auto_fill", "label": "自动补数", "type": "text", "required": False, "placeholder": "check_null默认true；填false只检查"},
+                    {"name": "limit_days", "label": "截面补全天数", "type": "number", "required": False, "placeholder": "enrich时限制天数"},
+                ],
+                "returns": "ready / rows_upserted / clean_from_row / clean_to_row / next_row / null_rows",
+                "openai_parameters": {
+                    "type": "object",
+                    "properties": {
+                        "action": {
+                            "type": "string",
+                            "enum": [
+                                "check_env",
+                                "fill_complete",
+                                "fill_one",
+                                "fill_batch",
+                                "local_polish",
+                                "enrich_cross_section",
+                                "enrich_industry_rank",
+                                "check_null",
+                                "validate_no_nulls",
+                                "status",
+                            ],
+                            "description": (
+                                "check_env；fill_complete=采集+表内polish+train_ready；"
+                                "fill_one；fill_batch；local_polish=表内截面/广播/train_ready；"
+                                "enrich_* 为可选远端补充；check_null；status"
+                            ),
+                            "default": "check_env",
+                        },
+                        "from_row": {
+                            "type": "integer",
+                            "description": "check_null 从第几行开始（1-based）；默认续查进度",
+                        },
+                        "reset": {
+                            "type": "boolean",
+                            "description": "check_null 时 true=清空进度从头检查",
+                        },
+                        "auto_fill": {
+                            "type": "boolean",
+                            "description": "check_null 发现NULL时自动调用补数（默认 true）",
+                            "default": True,
+                        },
+                        "limit_days": {
+                            "type": "integer",
+                            "description": "enrich_cross_section 最多补多少个交易日（防超时）",
+                        },
+                        "ts_code": {
+                            "type": "string",
+                            "description": "fill_one/status 用，如 000001.SZ",
+                        },
+                        "start_date": {
+                            "type": "string",
+                            "description": "开始日 YYYY-MM-DD，默认 2016-01-01",
+                            "default": "2016-01-01",
+                        },
+                        "end_date": {
+                            "type": "string",
+                            "description": "结束日，默认今天",
+                        },
+                        "limit": {
+                            "type": "integer",
+                            "description": "fill_batch 本批股票数，默认 1，最大 1000",
+                            "default": 1,
+                        },
+                        "offset": {
+                            "type": "integer",
+                            "description": "fill_batch 股票池偏移",
+                            "default": 0,
+                        },
+                        "skip_env_check": {
+                            "type": "boolean",
+                            "description": "跳过环境检查（不推荐）",
+                            "default": False,
+                        },
+                        "skip_existing": {
+                            "type": "boolean",
+                            "description": "fill_batch 时跳过已有较多行的股票",
+                            "default": True,
+                        },
+                        "only_mainboard": {
+                            "type": "boolean",
+                            "description": "fill_batch 仅主板代码",
+                            "default": False,
+                        },
+                    },
+                    "required": [],
+                },
+            },
+            {
+                "id": "sanitize-ml-train-daily",
+                "name": "🧹 训练表体检修复",
+                "desc": (
+                    "检查并修复 ml_train_daily：把 y_high/y_low 改成「次日高低/当日收盘」；"
+                    "用表内截面补行业分位和涨跌家数；一字/停牌写入 session_flag 供 LightGBM 学习；"
+                    "停牌日补占位行保证连续；train_ready=1 才可训练。"
+                    "先 action=catalog 看问题清单，再 audit 看数量，最后 fix。"
+                ),
+                "params": [
+                    {"name": "action", "label": "动作", "type": "text", "required": False, "placeholder": "catalog|audit|fix"},
+                    {"name": "limit", "label": "行数/股票数", "type": "number", "required": False, "placeholder": "fix 时≤500=前N行；fill_gaps=股票数"},
+                    {"name": "limit_rows", "label": "修复行数", "type": "number", "required": False, "placeholder": "如 200，只修前N行"},
+                    {"name": "from_row", "label": "起始行", "type": "number", "required": False, "placeholder": "0"},
+                    {"name": "offset", "label": "偏移", "type": "number", "required": False, "placeholder": "0"},
+                    {"name": "skip_gaps", "label": "跳过补停牌", "type": "text", "required": False, "placeholder": "fix 时填 true 可先不插停牌行"},
+                    {"name": "dry_run", "label": "只统计缺口", "type": "text", "required": False, "placeholder": "fill_gaps 时 true=不写入"},
+                ],
+                "returns": "active_problems / train_ready_rows / steps",
+                "openai_parameters": {
+                    "type": "object",
+                    "properties": {
+                        "action": {
+                            "type": "string",
+                            "enum": [
+                                "catalog",
+                                "audit",
+                                "ensure_schema",
+                                "clamp_ohlc",
+                                "fix_close_location",
+                                "broadcast_market",
+                                "fill_cross_section",
+                                "fill_gaps",
+                                "mark_session",
+                                "fix_labels",
+                                "mark_train_ready",
+                                "fix",
+                                "preview_rows",
+                                "fix_batches",
+                            ],
+                            "description": (
+                                "catalog=问题与解决办法；audit=全表计数；"
+                                "fix=按顺序执行全部本地修复；也可单步 clamp_ohlc/"
+                                "fill_cross_section/fill_gaps/mark_session/fix_labels"
+                            ),
+                            "default": "audit",
+                        },
+                        "limit": {
+                            "type": "integer",
+                            "description": "fix 时 1~500 表示只修前 N 行；fill_gaps 表示股票数",
+                        },
+                        "limit_rows": {
+                            "type": "integer",
+                            "description": "只修复 ORDER BY trade_date,symbol 的前 N 行，便于预览",
+                        },
+                        "from_row": {
+                            "type": "integer",
+                            "description": "limit_rows 起始偏移，默认 0",
+                            "default": 0,
+                        },
+                        "offset": {
+                            "type": "integer",
+                            "description": "fill_gaps 股票偏移",
+                            "default": 0,
+                        },
+                        "skip_gaps": {
+                            "type": "boolean",
+                            "description": "fix 时跳过插入停牌占位行",
+                            "default": False,
+                        },
+                        "dry_run": {
+                            "type": "boolean",
+                            "description": "fill_gaps 只统计不写入",
+                            "default": False,
+                        },
+                    },
+                    "required": [],
+                },
+            },
+            {
+                "id": "fill-mainboard-mins",
+                "name": "📦 批量主板分时",
+                "desc": (
+                    "批量拉取当日（或指定日）全部主板股票 1 分钟分时，写入 Redis + PG，"
+                    "供 LightGBM 等训练批量读取。"
+                    "action=fill 补数；status 查覆盖；index 返回 Redis 训练代码索引。"
+                    "可用 limit/offset 分批，避免一次超时。"
+                ),
+                "params": [
+                    {"name": "trade_date", "label": "交易日", "type": "text", "required": False, "placeholder": "留空=今日"},
+                    {"name": "action", "label": "动作", "type": "text", "required": False, "placeholder": "fill|status|index"},
+                    {"name": "limit", "label": "本批最多只数", "type": "number", "required": False, "placeholder": "200"},
+                    {"name": "offset", "label": "偏移", "type": "number", "required": False, "placeholder": "0"},
+                    {"name": "skip_existing", "label": "跳过已有", "type": "boolean", "required": False, "placeholder": "true"},
+                    {"name": "max_workers", "label": "并发", "type": "number", "required": False, "placeholder": "6"},
+                    {"name": "only_traded", "label": "仅当日有成交", "type": "boolean", "required": False, "placeholder": "true"},
+                    {"name": "include_auction", "label": "含集合竞价", "type": "boolean", "required": False, "placeholder": "true"},
+                ],
+                "returns": "ok_count / index_count / redis_index_key / next_offset",
+                "openai_parameters": {
+                    "type": "object",
+                    "properties": {
+                        "trade_date": {
+                            "type": "string",
+                            "description": "交易日 YYYY-MM-DD；留空=当前会话交易日",
+                        },
+                        "action": {
+                            "type": "string",
+                            "enum": ["fill", "status", "index"],
+                            "description": "fill=批量补数；status=只查覆盖；index=返回 Redis 训练索引 codes",
+                            "default": "fill",
+                        },
+                        "limit": {
+                            "type": "integer",
+                            "description": "本批最多处理多少只；省略或0表示从 offset 到末尾（可能很慢）",
+                        },
+                        "offset": {
+                            "type": "integer",
+                            "description": "股票池偏移，默认 0；配合 limit 分批",
+                            "default": 0,
+                        },
+                        "source": {
+                            "type": "string",
+                            "enum": ["auto", "pg", "datahubco"],
+                            "description": "同 get-mins；默认 auto",
+                            "default": "auto",
+                        },
+                        "write_back": {
+                            "type": "boolean",
+                            "description": "是否写 Redis/PG，默认 true",
+                            "default": True,
+                        },
+                        "include_auction": {
+                            "type": "boolean",
+                            "description": "是否含集合竞价分钟，默认 true",
+                            "default": True,
+                        },
+                        "skip_existing": {
+                            "type": "boolean",
+                            "description": "本地已有足够分钟则跳过，默认 true",
+                            "default": True,
+                        },
+                        "min_bars": {
+                            "type": "integer",
+                            "description": "判定「已有足够分时」的最少分钟根数，默认 60",
+                            "default": 60,
+                        },
+                        "max_workers": {
+                            "type": "integer",
+                            "description": "并发数 1-12，默认 6",
+                            "default": 6,
+                        },
+                        "only_traded": {
+                            "type": "boolean",
+                            "description": "true=仅当日 stock_daily 有成交的主板；false=上市主板全列表",
+                            "default": True,
+                        },
+                        "exclude_st": {
+                            "type": "boolean",
+                            "description": "排除 ST/*ST，默认 true",
+                            "default": True,
+                        },
+                    },
+                    "required": [],
                 },
             },
             {
@@ -1196,6 +1595,163 @@ SKILL_REGISTRY: Dict[str, Dict[str, Any]] = {
             },
         ],
     },
+    "auction-screen": {
+        "id": "auction-screen",
+        "name": "主板集合竞价强买",
+        "icon": "bolt",
+        "category": "盘前扫描",
+        "desc": "在昨日强势主板∪昨日涨停池中，筛选今日09:20–09:25竞价成交额达P95且价升的股票，并附近3日股价与规则原因。",
+        "enabled": True,
+        "tools": [
+            {
+                "id": "mainboard-buy",
+                "name": "主板集合竞价强买",
+                "desc": (
+                    "宇宙=昨日涨幅偏强主板股+昨日涨停/炸板池；"
+                    "取09:20-09:25竞价成交额≥宇宙P95且窗内价升者推荐。"
+                    "若 incomplete=true，必须先执行 suggested_tool_calls 用 Datahubco 补竞价分钟后再重跑。"
+                    "禁止编造成交额。"
+                ),
+                "params": [
+                    {
+                        "name": "trade_date",
+                        "label": "交易日",
+                        "type": "text",
+                        "required": False,
+                        "placeholder": "YYYY-MM-DD，留空=今日会话日",
+                    },
+                    {
+                        "name": "top_n",
+                        "label": "返回条数",
+                        "type": "number",
+                        "required": False,
+                        "placeholder": "20",
+                    },
+                    {
+                        "name": "strong_pct",
+                        "label": "昨强涨幅阈值%",
+                        "type": "number",
+                        "required": False,
+                        "placeholder": "5",
+                    },
+                    {
+                        "name": "strong_top_n",
+                        "label": "昨强名额上限",
+                        "type": "number",
+                        "required": False,
+                        "placeholder": "80",
+                    },
+                    {
+                        "name": "fetch_missing",
+                        "label": "缺数时拉东财竞价",
+                        "type": "boolean",
+                        "required": False,
+                        "placeholder": "true",
+                    },
+                ],
+                "returns": "candidates 列表 + p95_amount + reason",
+                "openai_parameters": {
+                    "type": "object",
+                    "properties": {
+                        "trade_date": {
+                            "type": "string",
+                            "description": "交易日 YYYY-MM-DD，留空=今日",
+                        },
+                        "top_n": {
+                            "type": "integer",
+                            "description": "返回推荐数量，默认 20",
+                        },
+                        "strong_pct": {
+                            "type": "number",
+                            "description": "昨日涨幅达到该百分比视为强势，默认 5",
+                        },
+                        "strong_top_n": {
+                            "type": "integer",
+                            "description": "昨日强势池名额上限，默认 80",
+                        },
+                        "fetch_missing": {
+                            "type": "boolean",
+                            "description": "本地无竞价分钟时是否拉东财（仅当天），默认 true",
+                        },
+                    },
+                    "required": [],
+                },
+            },
+        ],
+    },
+    "sector-intraday": {
+        "id": "sector-intraday",
+        "name": "二级行业分时情绪",
+        "icon": "chart-area",
+        "category": "盘中扫描",
+        "desc": "东财二级行业先日线排序，再对 Top 板块合成成分分时，输出近3日涨跌与今日分时形态/市场情绪。",
+        "enabled": True,
+        "tools": [
+            {
+                "id": "l2-tone",
+                "name": "二级行业分时情绪",
+                "desc": (
+                    "读取东财二级行业日线，按|涨跌幅|取 TopN；"
+                    "对 Top 板块用成分股分时等权合成今日曲线；"
+                    "若 incomplete=true，必须先执行 suggested_tool_calls（fill_sector_gap/get_sector_members/get_mins）再重跑。"
+                    "禁止编造涨跌幅，禁止把日线说成分时。"
+                ),
+                "params": [
+                    {
+                        "name": "trade_date",
+                        "label": "交易日",
+                        "type": "text",
+                        "required": False,
+                        "placeholder": "YYYY-MM-DD，留空=今日",
+                    },
+                    {
+                        "name": "top_n",
+                        "label": "Top板块数",
+                        "type": "number",
+                        "required": False,
+                        "placeholder": "10",
+                    },
+                    {
+                        "name": "member_limit",
+                        "label": "每板块成分上限",
+                        "type": "number",
+                        "required": False,
+                        "placeholder": "15",
+                    },
+                    {
+                        "name": "sample_every_min",
+                        "label": "分时采样间隔(分钟)",
+                        "type": "number",
+                        "required": False,
+                        "placeholder": "5",
+                    },
+                ],
+                "returns": "market_tone + sectors(含 prev_3d / intraday_points)",
+                "openai_parameters": {
+                    "type": "object",
+                    "properties": {
+                        "trade_date": {
+                            "type": "string",
+                            "description": "交易日 YYYY-MM-DD，留空=今日",
+                        },
+                        "top_n": {
+                            "type": "integer",
+                            "description": "日线排序后取前 N 个板块做分时合成，默认 10",
+                        },
+                        "member_limit": {
+                            "type": "integer",
+                            "description": "每个板块参与合成的成分股上限，默认 15",
+                        },
+                        "sample_every_min": {
+                            "type": "integer",
+                            "description": "分时曲线采样间隔分钟，默认 5",
+                        },
+                    },
+                    "required": [],
+                },
+            },
+        ],
+    },
 }
 
 # QuantSkills 外部技能包（市场复盘 / 期货 DeepView / A股个股档案）
@@ -1351,11 +1907,17 @@ def build_agent_system_prompt(
 ## 行为要求
 1. 缺数据 → 先选手册中的**专用技能**。测某日高低命中：先 `t0_intraday__load_day`，再 `t0_intraday__hit_test`（含 A/B/C/D 组合）。禁止先 list_tables，禁止用 SQL 代替 hit-test。结论看 combo_ranking。
 2. 需要个股/指数/ETF/板块日线或 **1 分钟分时**：优先 `datahubco_data__get_bars` / `datahubco_data__get_mins`（日线 PG 优先；**分时先 Redis 再 PG**，缺则 Datahubco 补数入库）。不要先 list_tables。
+2f. **批量拉取今日全部主板分时（训练 LightGBM）**：调用 `datahubco_data__fill_mainboard_mins`。先 `action=status` 看覆盖；`action=fill` 用 `limit`/`offset` 分批写入 Redis+PG；完成后 `action=index` 取 codes，按 `intraday:{{ts_code}}:{{ymd}}` 读 Redis bars。禁止编造分时。
+2f2. **全市场股票清单**：先 `datahubco_data__fill_market_universe` `action=fill`，写入 `ref_market_universe`（约 5575 只，含 board_type）并同步 `ref_stock_basic`；`action=status` 验收。
+2g. **采集 ml_train_daily 训练特征**：先 `datahubco_data__fill_ml_train_daily` `action=check_env`；通过后用 `fill_complete`（如 ts_code=000001.SZ, start_date=2016-01-04）：次日标签、表内截面、停牌占位、`train_ready`（P01–P11）。全市场 `fill_batch`+`limit`/`offset`（从 `ref_market_universe` 读池，批末自动 polish）。训练过滤 `train_ready=1`。禁止一次加载全市场进内存。`board_type` 为主板/科创板/创业板/北交所/ST。
+2h. **修复 ml_train_daily 训练质量**：`datahubco_data__sanitize_ml_train_daily`。先 `catalog` 看问题与办法，再 `audit`，最后 `fix`。`y_high`/`y_low` 必须是次日高低相对当日收盘；一字/停牌用 `session_flag` 学习，不要删这些行。训练过滤 `train_ready=1`。
 2a. **期货主连 / 行情中心价格**：`futures_market__get_quotes` / `futures_market__ensure_and_get`；缺数或日期不对 → `futures_market__sync_quotes`。禁止编造期货价格。
 2b. 龙虎榜/席位/大宗/两融/北向/资金流；利润表/资产负债/现金流/财务指标/主营构成/审计/分红/快报/披露日程/预告/十大股东；指数主档/周月线/估值/行业分类/权重；基金主档/净值/分红/持仓/复权；限售解禁/质押/增减持/筹码/研报/同花顺概念成分/可转债/期货主档；每日指标/复权/涨跌停价/涨跌停榜/停复牌/新股：`datahubco_data__get_fund_data`；个股二级/三级板块资金：`datahubco_data__get_stock_sector_moneyflow`。
 2c. 用户要生成今日市场记忆、今日行情复盘并准备写入知识库时，调用 `kb_market__today`（知识库-市场记忆-今日）。用工具返回的事实写给用户看。禁止编造涨停家数和成交额。禁止声称已经写入知识库，写入由用户点击「填入市场记忆」完成。
+2d. **盘前集合竞价强买 / 9:20–9:25 放量**：调用 `auction_screen__mainboard_buy`。若返回 `incomplete=true` 或带 `suggested_tool_calls`：必须先按列表逐个调用 Datahubco（通常是 `datahubco_data__get_mins` include_auction=true、`get_fund_data` limit_list）补数，全部完成后再重跑 `auction_screen__mainboard_buy`。覆盖不足时禁止下「今日无强买」的最终结论。禁止编造量额。
+2e. **二级行业分时情绪 / 板块今日走势**：调用 `sector_intraday__l2_tone`。若 `incomplete=true` 或 `intraday_shape=数据不足`：必须先执行返回的 `suggested_tool_calls`（`fill_sector_gap` / `get_sector_members` / `get_mins`），再重跑本工具。补齐前可讲日线，但必须标明分时未就绪，禁止把日线说成分时形态。禁止编造涨跌幅。
 3. 只有没有专用技能、且不知道表名时，才 list_tables / info_table。
-4. 拿到工具结果后必须用中文给出结论（卖点、依据、捕获率）；不要为了「再确认」继续查 SQL。
+4. 拿到工具结果后必须用中文给出结论；若结果含 `agent_instruction` / `suggested_tool_calls`，优先执行补数再给最终结论，不要停在「建议补数」。
 5. 若工具失败，说明原因并给出下一步建议。
 """
     if extra:

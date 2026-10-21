@@ -11,6 +11,11 @@
    - 盘中做T卖点 / 四法状态 → `method-*` 或 `combo-run`。  
    - 纸面账户盘中盈亏 → `paper_trade__get_intraday_quotes` 或 `get_account`/`mark`（1 分钟分时末价）。没有分时就报缺，不要用日线收盘/成本价估算。  
    - 需要个股/指数/ETF/板块行情或分钟分时且可能缺库 → **datahubco-data**（`get-bars` / `get-mins`；分时先 Redis 再 PG，缺则补数入库）。  
+   - **批量拉取今日全部主板 1 分钟分时（LightGBM 训练）** → `datahubco_data__fill_mainboard_mins`：先 `action=status`，再 `action=fill`（用 `limit`/`offset` 分批），最后 `action=index` 取 codes；单票 Redis key=`intraday:{ts_code}:{YYYYMMDD}`。不要逐只 `get-mins` 代替全市场，不要编造分时。  
+   - **全市场股票清单** → 先 `datahubco_data__fill_market_universe` `action=fill`，写入 `ref_market_universe`（约 5575 只，含 board_type），并同步 `ref_stock_basic`。  
+   - **写入训练表 ml_train_daily** → `datahubco_data__fill_ml_train_daily`：先 `check_env`，再 `fill_complete`（单票）或 `fill_batch`+`limit`/`offset`（从 `ref_market_universe` 读池）。采集遵守 P01–P11。训练只用 `train_ready=1`。不要一次拉全市场进内存。  
+   - **用户自定义表** → 存储层「AI 建表」或 `sql_toolkit__create_custom_table`；表名 `u_*`，建好后 `list-tables` / `query-exec` 可用。存储层预览先 50 行，滚动继续加载。  
+   - **训练表体检与修复** → `datahubco_data__sanitize_ml_train_daily`：先 `catalog` 看问题与办法，再 `audit` 看数量，最后 `fix`。会把 y_high/y_low 改成次日高低/当日收盘，补截面，标记一字/停牌，插入停牌占位行使序列连续。训练只用 `train_ready=1`。  
    - **期货主连报价 / 行情中心**（黄金原油橡胶股指等）→ **futures-market**（`get-quotes` / `ensure-and-get` / `sync-quotes`）。缺数或日期不对先补数入库，不要编造价格。  
    - 某一天整批东财二级/一级/三级行业行情缺失 → `datahubco_data__fill_sector_gap`（`trade_date`，`level` 默认东财二级行业）。不要逐只用 `get-bars` 代替，也不要编造涨跌幅。
    - 某一个东财板块缺少一段历史行情、上涨家数或回测用的市场环境 → `datahubco_data__fill_sector_history`（`ts_code`、`start_date`、`end_date`）。只调用这一次，不要逐日补，也不要编造涨跌幅。
@@ -19,6 +24,8 @@
    - 某个交易日整批个股资金流向缺失 → `datahubco_data__get_fund_data`（`dataset=moneyflow`，`trade_date` 用 8 位日期，`source=datahubco`，`write_back=true`）。不要传 `ts_code`。不要编造主力净额。  
    - 东财行业板块成分 / 剔除 ST·停牌 → `datahubco_data__get_sector_members` → `datahubco_data__filter_st_suspend`。  
    - **今日市场记忆草稿** → `kb_market__today`（技能名：知识库-市场记忆-今日）。只生成草稿，不要声称已写入知识库。  
+   - **盘前 09:20–09:25 主板竞价强买** → `auction_screen__mainboard_buy`（昨日强势∪涨停池，成交额 P95）。不要编造量额。  
+   - **东财二级行业分时情绪** → `sector_intraday__l2_tone`（先日线 Top，再合成成分分时）。不要编造涨跌幅。  
    - **A 股收盘复盘** → `skill-market-daily-review`（先 `load-skill` / `build-prompt`）。  
    - **A 股个股尽调档案** → `ill-a-share-stock-dossier`。  
    - **期货 DeepView 研判** → `skill-futures-deepview-analyst`。  
@@ -39,6 +46,9 @@
 |---------|--------|------|----------|
 | `list-tables` | 列出所有表 | 不知道有哪些表时先调用 | 无 |
 | `info-table` | 查看表信息 | 确认某表字段/类型 | `table_names`（逗号分隔） |
+| `list-custom-tables` | 自定义表目录 | 用户 AI 建表产物（`u_*`） | 无 |
+| `create-custom-table` | AI 建表 | 自然语言描述 → 大模型设计并创建 PG 表 | `prompt`，可选 `dry_run` |
+| `delete-custom-table` | 删除自定义表 | **仅**可删自己建的 `u_*`；系统表一律拒绝 | `table_name` |
 | `query-check` | SQL 校验 | 执行前检查语法与只读安全 | `query` |
 | `query-exec` | 执行 SQL | 执行 SELECT 并返回结果 | `query`，可选 `limit` |
 | `query-nl` | 自然语言查询 | 用中文描述需求（依赖较强） | `question` |
@@ -66,6 +76,10 @@
 | `get-bars` | 获取行情 | 日线/周线/月线/板块；也可 `dataset=stock_mins` | `ts_code`，可选 `dataset`/`limit`/`source`/`write_back` |
 | `fill-sector-gap` | 补板块缺日 | 把指定交易日的东财行业板块涨跌和成交额写入库 | `trade_date`，可选 `level`（默认东财二级行业） |
 | `get-mins` | 获取分钟分时 | **1 分钟主入口**：Redis → PG → Datahubco 补数写回 | `ts_code`，可选 `trade_date`/`limit`/`source`/`write_back` |
+| `fill-mainboard-mins` | 批量主板分时 | 当日全部主板 1 分钟写入 Redis+PG，供 LightGBM 训练 | `action=fill\|status\|index`，可选 `limit`/`offset`/`trade_date` |
+| `fill-market-universe` | 全市场股票清单 | Datahubco `stock_basic` 分页写入 `ref_market_universe`（含 board_type）并同步 `ref_stock_basic`；供 fill_batch 读池 | `action=fill\|status\|ensure_schema` |
+| `fill-ml-train-daily` | 训练表采集 | 经 Datahubco 补日线→算特征→写 `ml_train_daily`；P01–P11；fill_batch 读 `ref_market_universe` | `action=check_env\|fill_complete\|fill_one\|fill_batch\|local_polish\|check_null\|status` |
+| `sanitize-ml-train-daily` | 训练表体检修复 | 检查并修复会搞坏 LightGBM 的问题：次日标签、截面、一字/停牌标记、停牌占位、train_ready | `action=catalog\|audit\|fix` |
 | `get-sector-members` | 板块成分股 | 东财行业板块成分（dc_member）；标注 ST/停牌 | `ts_code`（如 BK1035.DC），可选 `trade_date`/`source` |
 | `filter-st-suspend` | 剔除ST与停牌 | 从板块或股票列表剔除 ST/*ST 与停牌 | `ts_code` 或 `ts_codes`/`members` |
 | `get-fund-data` | 资金与基本面 | 资金/财务/指数/基金；限售解禁/质押/增减持/筹码/研报；同花顺概念成分/可转债/期货主档；每日指标等 → 写入 PG | `dataset`，可选 `ts_code`/`trade_date`/`period` |
@@ -87,7 +101,40 @@ ST 按简称含 ST 判断；停牌优先 `ref_suspend_d`（类型 S），当日�
 **资金/基本面 dataset**：`top_list`、`top_inst`、`block_trade`、`margin`、`margin_detail`、`moneyflow`、`hk_hold`、`income`、`balancesheet`、`cashflow`、`fina_indicator`、`fina_mainbz`、`fina_audit`、`dividend`、`express`、`disclosure_date`、`forecast`、`top10_holders`、`sector_moneyflow`、`index_basic`、`index_weekly`、`index_monthly`、`index_dailybasic`、`index_classify`、`index_weight`、`fund_basic`、`fund_nav`、`fund_div`、`fund_portfolio`、`fund_adj`、`share_float`、`pledge_stat`、`stk_holdertrade`、`cyq_perf`、`cyq_chips`、`report_rc`、`ths_member`、`cb_basic`、`cb_daily`、`fut_basic`、`daily_basic`、`adj_factor`、`stk_limit`、`limit_list`、`suspend_d`、`new_share`。  
 个股二级/三级板块资金用 `get-stock-sector-moneyflow`（依赖 `sector_dc_member` + `sector_moneyflow_daily`）。
 
-函数名：`datahubco_data__get_bars`、`datahubco_data__get_mins`、`datahubco_data__get_fund_data`、`datahubco_data__get_stock_sector_moneyflow` 等。
+函数名：`datahubco_data__get_bars`、`datahubco_data__get_mins`、`datahubco_data__fill_mainboard_mins`、`datahubco_data__get_fund_data`、`datahubco_data__get_stock_sector_moneyflow` 等。
+
+**批量主板分时（训练）**：`fill-mainboard-mins`
+
+1. `action=status` → 看 `universe_total` / `local_ready` / `coverage_pct`
+2. `action=fill` → 建议 `limit=200`，按返回的 `next_offset` 循环直到 `has_more=false`
+3. `action=index` → 取 `codes`；Redis 索引 key=`intraday:mainboard:{YYYYMMDD}:codes`；单票 bars=`intraday:{ts_code}:{YYYYMMDD}`（含 OHLCV/amount）
+4. 也可从 PG `stock_intraday_mins` 按 `trade_date` 批量读
+
+**全市场股票清单**：`fill-market-universe` → 表 `ref_market_universe`
+
+1. `action=fill` → 分页拉 Datahubco `stock_basic`（list_status=L，单页 5000），写入清单并同步 `ref_stock_basic`
+2. `action=status` → 看 `listed_rows` / `by_board_type` / `ready_for_fill_batch`
+3. 完成后才能用 `fill_batch`（池子从此表读，不再依赖空的主档）
+
+**训练表采集**：`fill-ml-train-daily` → 表 `ml_train_daily`
+
+1. `action=check_env` → 内存≥1.5GB、磁盘≥10GB、PG/训练表就绪
+2. `action=fill_complete` `ts_code=000001.SZ` `start_date=2016-01-04` → fill_one + **表内** polish（截面/指数广播/train_ready），不依赖远端全市场 daily
+3. `action=fill_one` → 单票特征：次日标签、OHLC 夹紧、一字/停牌标记、停牌占位行、滚动特征不填 0、写 `train_ready`
+4. `action=fill_batch` `limit=1~1000` + `offset` 循环（股票池=`ref_market_universe`）；每批成功后自动 `local_polish`
+5. `action=local_polish` → 仅表内重算截面/广播/train_ready（全市场采完可再跑一次）
+6. `board_type`：主板 / 科创板 / 创业板 / 北交所 / ST
+7. **标签**：`y_high`/`y_low` = 次日高低 / 当日收盘 - 1；末日留空且 `train_ready=0`
+8. **训练过滤**：`WHERE train_ready = 1`（前 60 根、无标签、薄日、停牌等为 0）
+9. 旧表仍可用 `sanitize-ml-train-daily`：`catalog` → `audit` → `fix` 做事后修复
+
+**训练表体检修复**：`sanitize-ml-train-daily` → 表 `ml_train_daily`
+
+1. `action=catalog` → 问题清单与对应修复
+2. `action=audit` → 全表计数（截面空值、一字板、标签是否仍是当日公式）
+3. `action=fix` → 本地按序修复（改标签、补截面、标一字/停牌、插停牌占位行、打 train_ready）
+4. 单步：`fix_labels` / `fill_cross_section` / `mark_session` / `fill_gaps` / `mark_train_ready`
+5. `session_flag`∈正常 / 一字涨停 / 一字跌停 / 平盘一字 / 停牌，作为 LightGBM 特征，不要丢掉这些行
 
 ---
 
@@ -147,6 +194,32 @@ hit-test 默认测全部组合。结论看 `combo_ranking`；写死到分时图�
 
 账户净值不可因缺分时只剩现金；做 T 决策仍以分时为准，勿把收盘价当作实时盘中价。  
 函数名：`paper_trade__get_intraday_quotes`、`paper_trade__get_account`、`paper_trade__mark`。
+
+---
+
+## 技能：auction-screen（主板集合竞价强买）
+
+**何时用**：盘前看 09:20–09:25 谁在放量抬价；昨日强势/涨停股的竞价筛选。
+
+| 工具 ID | 用途 |
+|---------|------|
+| `mainboard-buy` | 宇宙=昨日强势主板∪涨停池；竞价额≥P95 且价升 → 推荐 + 近3日 + 规则原因 |
+
+函数名：`auction_screen__mainboard_buy`。强买为量能代理，不是 Level-2 买卖方向。  
+若返回 `incomplete=true` / `suggested_tool_calls`：先按列表调 Datahubco 补竞价分钟（`get_mins`+`include_auction`）与涨停榜，再重跑本工具。
+
+---
+
+## 技能：sector-intraday（二级行业分时情绪）
+
+**何时用**：看今日东财二级行业强弱、分时形态、市场情绪。
+
+| 工具 ID | 用途 |
+|---------|------|
+| `l2-tone` | 日线按\|涨跌幅\|取 Top → 成分分时等权合成；输出近3日与情绪文案 |
+
+函数名：`sector_intraday__l2_tone`。  
+缺日线 → `fill_sector_gap`；缺成分 → `get_sector_members`；缺分时 → `get_mins`。工具会在 `suggested_tool_calls` 里写明，模型应先补数再重跑。
 
 ---
 

@@ -87,7 +87,8 @@ if (-not $dockerOk) {
     Write-Host ""
     if ($needDown.Count -gt 0) {
         Write-Host "  [INFO] Required storage containers not running: $($needDown -join ', ')" -ForegroundColor Yellow
-        Write-Host "         Tip: docker compose up -d $($needDown -join ' ')" -ForegroundColor Gray
+        Write-Host "         Tip: docker compose -f docker-compose.storage.yml up -d $($needDown -join ' ')" -ForegroundColor Gray
+        Write-Host "         Data persists on host: data\docker\ (survives Docker Desktop wipe)" -ForegroundColor Gray
     } else {
         Write-Host "  [OK] All required storage containers are running" -ForegroundColor Green
     }

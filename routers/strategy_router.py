@@ -211,6 +211,10 @@ class SetupScreenerRequest(BaseModel):
         description="A 类观察池：大跌后缩量筑底、靠近20日低点、MA5走平（只观察，等起飞）",
     )
     include_b: bool = Field(True, description="B 类：升势回踩 MA5（反转候选）")
+    include_c: bool = Field(
+        True,
+        description="C 类：趋势回踩结构止损（MA10/MA20 升势缩量回踩，次日开盘买）",
+    )
     limit: int = Field(60, ge=10, le=1000)
     fill: bool = Field(True, description="窗口日线不足时自动从 Datahubco 按交易日拉全日线写入 stock_daily")
 
@@ -237,8 +241,8 @@ async def screener_asof():
 async def screener_setups(body: SetupScreenerRequest):
     """
     用日线判断 asof（默认当天已收盘日）是否满足：
-    A 观察池（缩量筑底转弯）、B 升势回踩 MA5。放量下跌抛弃。
-    窗口覆盖不足时默认从 Datahubco 按交易日拉取全日线。
+    A 观察池（缩量筑底转弯）、B 升势回踩 MA5、C 趋势回踩结构止损。
+    放量下跌抛弃。窗口覆盖不足时默认从 Datahubco 按交易日拉取全日线。
     """
     try:
         from server.screener_service import screener_service
@@ -256,6 +260,7 @@ async def screener_setups(body: SetupScreenerRequest):
             body.include_b,
             body.limit,
             body.fill,
+            body.include_c,
         )
         if not result.get("ok"):
             raise HTTPException(status_code=400, detail=result.get("error") or "选股失败")
@@ -386,5 +391,116 @@ async def pipeline_recommend_list(
         from server.recommend_pool_service import recommend_pool_service
 
         return await asyncio.to_thread(recommend_pool_service.list_recommend_pool, status)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+class IntradayTrainBody(BaseModel):
+    ts_codes: list[str] = Field(default_factory=list)
+    experiment_id: str = "INTRADAY_TURNING_POINT"
+
+
+class IntradayPredictBody(BaseModel):
+    model_version: str
+    stock_code: str
+    as_of_time: Optional[str] = None
+    holding_buy_date: Optional[str] = None
+
+
+class IntradayBacktestBody(BaseModel):
+    experiment_id: str = "INTRADAY_TURNING_POINT"
+    model_version: str
+    start_date: str
+    end_date: str
+
+
+@router.get("/intraday/coverage")
+async def intraday_coverage():
+    """哪些股票、哪些交易日有够用的分钟线。"""
+    try:
+        from server.intraday_turning_service import intraday_turning_service
+        return await asyncio.to_thread(intraday_turning_service.coverage)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/intraday/latest")
+async def intraday_latest():
+    try:
+        from server.intraday_turning_service import intraday_turning_service
+        return await asyncio.to_thread(intraday_turning_service.latest)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/intraday/train")
+async def intraday_train(body: IntradayTrainBody):
+    """用库内分钟线训练 LightGBM。测试集只评估一次。"""
+    try:
+        from server.intraday_turning_service import intraday_turning_service
+        result = await asyncio.to_thread(
+            intraday_turning_service.train,
+            body.experiment_id,
+            {"ts_codes": body.ts_codes} if body.ts_codes else {},
+        )
+        if not result.get("ok") and result.get("status") != "NEED_MORE_DATA":
+            raise HTTPException(status_code=400, detail=result.get("error") or "训练失败")
+        return result
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/intraday/predict")
+async def intraday_predict(body: IntradayPredictBody):
+    try:
+        from server.intraday_turning_service import intraday_turning_service
+        result = await asyncio.to_thread(
+            intraday_turning_service.predict,
+            body.model_version, body.as_of_time, body.stock_code, body.holding_buy_date,
+        )
+        if not result.get("ok"):
+            raise HTTPException(status_code=400, detail=result.get("error") or "预测失败")
+        return result
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/intraday/evaluate")
+async def intraday_evaluate(
+    model_version: str = Query(...),
+    dataset_type: str = Query("test"),
+    experiment_id: str = Query("INTRADAY_TURNING_POINT"),
+):
+    try:
+        from server.intraday_turning_service import intraday_turning_service
+        result = await asyncio.to_thread(
+            intraday_turning_service.evaluate, experiment_id, model_version, dataset_type,
+        )
+        if not result.get("ok"):
+            raise HTTPException(status_code=404, detail=result.get("error") or "没有记录")
+        return result
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/intraday/backtest")
+async def intraday_backtest(body: IntradayBacktestBody):
+    try:
+        from server.intraday_turning_service import intraday_turning_service
+        result = await asyncio.to_thread(
+            intraday_turning_service.backtest,
+            body.experiment_id, body.model_version, body.start_date, body.end_date, {},
+        )
+        if not result.get("ok"):
+            raise HTTPException(status_code=400, detail=result.get("error") or "回测失败")
+        return result
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))

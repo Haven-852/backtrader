@@ -1113,6 +1113,10 @@ class FundDataFetcher:
         if not need and start and end and meta.get("date_col") == "trade_date":
             expect = max(1, int((end - start).days * 0.5))
             need = cover < min(expect, 5)
+        # 区间里已有旧记录时，截止日期当天缺失仍要向远端补这一天。
+        if not need and end and code and meta.get("date_col") == "trade_date":
+            if self._pg_count(meta, code, end, end, period) <= 0:
+                need = True
 
         fetched = False
         upserted = 0

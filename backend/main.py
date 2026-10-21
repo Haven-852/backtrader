@@ -15,10 +15,12 @@ import asyncio
 # Add parent directory (project root) to sys.path so routers/server/data_layer can be imported
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from dotenv import load_dotenv
 from pathlib import Path
+
+from server.safe_json import SafeJSONResponse
 
 # 显式加载项目根与 backend/.env，避免工作目录变化读不到 PUSHPLUS_TOKEN 等
 _ROOT = Path(__file__).resolve().parent.parent
@@ -38,6 +40,7 @@ logger = logging.getLogger(__name__)
 app = FastAPI(
     title="AIquant · Backtrader Agent Platform",
     version="3.0.0",
+    default_response_class=SafeJSONResponse,
     description=(
         "仿 Yuxi 风格的量化智能体平台\n\n"
         "**架构**: web (Vue3) → routers (FastAPI APIRouter) → server (Service) → data_layer (Storage)\n\n"
@@ -87,6 +90,17 @@ app.include_router(paper_router)           # /paper/*
 app.include_router(knowledge_router)       # /kb/*
 app.include_router(data_router)            # /data/selective/*, /data/continuous/*
 
+
+@app.exception_handler(HTTPException)
+async def http_exception_handler(request: Request, exc: HTTPException):
+    """Starlette 默认 json.dumps 不能序列化 date，这里统一转成可 JSON 的 detail。"""
+    return SafeJSONResponse(
+        status_code=exc.status_code,
+        content={"detail": exc.detail},
+        headers=getattr(exc, "headers", None),
+    )
+
+
 # ─── 启动日志 ─────────────────────────────────────────
 
 @app.on_event("startup")
@@ -110,6 +124,12 @@ async def startup_event():
         from agents.conversation import conversation_store
         await conversation_store.ensure_ready()
         logger.info("Agent 对话表 (agent_chat_*) 已就绪")
+        from server.llm_profile_service import llm_profile_service
+        llm_profile_service.ensure()
+        logger.info("用户大模型配置表 (user_llm_profile) 已就绪，存储层不展示")
+        from server.custom_table_service import custom_table_service
+        custom_table_service.ensure()
+        logger.info("用户自定义表登记 (user_custom_table) 已就绪")
     except Exception as e:
         logger.warning(f"PostgreSQL 市场数据管理器初始化失败: {e}")
 

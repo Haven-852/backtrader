@@ -40,7 +40,7 @@ class ChatMessage:
 class ChatRequest:
     query: str
     model: str = "deepseek"
-    provider: str = "deepseek"  # openai, deepseek, anthropic, ollama, grok
+    provider: str = "deepseek"  # openai, deepseek, anthropic, ollama, grok, openai_compat
     stream: bool = False
     history: List[Dict] = field(default_factory=list)
     system_prompt: Optional[str] = None
@@ -51,6 +51,10 @@ class ChatRequest:
     agent_mode: Optional[str] = None  # "paper_trade" | None
     tool_skills: Optional[List[str]] = None
     context: Dict = field(default_factory=dict)  # e.g. {"account_id": 1}
+    user_id: str = "default"
+    profile_id: Optional[int] = None
+    api_key: Optional[str] = None
+    base_url: Optional[str] = None
 
 
 @dataclass
@@ -134,6 +138,65 @@ class GrokProvider(ModelProvider):
 
     def get_chat_url(self) -> str:
         return f"{self.base_url}/chat/completions"
+
+
+PROVIDER_DEFAULTS = {
+    "openai": {"base_url": "https://api.openai.com/v1", "model": "gpt-4o-mini"},
+    "deepseek": {"base_url": "https://api.deepseek.com/v1", "model": "deepseek-chat"},
+    "anthropic": {"base_url": "https://api.anthropic.com", "model": "claude-3-5-sonnet-latest"},
+    "ollama": {"base_url": "http://localhost:11434", "model": "qwen2.5:7b"},
+    "grok": {"base_url": "https://api.x.ai/v1", "model": "grok-2"},
+    "openai_compat": {"base_url": "", "model": ""},
+}
+
+PROVIDER_ALIASES = {
+    "openai": "openai",
+    "gpt": "openai",
+    "deepseek": "deepseek",
+    "anthropic": "anthropic",
+    "claude": "anthropic",
+    "ollama": "ollama",
+    "grok": "grok",
+    "xai": "grok",
+    "openai_compat": "openai_compat",
+    "compatible": "openai_compat",
+    "custom": "openai_compat",
+    "qwen": "openai_compat",
+    "dashscope": "openai_compat",
+    "moonshot": "openai_compat",
+    "kimi": "openai_compat",
+    "zhipu": "openai_compat",
+    "glm": "openai_compat",
+    "siliconflow": "openai_compat",
+}
+
+
+def normalize_provider(name: Optional[str]) -> str:
+    key = (name or "").strip().lower()
+    return PROVIDER_ALIASES.get(key, key or "openai_compat")
+
+
+def make_provider(
+    provider: str,
+    api_key: str = "",
+    base_url: str = "",
+    default_model: str = "",
+) -> ModelProvider:
+    """按厂商构造提供商。openai_compat 走 OpenAI 兼容协议（通义/智谱/Kimi/硅基流动等）。"""
+    name = normalize_provider(provider)
+    defaults = PROVIDER_DEFAULTS.get(name, PROVIDER_DEFAULTS["openai_compat"])
+    url = (base_url or defaults.get("base_url") or "").strip()
+    model = (default_model or defaults.get("model") or "").strip()
+    key = (api_key or "").strip()
+    if name == "anthropic":
+        return AnthropicProvider(api_key=key, base_url=url or "https://api.anthropic.com", default_model=model)
+    if name == "ollama":
+        return OllamaProvider(api_key=key, base_url=url or "http://localhost:11434", default_model=model)
+    if name == "grok":
+        return GrokProvider(api_key=key, base_url=url or "https://api.x.ai/v1", default_model=model)
+    if name == "deepseek":
+        return DeepSeekProvider(api_key=key, base_url=url or "https://api.deepseek.com/v1", default_model=model)
+    return OpenAIProvider(api_key=key, base_url=url or "https://api.openai.com/v1", default_model=model)
 
 
 # ─── Chat Service ──────────────────────────────────────
@@ -242,25 +305,78 @@ class ChatService:
 
         logger.info(f"ChatService 已初始化，可用提供商: {list(self._providers.keys())}")
 
-    def _resolve_provider(self, model: str) -> tuple[Optional[ModelProvider], str]:
-        """根据模型名解析提供商和实际模型名"""
-        provider_name = self.MODEL_PROVIDER_MAP.get(model, "ollama")
-        provider = self._providers.get(provider_name)
+    def _resolve_provider(self, model: str, provider_name: Optional[str] = None) -> tuple[Optional[ModelProvider], str]:
+        """根据模型名解析提供商和实际模型名（环境变量里已配置的厂商）。"""
+        name = normalize_provider(provider_name) if provider_name else self.MODEL_PROVIDER_MAP.get(model)
+        if not name:
+            name = "ollama" if ":" in (model or "") else "deepseek"
+        provider = self._providers.get(name)
 
-        if provider and provider_name == "ollama":
-            # Ollama：使用配置的模型名；UI 选「ollama」时用默认本地模型
+        if provider and name == "ollama":
             actual_model = os.getenv("OLLAMA_MODEL", "deepseek-r1:8b")
             if model not in ("ollama", "qwen", "llama", "mistral"):
                 actual_model = model
-            # 带冒号的是 Ollama 完整模型名（如 qwen3:8b）
             if ":" in (model or ""):
                 actual_model = model
         elif provider:
-            actual_model = provider.default_model if model in (provider_name, "deepseek", "openai") else model
+            actual_model = provider.default_model if model in (name, "deepseek", "openai") else model
         else:
             actual_model = model
 
         return provider, actual_model
+
+    def resolve_for_request(self, request: ChatRequest) -> tuple[Optional[ModelProvider], str]:
+        """对话请求：用户配置（profile / 内联密钥）优先，否则回退到服务器 .env。"""
+        model = (request.model or "").strip()
+        provider_name = normalize_provider(request.provider) if request.provider else ""
+        api_key = (request.api_key or "").strip() or None
+        base_url = (request.base_url or "").strip() or None
+        # ChatRequest 默认 model/provider=deepseek，带 profile 时应让配置覆盖这些占位值
+        _PROVIDER_PLACEHOLDERS = {
+            "", "deepseek", "openai", "anthropic", "ollama", "grok", "openai_compat",
+        }
+
+        if request.profile_id:
+            from server.llm_profile_service import llm_profile_service
+
+            prof = llm_profile_service.get_raw(int(request.profile_id), request.user_id or "default")
+            if not prof:
+                raise ValueError(f"模型配置 #{request.profile_id} 不存在")
+            prof_provider = normalize_provider(prof.get("provider"))
+            prof_model = str(prof.get("model") or "").strip()
+            # 未显式指定、或仍是默认占位时，改用 profile 里的真实模型名（如 deepseek-chat）
+            if not provider_name or provider_name in _PROVIDER_PLACEHOLDERS:
+                provider_name = prof_provider or provider_name
+            if not model or model in _PROVIDER_PLACEHOLDERS or model == provider_name:
+                model = prof_model or model
+            api_key = api_key or (str(prof.get("api_key") or "").strip() or None)
+            base_url = base_url or (str(prof.get("base_url") or "").strip() or None)
+            if request.temperature == 0.7 and prof.get("temperature") is not None:
+                try:
+                    request.temperature = float(prof["temperature"])
+                except (TypeError, ValueError):
+                    pass
+            if request.max_tokens == 4096 and prof.get("max_tokens"):
+                try:
+                    request.max_tokens = int(prof["max_tokens"])
+                except (TypeError, ValueError):
+                    pass
+
+        if api_key or base_url:
+            name = provider_name or self.MODEL_PROVIDER_MAP.get(model) or "openai_compat"
+            if name == "ollama" or api_key:
+                env_p = self._providers.get(name)
+                return (
+                    make_provider(
+                        name,
+                        api_key=api_key or (env_p.api_key if env_p else ""),
+                        base_url=base_url or (env_p.base_url if env_p else ""),
+                        default_model=model,
+                    ),
+                    model or (env_p.default_model if env_p else name),
+                )
+
+        return self._resolve_provider(model, provider_name or None)
 
     async def get_available_models(self) -> List[Dict]:
         """获取可用模型列表（标记哪些已配置）"""
@@ -287,7 +403,7 @@ class ChatService:
 
     async def chat(self, request: ChatRequest) -> ChatResponse:
         """同步对话（非流式）"""
-        provider, actual_model = self._resolve_provider(request.model)
+        provider, actual_model = self.resolve_for_request(request)
 
         if not provider:
             return ChatResponse(
@@ -341,7 +457,7 @@ class ChatService:
 
     async def chat_stream(self, request: ChatRequest) -> AsyncGenerator[str, None]:
         """流式对话 - 使用 SSE 返回"""
-        provider, actual_model = self._resolve_provider(request.model)
+        provider, actual_model = self.resolve_for_request(request)
 
         if not provider:
             yield self._fallback_response(request.query, request.model)
@@ -385,7 +501,17 @@ class ChatService:
                 headers=provider.get_headers(),
                 json=payload,
             )
-            resp.raise_for_status()
+            if resp.status_code >= 400:
+                detail = ""
+                try:
+                    detail = resp.text[:500]
+                except Exception:
+                    detail = ""
+                raise httpx.HTTPStatusError(
+                    f"{resp.status_code} for {provider.get_chat_url()} model={model}: {detail}",
+                    request=resp.request,
+                    response=resp,
+                )
             data = resp.json()
             choice = data["choices"][0]
             message = choice.get("message") or {}
@@ -395,7 +521,7 @@ class ChatService:
             return ChatResponse(
                 content=content or "",
                 model=data.get("model", model),
-                provider=request.provider,
+                provider=request.provider or "openai",
                 usage=data.get("usage", {}),
                 finish_reason=choice.get("finish_reason", "stop"),
             )
@@ -561,23 +687,9 @@ class ChatService:
 
 收到您的查询: *"{query}"*
 
-⚠️ **注意**：当前运行在模拟模式。
-要启用真实模型对话，请在 `backend/.env` 中配置对应模型的 API Key：
+⚠️ 当前没有可用的模型密钥。请在对话页点「配置模型」，填写你自己的厂商、模型名和 API Key 后勾选启用；也可以在服务器 `.env` 里配置默认密钥。
 
-- **DeepSeek**: 设置 `DEEPSEEK_API_KEY`
-- **OpenAI**: 设置 `OPENAI_API_KEY`
-- **Anthropic**: 设置 `ANTHROPIC_API_KEY`
-- **Grok**: 设置 `GROK_API_KEY`
-- **Ollama**: 启动本地 Ollama 服务 (默认端口 11434)
-
----
-
-**量化平台状态**：
-• 数据存储层：InfluxDB + PostgreSQL/TimescaleDB + Redis + MinIO
-• 智能体系统：13 个专业 Agent 可用
-• 回测引擎：Backtrader 就绪
-
-💡 配置 API Key 后即可获得真实的量化分析能力。"""
+- DeepSeek / OpenAI / Claude / Grok / Ollama / OpenAI 兼容（通义、智谱、Kimi、硅基流动）均可。"""
 
 
 # ─── 全局实例 ──────────────────────────────────────────

@@ -289,6 +289,21 @@
               </span>
             </div>
           </template>
+          <template v-else-if="selectedTab === 'sector' && currentSector">
+            <span class="text-base font-bold">{{ currentSector.name || currentSector.ts_code }}</span>
+            <span class="text-xs text-zinc-500">{{ currentSector.ts_code }}</span>
+            <span class="text-xs px-1.5 py-0.5 rounded bg-amber-600/20 text-amber-300">{{ currentSector.level || '东财行业' }}</span>
+            <span class="text-xs text-zinc-600">板块日K</span>
+            <div v-if="latestBar" class="ml-auto flex items-center gap-4 text-sm">
+              <span class="text-zinc-500">最新</span>
+              <span :class="Number(changePercent) >= 0 ? 'text-red-400' : 'text-green-400'" class="text-lg font-bold tabular-nums">
+                {{ formatPrice(latestBar.close) }}
+              </span>
+              <span v-if="changePercent !== null" :class="Number(changePercent) >= 0 ? 'text-red-400' : 'text-green-400'" class="tabular-nums">
+                {{ Number(changePercent) >= 0 ? '+' : '' }}{{ changePercent }}%
+              </span>
+            </div>
+          </template>
           <template v-else-if="selectedTab === 'etf' && currentETF">
             <span class="text-base font-bold">{{ currentETF.name }}</span>
             <span class="text-xs text-zinc-500">{{ currentETF.ts_code }}</span>
@@ -356,7 +371,7 @@
             <div class="text-center text-zinc-500">
               <i class="fa-solid fa-chart-line text-5xl mb-4 block opacity-40"></i>
               <p class="text-lg mb-2">实时行情看板</p>
-              <p class="text-sm">点击上方大盘指数查看走势，或搜索个股名称查看K线</p>
+              <p class="text-sm">点击上方大盘指数、搜索个股，或点下方行业板块气泡查看K线</p>
               <p v-if="chartData.message" class="text-xs text-amber-500/80 mt-2">{{ chartData.message }}</p>
             </div>
           </div>
@@ -411,7 +426,7 @@
       </div>
 
       <!-- 右侧信息面板 -->
-      <div v-if="(currentIndex || currentStock || currentETF) && chartData.bars.length" class="w-72 bg-zinc-900 border-l border-zinc-800 p-4 overflow-auto hidden xl:block flex-shrink-0">
+      <div v-if="(currentIndex || currentStock || currentETF || currentSector) && chartData.bars.length" class="w-72 bg-zinc-900 border-l border-zinc-800 p-4 overflow-auto hidden xl:block flex-shrink-0">
         <!-- 最新行情 -->
         <h3 class="text-xs font-semibold mb-3 text-zinc-400 uppercase tracking-wide">最新行情</h3>
         <div class="space-y-1.5 text-sm">
@@ -542,7 +557,7 @@
           </div>
 
           <div class="px-4 py-2 text-[10px] text-zinc-500 border-b border-zinc-800/60 flex flex-wrap gap-x-3 gap-y-1">
-            <span>分位疏密坐标 · 气泡名始终显示（重叠时自动避让，放大后露出更多）· 点击一级/二级下钻</span>
+            <span>分位疏密坐标 · 点击任意一级/二级/三级板块查看K线与成分股 · 一级/二级可下钻</span>
             <span class="text-zinc-600">滚轮缩放 · 拖拽平移 · 双击放大 · 工具栏框选 · 缩放时坐标持续显示真实值</span>
           </div>
 
@@ -592,16 +607,22 @@
                 <span class="text-amber-300 font-medium">{{ activeSector.name || activeSector.ts_code }}</span>
                 <span class="text-zinc-500 ml-2">{{ activeSector.level || '' }}</span>
                 <span class="text-zinc-500 ml-2">成分股 {{ sectorMembers.length }}</span>
+                <span v-if="sectorMembersQuoted != null" class="text-zinc-500 ml-2">
+                  行情 {{ sectorMembersQuoted }}/{{ sectorMembers.length }}
+                </span>
                 <span v-if="activeSector.pct_change != null" :class="activeSector.pct_change >= 0 ? 'text-red-400' : 'text-green-400'" class="ml-2 tabular-nums">
                   {{ activeSector.pct_change >= 0 ? '+' : '' }}{{ Number(activeSector.pct_change).toFixed(2) }}%
                 </span>
               </div>
-              <button @click="clearActiveSector()" class="text-[10px] text-zinc-500 hover:text-white">关闭</button>
+              <div class="flex items-center gap-2">
+                <button @click="selectSector(activeSector)" class="text-[10px] text-amber-300 hover:text-amber-200">查看K线</button>
+                <button @click="clearActiveSector()" class="text-[10px] text-zinc-500 hover:text-white">关闭</button>
+              </div>
             </div>
             <div v-if="sectorMembersLoading" class="py-8 text-center text-zinc-500 text-xs">
               <i class="fa-solid fa-spinner animate-spin mr-1"></i>加载成分股...
             </div>
-            <div v-else class="max-h-64 overflow-auto">
+            <div v-else class="max-h-[28rem] overflow-auto">
               <table class="w-full text-xs">
                 <thead class="sticky top-0 bg-zinc-900 text-zinc-500">
                   <tr>
@@ -621,7 +642,7 @@
                   >
                     <td class="px-3 py-1.5 font-mono text-zinc-400">{{ m.ts_code }}</td>
                     <td class="px-3 py-1.5 text-zinc-200">{{ m.name || '-' }}</td>
-                    <td class="px-3 py-1.5 text-right tabular-nums">{{ m.close ?? '-' }}</td>
+                    <td class="px-3 py-1.5 text-right tabular-nums">{{ m.close == null ? '-' : Number(m.close).toFixed(2) }}</td>
                     <td class="px-3 py-1.5 text-right tabular-nums" :class="(m.pct_chg ?? 0) >= 0 ? 'text-red-400' : 'text-green-400'">
                       {{ m.pct_chg == null ? '-' : ((m.pct_chg >= 0 ? '+' : '') + Number(m.pct_chg).toFixed(2) + '%') }}
                     </td>
@@ -699,10 +720,11 @@ const props = withDefaults(defineProps<{ active?: boolean }>(), { active: true }
 const searchText = ref('')
 const searchResults = ref<any[]>([])
 const showDropdown = ref(false)
-const selectedTab = ref<'index' | 'stock' | 'etf'>('index')
+const selectedTab = ref<'index' | 'stock' | 'etf' | 'sector'>('index')
 const currentIndex = ref<any>(null)
 const currentStock = ref<any>(null)
 const currentETF = ref<any>(null)
+const currentSector = ref<any>(null)
 const currentTsCode = ref<string>('000001.SH')
 const timeframe = ref('day')
 const activeIndicators = ref<string[]>(['ma'])
@@ -722,6 +744,7 @@ const sectorBubbleChart = ref<HTMLDivElement>()
 const sectorChildBubbleChart = ref<HTMLDivElement>()
 const activeSector = ref<any>(null)
 const sectorMembers = ref<any[]>([])
+const sectorMembersQuoted = ref<number | null>(null)
 const sectorMembersLoading = ref(false)
 const drillStack = ref<any[]>([])
 const drillParent = computed(() => drillStack.value.length ? drillStack.value[drillStack.value.length - 1] : null)
@@ -871,6 +894,13 @@ function openCtxMenuForCurrent(e: MouseEvent) {
       name: currentETF.value.name,
       short_name: currentETF.value.short_name || currentETF.value.name,
       kind: 'etf',
+    })
+  } else if (selectedTab.value === 'sector' && currentSector.value) {
+    openCtxMenu(e, {
+      ts_code: currentSector.value.ts_code,
+      name: currentSector.value.name,
+      short_name: currentSector.value.name,
+      kind: 'sector',
     })
   }
 }
@@ -1423,8 +1453,9 @@ function buildSectorScatterOption(sectors: any[], title: string, subtext: string
           `领涨股: ${e.leading || '-'} ${e.leading_pct != null ? ((e.leading_pct >= 0 ? '+' : '') + Number(e.leading_pct).toFixed(2) + '%') : ''}`,
           `涨跌家数: ${e.up_num ?? '-'} / ${e.down_num ?? '-'}`,
           `换手率: ${e.turnover_rate ?? '-'}%`,
+          '<span style="color:#fbbf24">点击查看该板块K线与成分股</span>',
           childN > 0
-            ? `<span style="color:#fbbf24">子板块: ${childN} 个 · 点击下钻</span>`
+            ? `<span style="color:#fbbf24">子板块: ${childN} 个 · 可继续下钻</span>`
             : (canDrillSector(e) ? '<span style="color:#a1a1aa">暂无子板块映射</span>' : ''),
         ]
         return lines.filter(Boolean).join('<br/>')
@@ -1663,8 +1694,9 @@ async function loadSectorBoard() {
 async function syncAndLoadSectors() {
   sectorSyncing.value = true
   try {
-    await axios.post('/data/continuous/sectors/run', { with_members: true, member_limit: 31 })
-    // 后台重建层级（不阻塞看板刷新）
+    await axios.post('/data/continuous/sectors/run', { with_members: true, member_limit: 80 })
+    axios.post('/dash/sector-members/sync-all').catch(() => {})
+    axios.post('/dash/sector-kline/backfill', null, { params: { lookback_days: 500 } }).catch(() => {})
     axios.post('/dash/sector-hierarchy/rebuild', null, { params: { sync_members: true } }).catch(() => {})
   } catch (e) {
     console.warn('sector sync failed:', e)
@@ -1678,9 +1710,15 @@ async function openSectorMembers(sector: any) {
   activeSector.value = sector
   sectorMembersLoading.value = true
   sectorMembers.value = []
+  sectorMembersQuoted.value = null
   try {
-    const res = await axios.get(`/dash/sector/${encodeURIComponent(sector.ts_code)}/members`)
+    const res = await axios.get(`/dash/sector/${encodeURIComponent(sector.ts_code)}/members`, {
+      timeout: 60000,
+    })
     sectorMembers.value = res.data?.members || []
+    sectorMembersQuoted.value = res.data?.quoted_count ?? sectorMembers.value.filter(
+      (m: any) => m.close != null || m.pct_chg != null || m.amount != null
+    ).length
     if (res.data?.name) activeSector.value = { ...sector, name: res.data.name, ...(res.data.sector || {}) }
   } catch (e) {
     console.warn('sector members failed:', e)
@@ -1707,6 +1745,7 @@ async function loadChildBoard(parent: any) {
 }
 
 async function onSectorBubbleClick(sector: any, fromChildChart: boolean) {
+  selectSector(sector)
   await openSectorMembers(sector)
   const childN = Number(sector?.child_count || 0)
   if (!canDrillSector(sector) && childN <= 0) return
@@ -1757,6 +1796,7 @@ function clearSectorDrill() {
 function clearActiveSector() {
   activeSector.value = null
   sectorMembers.value = []
+  sectorMembersQuoted.value = null
 }
 
 function selectStockFromSector(m: any) {
@@ -1806,7 +1846,7 @@ async function loadIndices(autoSync = true) {
       if (updated) currentIndex.value = { ...currentIndex.value, ...updated }
     }
     // 仅在「指数 Tab 且用户尚未选中个股/ETF」时默认上证；搜索个股后不要抢回
-    const viewingStockOrEtf = selectedTab.value === 'stock' || selectedTab.value === 'etf'
+    const viewingStockOrEtf = selectedTab.value === 'stock' || selectedTab.value === 'etf' || selectedTab.value === 'sector'
     if (indices.value.length > 0 && !currentIndex.value && !viewingStockOrEtf && !currentStock.value && !currentETF.value) {
       currentIndex.value = indices.value[0]
       currentTsCode.value = indices.value[0].ts_code
@@ -1968,6 +2008,8 @@ async function loadData(opts: { silent?: boolean; background?: boolean } = {}) {
     loadingHint.value = `从行情源拉取近 ${klineBarLimit.value} 日并写入 PostgreSQL...`
   } else if (selectedTab.value === 'stock') {
     loadingHint.value = '挑选式加载行情与均线...'
+  } else if (selectedTab.value === 'sector') {
+    loadingHint.value = '加载板块日K（不足则从东财补历史）...'
   } else {
     loadingHint.value = '加载K线数据...'
   }
@@ -2219,6 +2261,7 @@ function selectIndex(idx: any) {
   currentIndex.value = idx
   currentStock.value = null
   currentETF.value = null
+  currentSector.value = null
   currentTsCode.value = idx.ts_code
   searchText.value = ''
   timeframe.value = 'day'
@@ -2231,6 +2274,7 @@ function selectStock(stock: any, opts: { fromWatchlist?: boolean } = {}) {
   currentStock.value = stock
   currentIndex.value = null
   currentETF.value = null
+  currentSector.value = null
   currentTsCode.value = stock.ts_code
   searchText.value = stock.name
   showDropdown.value = false
@@ -2277,12 +2321,26 @@ function selectETF(etf: any) {
   currentETF.value = etf
   currentIndex.value = null
   currentStock.value = null
+  currentSector.value = null
   currentTsCode.value = etf.ts_code
   searchText.value = ''
   timeframe.value = 'day'
   beginInstrumentSwitch()
   loadData()
   window.scrollTo({ top: 0, behavior: 'smooth' })
+}
+
+function selectSector(sector: any) {
+  if (!sector?.ts_code) return
+  selectedTab.value = 'sector'
+  currentSector.value = sector
+  currentIndex.value = null
+  currentStock.value = null
+  currentETF.value = null
+  currentTsCode.value = sector.ts_code
+  if (timeframe.value === 'intraday') timeframe.value = 'day'
+  beginInstrumentSwitch()
+  loadData()
 }
 
 async function onSearchInput() {

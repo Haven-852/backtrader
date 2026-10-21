@@ -7,6 +7,7 @@
   - sector_moneyflow_daily   资金流向
   - sector_dc_member         板块成分股
   - sector_dc_hierarchy      一级→二级→三级
+  - ref_sector_dc_basic      板块目录（代码/名称/层级）
 
 主源 Datahubco dc_*；接口不可用时改用东财 clist（最近收盘日含成交额）。
 交易日 asof 规则复用 SelectiveDataFetcher.session_context：
@@ -16,8 +17,9 @@
 from __future__ import annotations
 
 import logging
+import os
 import time
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from typing import Any, Dict, List, Optional, Sequence, Set
 from zoneinfo import ZoneInfo
 
@@ -41,11 +43,14 @@ LEVELS = ("东财一级行业", "东财二级行业", "东财三级行业")
 EM_CLIST_URLS = (
     "https://push2.eastmoney.com/api/qt/clist/get",
     "https://79.push2.eastmoney.com/api/qt/clist/get",
+    "https://80.push2.eastmoney.com/api/qt/clist/get",
     "https://82.push2.eastmoney.com/api/qt/clist/get",
+    "https://88.push2.eastmoney.com/api/qt/clist/get",
 )
 EM_KLINE_URLS = (
     "https://push2his.eastmoney.com/api/qt/stock/kline/get",
     "https://79.push2his.eastmoney.com/api/qt/stock/kline/get",
+    "https://82.push2his.eastmoney.com/api/qt/stock/kline/get",
 )
 EM_CLIST_FIELDS = (
     "f12,f14,f2,f3,f4,f5,f6,f7,f8,f15,f16,f17,f18,f20,"
@@ -116,14 +121,17 @@ DDL_STATEMENTS = [
     )
     """,
     """
-    CREATE TABLE IF NOT EXISTS sector_dc_member (
-        trade_date     DATE         NOT NULL,
-        ts_code        VARCHAR(16)  NOT NULL,
-        con_code       VARCHAR(16)  NOT NULL,
-        name           VARCHAR(64),
-        updated_at     TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-        PRIMARY KEY (ts_code, trade_date, con_code)
-    )
+        CREATE TABLE IF NOT EXISTS sector_dc_member (
+            trade_date     DATE         NOT NULL,
+            ts_code        VARCHAR(16)  NOT NULL,
+            con_code       VARCHAR(16)  NOT NULL,
+            name           VARCHAR(64),
+            close          NUMERIC(16,4),
+            pct_chg        NUMERIC(12,4),
+            amount         NUMERIC(24,4),
+            updated_at     TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY (ts_code, trade_date, con_code)
+        )
     """,
     """
     CREATE TABLE IF NOT EXISTS sector_dc_hierarchy (
@@ -140,16 +148,34 @@ DDL_STATEMENTS = [
         PRIMARY KEY (child_code)
     )
     """,
+    """
+    CREATE TABLE IF NOT EXISTS ref_sector_dc_basic (
+        ts_code        VARCHAR(16)  PRIMARY KEY,
+        name           VARCHAR(64),
+        industry_level VARCHAR(32),
+        idx_type       VARCHAR(32)  DEFAULT '行业板块',
+        updated_at     TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    )
+    """,
 ]
 
 INDEX_DDL = [
     "CREATE INDEX IF NOT EXISTS idx_sector_dc_index_date ON sector_dc_index_daily (trade_date)",
     "CREATE INDEX IF NOT EXISTS idx_sector_dc_index_level ON sector_dc_index_daily (trade_date, industry_level)",
     "CREATE INDEX IF NOT EXISTS idx_sector_dc_daily_date ON sector_dc_daily (trade_date)",
+    "CREATE INDEX IF NOT EXISTS idx_sector_dc_daily_code ON sector_dc_daily (ts_code, trade_date DESC)",
     "CREATE INDEX IF NOT EXISTS idx_sector_mf_date ON sector_moneyflow_daily (trade_date, content_type)",
     "CREATE INDEX IF NOT EXISTS idx_sector_member_code ON sector_dc_member (ts_code, trade_date)",
+    "CREATE INDEX IF NOT EXISTS idx_sector_member_con ON sector_dc_member (con_code, trade_date)",
     "CREATE INDEX IF NOT EXISTS idx_sector_hierarchy_parent ON sector_dc_hierarchy (parent_code)",
     "CREATE INDEX IF NOT EXISTS idx_sector_hierarchy_levels ON sector_dc_hierarchy (parent_level, child_level)",
+    "CREATE INDEX IF NOT EXISTS idx_ref_sector_dc_level ON ref_sector_dc_basic (industry_level)",
+]
+
+ALTER_DDL = [
+    "ALTER TABLE sector_dc_member ADD COLUMN IF NOT EXISTS close NUMERIC(16,4)",
+    "ALTER TABLE sector_dc_member ADD COLUMN IF NOT EXISTS pct_chg NUMERIC(12,4)",
+    "ALTER TABLE sector_dc_member ADD COLUMN IF NOT EXISTS amount NUMERIC(24,4)",
 ]
 
 
@@ -185,6 +211,40 @@ def _em_int(v: Any) -> Optional[int]:
     if n is None:
         return None
     return int(round(n))
+
+
+def _em_proxies() -> Optional[Dict[str, str]]:
+    """东财走公网，需保留系统代理；DatahubcoClient 会把 NO_PROXY=*。"""
+    proxy = (
+        os.environ.get("HTTPS_PROXY")
+        or os.environ.get("https_proxy")
+        or os.environ.get("HTTP_PROXY")
+        or os.environ.get("http_proxy")
+        or ""
+    ).strip()
+    if not proxy:
+        try:
+            from urllib.request import getproxies_registry
+            regs = getproxies_registry() or {}
+            proxy = (regs.get("https") or regs.get("http") or "").strip()
+        except Exception:
+            proxy = ""
+    if proxy:
+        return {"http": proxy, "https": proxy}
+    return None
+
+
+def _jsonable(obj: Any) -> Any:
+    """把 date/datetime 转成 ISO 字符串，避免 HTTPException 二次 500。"""
+    if isinstance(obj, datetime):
+        return obj.isoformat()
+    if isinstance(obj, date):
+        return obj.isoformat()
+    if isinstance(obj, dict):
+        return {str(k): _jsonable(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return [_jsonable(x) for x in obj]
+    return obj
 
 
 def _em_stock_code(code: Any, market: Any) -> Optional[str]:
@@ -232,12 +292,15 @@ class SectorDataFetcher:
                 conn.execute(sa_text(ddl))
             for idx in INDEX_DDL:
                 conn.execute(sa_text(idx))
+            for alt in ALTER_DDL:
+                conn.execute(sa_text(alt))
         return {"ok": True, "tables": [
             "sector_dc_index_daily",
             "sector_dc_daily",
             "sector_moneyflow_daily",
             "sector_dc_member",
             "sector_dc_hierarchy",
+            "ref_sector_dc_basic",
         ]}
 
     def resolve_asof(self, trade_date: Optional[str] = None) -> Dict[str, Any]:
@@ -264,7 +327,15 @@ class SectorDataFetcher:
     # ─── 远端拉取 ─────────────────────────────────────
 
     def fetch_dc_index(self, ymd: str, idx_type: str = IDX_TYPE_INDUSTRY) -> pd.DataFrame:
-        df = self.client.query("dc_index", trade_date=ymd)
+        # Datahubco 现已强制 idx_type；个别旧网关不认该参数时再退回全日拉取。
+        try:
+            df = self.client.query("dc_index", trade_date=ymd, idx_type=idx_type)
+        except RuntimeError as e:
+            msg = str(e).lower()
+            if "idx_type" in msg and "required" not in msg:
+                df = self.client.query("dc_index", trade_date=ymd)
+            else:
+                raise
         if df.empty:
             return df
         df = df.copy()
@@ -343,26 +414,102 @@ class SectorDataFetcher:
             df["rank_no"] = pd.to_numeric(df["rank_no"], errors="coerce").astype("Int64")
         return df
 
+    def fetch_eastmoney_members(self, sector_code: str, ymd: str) -> pd.DataFrame:
+        """东财 clist：fs=b:BKxxxx 拉板块成分股。"""
+        raw = str(sector_code or "").replace(".DC", "").strip().upper()
+        asof = datetime.strptime(_to_ymd(ymd), "%Y%m%d").date()
+        ts_code = _norm_bk_code(raw)
+        rows: List[Dict[str, Any]] = []
+        pn = 1
+        last_err: Optional[Exception] = None
+        while pn <= 30:
+            payload = None
+            for url in EM_CLIST_URLS:
+                try:
+                    payload = self._em_http_json(
+                        url,
+                        {
+                            "pn": str(pn),
+                            "pz": "200",
+                            "po": "1",
+                            "np": "1",
+                            "fltt": "2",
+                            "invt": "2",
+                            "fid": "f3",
+                            "fs": f"b:{raw}",
+                            "fields": "f12,f13,f14,f2,f3,f6",
+                        },
+                        retries=1,
+                        timeout=8.0,
+                    )
+                    break
+                except Exception as e:
+                    last_err = e
+                    time.sleep(0.35)
+                    continue
+            if payload is None:
+                if pn == 1:
+                    raise RuntimeError(f"东财成分失败 {raw}: {last_err}")
+                break
+            data = payload.get("data") or {}
+            diffs = data.get("diff") or []
+            if isinstance(diffs, dict):
+                diffs = list(diffs.values())
+            if not diffs:
+                break
+            for item in diffs:
+                con = _em_stock_code(item.get("f12"), item.get("f13"))
+                if not con:
+                    continue
+                rows.append({
+                    "trade_date": asof,
+                    "ts_code": ts_code,
+                    "con_code": con,
+                    "name": item.get("f14") or con,
+                    "close": _em_num(item.get("f2")),
+                    "pct_chg": _em_num(item.get("f3")),
+                    "amount": _em_num(item.get("f6")),
+                })
+            total = int(data.get("total") or len(rows))
+            if len(rows) >= total:
+                break
+            pn += 1
+        if not rows:
+            return pd.DataFrame()
+        return pd.DataFrame(rows).drop_duplicates(
+            subset=["ts_code", "trade_date", "con_code"], keep="last"
+        )
+
     def fetch_members(self, sector_code: str, ymd: str) -> pd.DataFrame:
-        df = self.client.query("dc_member", ts_code=sector_code, trade_date=ymd)
-        if df.empty:
-            # 部分网关不认 trade_date，再试仅代码
+        sector_code = _norm_bk_code(sector_code)
+        asof = datetime.strptime(_to_ymd(ymd), "%Y%m%d").date()
+        df = pd.DataFrame()
+        if not getattr(self, "_dc_dead", False):
             try:
-                df = self.client.query("dc_member", ts_code=sector_code)
-            except Exception:
-                return pd.DataFrame()
-        if df.empty:
-            return df
-        df = df.copy()
-        df.columns = [str(c).lower() for c in df.columns]
-        if "trade_date" in df.columns:
-            df["trade_date"] = _parse_dates(df["trade_date"])
-        else:
-            df["trade_date"] = datetime.strptime(ymd, "%Y%m%d").date()
-        df["ts_code"] = sector_code
-        if "con_code" in df.columns:
-            df["con_code"] = df["con_code"].astype(str).str.upper()
-        return df.drop_duplicates(subset=["ts_code", "trade_date", "con_code"], keep="last")
+                df = self.client.query("dc_member", ts_code=sector_code, trade_date=ymd)
+            except Exception as e:
+                logger.info("dc_member %s: %s", sector_code, e)
+                if self._api_unavailable(e):
+                    self._dc_dead = True
+                df = pd.DataFrame()
+            if df is None or df.empty:
+                try:
+                    df = self.client.query("dc_member", ts_code=sector_code)
+                except Exception:
+                    df = pd.DataFrame()
+        if df is not None and not df.empty:
+            df = df.copy()
+            df.columns = [str(c).lower() for c in df.columns]
+            df["trade_date"] = asof
+            df["ts_code"] = sector_code
+            if "con_code" in df.columns:
+                df["con_code"] = df["con_code"].astype(str).str.upper()
+            return df.drop_duplicates(subset=["ts_code", "trade_date", "con_code"], keep="last")
+        try:
+            return self.fetch_eastmoney_members(sector_code, ymd)
+        except Exception as e:
+            logger.warning("东财成分 %s: %s", sector_code, e)
+            return pd.DataFrame()
 
     # ─── Upsert ───────────────────────────────────────
 
@@ -426,16 +573,79 @@ class SectorDataFetcher:
         )
 
     def upsert_members(self, df: pd.DataFrame) -> int:
-        cols = ["trade_date", "ts_code", "con_code", "name"]
+        cols = ["trade_date", "ts_code", "con_code", "name", "close", "pct_chg", "amount"]
         return self._upsert_frame(
             "sector_dc_member", df, cols, "ts_code, trade_date, con_code"
         )
 
+    def refresh_catalog(self) -> int:
+        """用最新指数日快照刷新板块目录。"""
+        self.ensure_tables()
+        if not self.engine:
+            return 0
+        sql = sa_text(
+            """
+            INSERT INTO ref_sector_dc_basic (ts_code, name, industry_level, idx_type, updated_at)
+            SELECT DISTINCT ON (ts_code)
+                ts_code, name, industry_level, COALESCE(idx_type, '行业板块'), CURRENT_TIMESTAMP
+            FROM sector_dc_index_daily
+            WHERE idx_type = '行业板块' AND ts_code IS NOT NULL
+            ORDER BY ts_code, trade_date DESC
+            ON CONFLICT (ts_code) DO UPDATE SET
+                name = COALESCE(EXCLUDED.name, ref_sector_dc_basic.name),
+                industry_level = COALESCE(EXCLUDED.industry_level, ref_sector_dc_basic.industry_level),
+                idx_type = COALESCE(EXCLUDED.idx_type, ref_sector_dc_basic.idx_type),
+                updated_at = CURRENT_TIMESTAMP
+            """
+        )
+        with self.engine.begin() as conn:
+            conn.execute(sql)
+            n = conn.execute(sa_text("SELECT COUNT(*) FROM ref_sector_dc_basic")).scalar()
+        return int(n or 0)
+
+    def list_all_industry_boards(self) -> List[Dict[str, str]]:
+        self.ensure_tables()
+        if not self.engine:
+            return []
+        sql = sa_text(
+            """
+            SELECT DISTINCT ON (ts_code) ts_code, name, industry_level
+            FROM (
+                SELECT ts_code, name, industry_level, DATE '9999-12-31' AS trade_date
+                FROM ref_sector_dc_basic
+                WHERE COALESCE(idx_type, '行业板块') = '行业板块'
+                UNION ALL
+                SELECT ts_code, name, industry_level, trade_date
+                FROM sector_dc_index_daily
+                WHERE idx_type = '行业板块'
+            ) t
+            ORDER BY ts_code, trade_date DESC
+            """
+        )
+        with self.engine.connect() as conn:
+            rows = conn.execute(sql).fetchall()
+        seen = set()
+        out: List[Dict[str, str]] = []
+        for row in rows:
+            code = _norm_bk_code(row[0])
+            if not code or code in seen:
+                continue
+            seen.add(code)
+            out.append({
+                "ts_code": code,
+                "name": row[1] or code,
+                "industry_level": row[2] or "",
+            })
+        return out
+
     # ─── 东财行情兜底 ─────────────────────────────────
 
     def _api_unavailable(self, err: Exception) -> bool:
-        msg = str(err)
-        return "unknown api_name" in msg or "HTTP 400" in msg
+        """缺参 400 是调用方问题，不能把整条 dc_* 标死。"""
+        msg = str(err).lower()
+        if "required parameter" in msg:
+            return False
+        return "unknown api_name" in msg or "http 404" in msg or "http 403" in msg
 
     def _level_lookup(self) -> Dict[str, Dict[str, str]]:
         out: Dict[str, Dict[str, str]] = {}
@@ -465,7 +675,7 @@ class SectorDataFetcher:
             logger.warning("读取板块层级缓存失败: %s", e)
         return out
 
-    def _em_http_json(self, url: str, params: Dict[str, Any], retries: int = 1) -> Dict[str, Any]:
+    def _em_http_json(self, url: str, params: Dict[str, Any], retries: int = 3, timeout: float = 15.0) -> Dict[str, Any]:
         headers = {
             "User-Agent": (
                 "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
@@ -474,21 +684,22 @@ class SectorDataFetcher:
             "Referer": "https://quote.eastmoney.com/",
         }
         last_err: Optional[Exception] = None
-        for attempt in range(retries):
-            try:
-                resp = requests.get(
-                    url,
-                    params=params,
-                    timeout=20,
-                    headers=headers,
-                    proxies={"http": None, "https": None},
-                )
-                resp.raise_for_status()
-                payload = resp.json()
-                return payload if isinstance(payload, dict) else {}
-            except Exception as e:
-                last_err = e
-                time.sleep(0.4 * (attempt + 1))
+        for proxies in (_em_proxies(), None):
+            for attempt in range(retries):
+                try:
+                    resp = requests.get(
+                        url,
+                        params=params,
+                        timeout=timeout,
+                        headers={**headers, "Connection": "close"},
+                        proxies=proxies,
+                    )
+                    resp.raise_for_status()
+                    payload = resp.json()
+                    return payload if isinstance(payload, dict) else {}
+                except Exception as e:
+                    last_err = e
+                    time.sleep(0.35 * (attempt + 1))
         raise RuntimeError(f"东财请求失败 {url}: {last_err}")
 
     def eastmoney_last_trade_date(self, bk_code: str = "BK1035") -> Optional[date]:
@@ -547,6 +758,7 @@ class SectorDataFetcher:
                     break
                 except Exception as e:
                     last_err = e
+                    time.sleep(0.25)
                     continue
             if payload is None:
                 raise RuntimeError(f"东财行业 clist 失败: {last_err}")
@@ -744,12 +956,13 @@ class SectorDataFetcher:
         }
         payload = None
         last_err: Optional[Exception] = None
-        for url in EM_KLINE_URLS:
+        for url in (EM_KLINE_URLS[0],):
             try:
-                payload = self._em_http_json(url, params, retries=retries)
+                payload = self._em_http_json(url, params, retries=max(1, retries), timeout=15.0)
                 break
             except Exception as e:
                 last_err = e
+                continue
         if payload is None:
             raise RuntimeError(last_err or "kline empty")
         lines = ((payload.get("data") or {}).get("klines") or [])
@@ -772,6 +985,205 @@ class SectorDataFetcher:
                 "turnover_rate": _em_num(parts[10]) if len(parts) > 10 else None,
             }
         return found
+
+    def _kline_bar_count(self, ts_code: str) -> int:
+        if not self.engine:
+            return 0
+        try:
+            with self.engine.connect() as conn:
+                n = conn.execute(
+                    sa_text("SELECT COUNT(*) FROM sector_dc_daily WHERE ts_code = :c"),
+                    {"c": ts_code},
+                ).scalar()
+            return int(n or 0)
+        except Exception:
+            return 0
+
+    def ensure_kline_history(
+        self,
+        ts_code: str,
+        lookback_days: int = 500,
+        min_bars: int = 60,
+    ) -> Dict[str, Any]:
+        """只补该板块日 K 到 sector_dc_daily，不拉成分股行情。"""
+        self.ensure_tables()
+        code = _norm_bk_code(ts_code)
+        if not code:
+            return {"ok": False, "error": "缺少板块代码"}
+        have = self._kline_bar_count(code)
+        if have >= min_bars:
+            return {"ok": True, "ts_code": code, "skipped": True, "bars": have}
+        name, level = code, "东财二级行业"
+        if self.engine:
+            with self.engine.connect() as conn:
+                row = conn.execute(
+                    sa_text("SELECT name, industry_level FROM ref_sector_dc_basic WHERE ts_code = :c"),
+                    {"c": code},
+                ).fetchone()
+                if not row:
+                    row = conn.execute(
+                        sa_text(
+                            """
+                            SELECT name, industry_level FROM sector_dc_index_daily
+                            WHERE ts_code = :c ORDER BY trade_date DESC LIMIT 1
+                            """
+                        ),
+                        {"c": code},
+                    ).fetchone()
+                if row:
+                    name = row[0] or name
+                    level = row[1] or level
+        end = datetime.now(TZ_SH).date()
+        start = end - timedelta(days=max(120, int(lookback_days)))
+        try:
+            bars = self._em_kline_map(
+                code, start.strftime("%Y%m%d"), end.strftime("%Y%m%d"), retries=1
+            )
+        except Exception as e:
+            return {"ok": False, "ts_code": code, "error": str(e)[:240], "bars": have}
+        index_rows: List[Dict[str, Any]] = []
+        daily_rows: List[Dict[str, Any]] = []
+        for ymd, bar in bars.items():
+            try:
+                day = datetime.strptime(ymd, "%Y%m%d").date()
+            except ValueError:
+                continue
+            if day < start or day > end:
+                continue
+            index_rows.append({
+                "ts_code": code,
+                "trade_date": day,
+                "name": name,
+                "pct_change": bar.get("pct_change"),
+                "idx_type": IDX_TYPE_INDUSTRY,
+                "industry_level": level,
+            })
+            daily_rows.append({
+                "ts_code": code,
+                "trade_date": day,
+                "open": bar.get("open"),
+                "high": bar.get("high"),
+                "low": bar.get("low"),
+                "close": bar.get("close"),
+                "change": bar.get("change"),
+                "pct_change": bar.get("pct_change"),
+                "vol": bar.get("vol"),
+                "amount": bar.get("amount"),
+                "swing": bar.get("swing"),
+                "turnover_rate": bar.get("turnover_rate"),
+                "category": IDX_TYPE_INDUSTRY,
+            })
+        n_daily = self.upsert_daily(pd.DataFrame(daily_rows)) if daily_rows else 0
+        if index_rows:
+            try:
+                self.upsert_index(pd.DataFrame(index_rows))
+            except Exception:
+                pass
+        return {
+            "ok": n_daily > 0 or have > 0,
+            "ts_code": code,
+            "name": name,
+            "level": level,
+            "skipped": False,
+            "daily_rows": n_daily,
+            "bars": self._kline_bar_count(code),
+            "source": "eastmoney_kline",
+        }
+
+    def backfill_all_industry_klines(
+        self,
+        lookback_days: int = 500,
+        min_bars: int = 60,
+        max_workers: int = 1,
+    ) -> Dict[str, Any]:
+        """给一/二/三级行业板块补历史日 K。默认串行，避免连接池卡死。"""
+        self.ensure_tables()
+        self.refresh_catalog()
+        boards = self.list_all_industry_boards()
+        ok = 0
+        skipped = 0
+        failed = 0
+        errors: List[str] = []
+
+        def pull(board: Dict[str, str]) -> Dict[str, Any]:
+            return self.ensure_kline_history(
+                board["ts_code"], lookback_days=lookback_days, min_bars=min_bars
+            )
+
+        workers = max(1, int(max_workers or 1))
+        results: List[Dict[str, Any]] = []
+        if workers == 1:
+            for i, board in enumerate(boards, 1):
+                try:
+                    got = pull(board)
+                    results.append(got)
+                    if i == 1 or i % 20 == 0 or i == len(boards):
+                        logger.info(
+                            "sector kline %d/%d %s bars=%s",
+                            i, len(boards), board.get("ts_code"), got.get("bars"),
+                        )
+                except Exception as e:
+                    failed += 1
+                    errors.append(str(e)[:160])
+        else:
+            from concurrent.futures import ThreadPoolExecutor, as_completed
+            with ThreadPoolExecutor(max_workers=workers) as pool:
+                futs = [pool.submit(pull, b) for b in boards]
+                for fut in as_completed(futs):
+                    try:
+                        results.append(fut.result())
+                    except Exception as e:
+                        failed += 1
+                        errors.append(str(e)[:160])
+        for got in results:
+            if got.get("skipped"):
+                skipped += 1
+                ok += 1
+            elif got.get("ok"):
+                ok += 1
+            else:
+                failed += 1
+                if got.get("error"):
+                    errors.append(f"{got.get('ts_code')}: {got.get('error')}")
+        return {
+            "ok": ok > 0,
+            "boards": len(boards),
+            "filled": ok,
+            "skipped": skipped,
+            "failed": failed,
+            "errors": errors[:12],
+        }
+
+    def sync_all_members(
+        self,
+        trade_date: Optional[str] = None,
+        sleep_s: float = 0.02,
+        skip_existing: bool = True,
+    ) -> Dict[str, Any]:
+        """补齐一/二/三级全部板块成分股。"""
+        self.ensure_tables()
+        meta = self.resolve_asof(trade_date)
+        asof: date = meta["asof_date"]
+        ymd = meta["ymd"]
+        if self.engine:
+            with self.engine.connect() as conn:
+                latest = conn.execute(
+                    sa_text("SELECT MAX(trade_date) FROM sector_dc_index_daily")
+                ).scalar()
+            if latest and latest < asof:
+                asof = latest
+                ymd = asof.strftime("%Y%m%d")
+        boards = self.list_all_industry_boards()
+        if not boards:
+            boards = []
+            for lv in LEVELS:
+                boards.extend(self.list_sectors_by_level(asof, lv))
+        codes = [b["ts_code"] for b in boards]
+        stats = self.ensure_members_for_codes(
+            codes, ymd, asof, sleep_s=sleep_s, skip_existing=skip_existing
+        )
+        stats.update({"ok": True, "asof": asof.isoformat(), "boards": len(codes)})
+        return stats
 
     def _amount_scale(self, boards: Sequence[Dict[str, str]], sample_day: date) -> float:
         """用库内已有成交额校准东财 K 线金额单位。对不上就返回 0，表示这一天不写成交额。"""
@@ -903,7 +1315,7 @@ class SectorDataFetcher:
                 sample_day = conn.execute(
                     sa_text(
                         """
-                        SELECT MAX(trade_date) FROM sector_dc_daily d
+                        SELECT MAX(d.trade_date) FROM sector_dc_daily d
                         JOIN sector_dc_index_daily i
                           ON i.ts_code = d.ts_code AND i.trade_date = d.trade_date
                         WHERE i.industry_level = :lv AND d.amount IS NOT NULL
@@ -1496,6 +1908,7 @@ class SectorDataFetcher:
         member_limit: int = 40,
     ) -> Dict[str, Any]:
         """同步一个 asof 日的行业板块三类主表；可选同步成分股。"""
+        self._dc_dead = False
         self.ensure_tables()
         meta = self.resolve_asof(trade_date)
         ymd = meta["ymd"]
@@ -1597,13 +2010,12 @@ class SectorDataFetcher:
             logger.error("moneyflow 写入失败: %s", e)
             result["errors"]["moneyflow_upsert"] = str(e)
 
-        codes: List[str] = list(fetch_members_for or [])
-        if getattr(self, "_dc_dead", False):
-            result["counts"]["sector_dc_member"] = 0
-            result["member_sectors"] = []
-            result["ok"] = bool(result["counts"].get("sector_dc_index_daily") or result["counts"].get("sector_dc_daily"))
-            return result
+        try:
+            result["counts"]["ref_sector_dc_basic"] = self.refresh_catalog()
+        except Exception as e:
+            logger.warning("刷新板块目录失败: %s", e)
 
+        codes: List[str] = list(fetch_members_for or [])
         if not codes and result["counts"].get("sector_dc_index_daily"):
             try:
                 with self.engine.connect() as conn:
@@ -1641,7 +2053,7 @@ class SectorDataFetcher:
         result["counts"]["sector_dc_member"] = member_n
         result["member_sectors"] = codes
         result["ok"] = bool(result["counts"].get("sector_dc_index_daily") or result["counts"].get("sector_dc_daily"))
-        return result
+        return _jsonable(result)
 
     # ─── 层级（成分包含推断）──────────────────────────
 
@@ -1685,6 +2097,13 @@ class SectorDataFetcher:
         for code in codes:
             if skip_existing:
                 existing = self.member_set(code, asof)
+                if not existing and self.engine:
+                    with self.engine.connect() as conn:
+                        n = conn.execute(
+                            sa_text("SELECT COUNT(*) FROM sector_dc_member WHERE ts_code=:c"),
+                            {"c": code},
+                        ).scalar()
+                    existing = bool(n)
                 if existing:
                     skipped += 1
                     continue

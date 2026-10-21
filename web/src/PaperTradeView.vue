@@ -1,6 +1,8 @@
 <script setup lang="ts">
 import { ref, computed, onMounted, watch, nextTick } from 'vue'
 import axios from 'axios'
+import { formatMessageHtml, renderMarkdown } from './lib/markdown'
+import LlmModelPicker from './LlmModelPicker.vue'
 
 defineOptions({ name: 'PaperTradeView' })
 
@@ -81,6 +83,7 @@ const messages = ref<Message[]>([])
 const inputMessage = ref('')
 const loading = ref(false)
 const selectedModel = ref('deepseek-chat')
+const llmPicker = ref<any>(null)
 const sessionId = ref<string | null>(null)
 const chatBox = ref<HTMLElement | null>(null)
 
@@ -126,14 +129,7 @@ const monPullPct = ref(-3)
 const monStopPct = ref(-5)
 const monTakePct = ref(8)
 const monCooldown = ref(45)
-const monPrompt = ref('')
 const monReportPreview = ref('')
-
-const quickModels = [
-  { id: 'deepseek-chat', name: 'DeepSeek' },
-  { id: 'deepseek-reasoner', name: 'DeepSeek R1' },
-  { id: 'gpt-4o-mini', name: 'GPT-4o Mini' },
-]
 
 const currentAccountLabel = computed(() => {
   if (!account.value) return '未选择账户'
@@ -160,13 +156,6 @@ function fmtPct(v: any) {
   return `${(n * 100).toFixed(2)}%`
 }
 
-function formatContent(text: string): string {
-  if (!text) return ''
-  return String(text)
-    .replace(/\*\*(.*?)\*\*/g, '<strong class="text-emerald-400">$1</strong>')
-    .replace(/`([^`]+)`/g, '<code class="bg-zinc-700 px-1 py-0.5 rounded text-xs text-emerald-300">$1</code>')
-    .replace(/\n/g, '<br>')
-}
 
 function pnlClass(v: any) {
   const n = Number(v)
@@ -473,7 +462,6 @@ async function loadMonitor() {
     monStopPct.value = ratioToPct(s.monitor_stop_loss_pct, -5)
     monTakePct.value = ratioToPct(s.monitor_take_profit_pct, 8)
     monCooldown.value = Number(s.monitor_cooldown_minutes || 45)
-    monPrompt.value = String(s.monitor_report_prompt || setRes.data.default_report_prompt || '')
     monPool.value = poolRes.data.items || []
     monReports.value = repRes.data.reports || []
   } catch {
@@ -492,7 +480,6 @@ async function saveMonitorSettings(extra: Record<string, any> = {}) {
     monitor_stop_loss_pct: pctToRatio(monStopPct.value),
     monitor_take_profit_pct: pctToRatio(monTakePct.value),
     monitor_cooldown_minutes: Number(monCooldown.value) || 45,
-    monitor_report_prompt: monPrompt.value || '',
     ...extra,
   }
   await axios.patch('/paper/monitor/settings', patch)
@@ -800,7 +787,7 @@ async function sendMessage() {
 
     const res = await axios.post('/chat/messages', {
       query: msg,
-      model: selectedModel.value,
+      ...(llmPicker.value?.chatPayload?.() || { model: selectedModel.value }),
       history,
       use_tools: true,
       agent_mode: 'paper_trade',
@@ -961,13 +948,7 @@ onMounted(async () => {
               LLM简报
             </label>
           </div>
-          <div class="text-[10px] text-zinc-600 leading-snug">自己选股监控（与虚拟持仓无关）。勾选 LLM 简报后，按下面的提示词写正文，企业微信和 PushPlus 发送同一份。</div>
-          <textarea
-            v-model="monPrompt"
-            rows="5"
-            class="w-full px-1.5 py-1 rounded bg-zinc-900 border border-zinc-700 text-[10px] leading-snug text-zinc-200 outline-none resize-y"
-            placeholder="写下简报要包含的栏目。留空并保存，则恢复内置四段结构。"
-          />
+          <div class="text-[10px] text-zinc-600 leading-snug">自己选股监控（与虚拟持仓无关）。触发后按代码里的简报结构生成 Markdown，同时发给企业微信和 PushPlus。</div>
           <div class="flex gap-1">
             <input
               v-model="monCode"
@@ -1101,15 +1082,7 @@ onMounted(async () => {
         <div class="text-sm font-semibold text-zinc-200">交易 Agent</div>
         <span class="text-[11px] text-zinc-500">{{ currentAccountLabel }} · 感知→决策→执行→反馈</span>
         <div class="flex-1"></div>
-        <div class="flex gap-1">
-          <button
-            v-for="m in quickModels"
-            :key="m.id"
-            @click="selectedModel = m.id"
-            :class="selectedModel === m.id ? 'bg-emerald-600/25 text-emerald-300 border-emerald-500/40' : 'text-zinc-500 border-transparent hover:text-zinc-300'"
-            class="text-[10px] px-2 py-1 rounded-md border"
-          >{{ m.name }}</button>
-        </div>
+        <LlmModelPicker ref="llmPicker" @update:model="selectedModel = $event" />
         <button @click="startNewChat" class="text-[10px] px-2 py-1 rounded-md bg-zinc-800 text-zinc-400 hover:text-white">新对话</button>
       </div>
 
@@ -1119,10 +1092,14 @@ onMounted(async () => {
             :class="msg.role === 'user'
               ? 'bg-emerald-700 text-white max-w-[80%] px-4 py-2.5 rounded-2xl rounded-tr-md'
               : msg.role === 'system'
-                ? 'bg-zinc-800/70 max-w-[85%] px-4 py-2.5 rounded-2xl border border-zinc-700 text-zinc-400'
-                : 'bg-zinc-800/90 max-w-[85%] px-4 py-2.5 rounded-2xl rounded-tl-md'"
+                ? 'bg-zinc-800/70 max-w-[92%] px-4 py-2.5 rounded-2xl border border-zinc-700 text-zinc-400'
+                : 'bg-zinc-800/90 max-w-[92%] px-4 py-2.5 rounded-2xl rounded-tl-md'"
           >
-            <div class="text-sm leading-relaxed" v-html="formatContent(msg.content)"></div>
+            <div
+              class="text-sm leading-relaxed"
+              :class="msg.role === 'user' ? '' : 'md-body'"
+              v-html="formatMessageHtml(msg.role, msg.content)"
+            ></div>
             <div v-if="msg.toolTrace?.length" class="mt-2 space-y-1">
               <div class="text-[10px] text-amber-400/90">工具轨迹</div>
               <div
@@ -1299,7 +1276,11 @@ onMounted(async () => {
             <div class="text-zinc-500 mt-0.5 line-clamp-2">{{ r.why_summary }}</div>
             <div class="text-zinc-600 mt-1 text-[10px]">{{ r.notified ? '已推送' : '未推送' }} · {{ r.created_at }}</div>
           </div>
-          <div v-if="monReportPreview" class="mt-2 max-h-64 overflow-y-auto rounded-lg border border-zinc-800 bg-zinc-950/60 p-2.5 text-[10px] text-zinc-400 whitespace-pre-wrap leading-relaxed">{{ monReportPreview }}</div>
+          <div
+            v-if="monReportPreview"
+            class="mt-2 max-h-64 overflow-y-auto rounded-lg border border-zinc-800 bg-zinc-950/60 p-2.5 text-[10px] text-zinc-400 leading-relaxed md-body"
+            v-html="renderMarkdown(monReportPreview)"
+          ></div>
         </section>
 
         <section>

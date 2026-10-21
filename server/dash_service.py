@@ -956,9 +956,20 @@ class DashService:
         bars_df = pd.DataFrame()
         is_etf = self._is_etf_code(ts_code)
         is_index = self._is_index_code(ts_code)
+        is_sector = self._is_sector_code(ts_code)
         fallback_msg = ""
         if is_etf:
             daily_table = "etf_daily"
+        elif is_sector:
+            daily_table = "sector_dc_daily"
+            if auto_fill:
+                try:
+                    from data_layer.collectors.datahubco.sectors import sector_fetcher
+                    await asyncio.to_thread(
+                        sector_fetcher.ensure_kline_history, ts_code, 500, 60
+                    )
+                except Exception as e:
+                    logger.warning("板块K线补数跳过 %s: %s", ts_code, e)
         elif is_index:
             daily_table = "index_daily"
         else:
@@ -990,17 +1001,25 @@ class DashService:
                 except Exception as e:
                     logger.warning(f"日线向前续拉失败 {ts_code}: {e}")
         elif timeframe == "week":
-            bars_df = await self._query_bars_pg(ts_code, "stock_weekly", start, end, limit)
-            if bars_df is None or bars_df.empty:
-                logger.info(f"{ts_code} 周K表为空，从日K自动聚合")
+            if is_sector:
                 bars_df = await self._derive_weekly_from_daily(ts_code, limit, daily_table)
-                fallback_msg = "周线数据通过日线聚合生成"
+                fallback_msg = "板块周线由日K聚合"
+            else:
+                bars_df = await self._query_bars_pg(ts_code, "stock_weekly", start, end, limit)
+                if bars_df is None or bars_df.empty:
+                    logger.info(f"{ts_code} 周K表为空，从日K自动聚合")
+                    bars_df = await self._derive_weekly_from_daily(ts_code, limit, daily_table)
+                    fallback_msg = "周线数据通过日线聚合生成"
         elif timeframe == "month":
-            bars_df = await self._query_bars_pg(ts_code, "stock_monthly", start, end, limit)
-            if bars_df is None or bars_df.empty:
-                logger.info(f"{ts_code} 月K表为空，从日K自动聚合")
+            if is_sector:
                 bars_df = await self._derive_monthly_from_daily(ts_code, limit, daily_table)
-                fallback_msg = "月线数据通过日线聚合生成"
+                fallback_msg = "板块月线由日K聚合"
+            else:
+                bars_df = await self._query_bars_pg(ts_code, "stock_monthly", start, end, limit)
+                if bars_df is None or bars_df.empty:
+                    logger.info(f"{ts_code} 月K表为空，从日K自动聚合")
+                    bars_df = await self._derive_monthly_from_daily(ts_code, limit, daily_table)
+                    fallback_msg = "月线数据通过日线聚合生成"
 
         if bars_df is None or bars_df.empty:
             # 仅当 asyncpg 与 SQLAlchemy 都不可用时才用模拟数据
@@ -1040,11 +1059,14 @@ class DashService:
         # 转为 JSON 可序列化格式
         bars = self._df_to_bars(bars_df)
 
-        # 股票/指数/ETF 信息
+        # 股票/指数/ETF/板块 信息
         stock_info = None
         display_name = ts_code
         if is_etf:
             stock_info = await self.get_etf_info(ts_code)
+            display_name = stock_info.get("name", ts_code) if stock_info else ts_code
+        elif is_sector:
+            stock_info = self._sector_info(ts_code)
             display_name = stock_info.get("name", ts_code) if stock_info else ts_code
         else:
             stock_info = await self.get_stock_info(ts_code)
@@ -1065,6 +1087,7 @@ class DashService:
             "stock_info": stock_info,
             "is_index": is_index,
             "is_etf": is_etf,
+            "is_sector": is_sector,
             "message": fallback_msg or None,
         }
 
@@ -1100,6 +1123,53 @@ class DashService:
 
     # ETF代码白名单（快速检测）
     _ETF_CODES = {etf["ts_code"] for etf in POPULAR_ETFS}
+
+    def _is_sector_code(self, ts_code: str) -> bool:
+        s = (ts_code or "").strip().upper()
+        return s.startswith("BK") or s.endswith(".DC")
+
+    def _sector_info(self, ts_code: str) -> Optional[Dict[str, Any]]:
+        engine = self.storage.get_postgres_engine() if self.storage else None
+        if not engine:
+            return None
+        code = ts_code.strip().upper()
+        if code.startswith("BK") and "." not in code:
+            code = f"{code}.DC"
+        try:
+            df = pd.read_sql(
+                sa_text(
+                    """
+                    SELECT ts_code, name, industry_level AS level
+                    FROM ref_sector_dc_basic WHERE ts_code = :c
+                    """
+                ),
+                engine,
+                params={"c": code},
+            )
+            if df.empty:
+                df = pd.read_sql(
+                    sa_text(
+                        """
+                        SELECT ts_code, name, industry_level AS level
+                        FROM sector_dc_index_daily
+                        WHERE ts_code = :c
+                        ORDER BY trade_date DESC LIMIT 1
+                        """
+                    ),
+                    engine,
+                    params={"c": code},
+                )
+            if df.empty:
+                return {"ts_code": code, "name": ts_code}
+            row = df.iloc[0]
+            return {
+                "ts_code": row.get("ts_code") or code,
+                "name": row.get("name") or ts_code,
+                "level": row.get("level"),
+                "kind": "sector",
+            }
+        except Exception:
+            return {"ts_code": code, "name": ts_code}
 
     def _is_index_code(self, ts_code: str) -> bool:
         """判断是否为指数代码"""
@@ -1154,6 +1224,30 @@ class DashService:
 
         try:
             actual_table = table
+
+            if self._is_sector_code(ts_code) or table == "sector_dc_daily":
+                actual_table = "sector_dc_daily"
+                sql = """
+                SELECT trade_date, open, high, low, close,
+                       NULL::double precision AS pre_close,
+                       change, pct_change AS pct_chg, vol, amount
+                FROM sector_dc_daily
+                WHERE ts_code = :code
+                """
+                params = {"code": ts_code}
+                if start:
+                    sql += " AND trade_date >= :start"
+                    params["start"] = start
+                if end:
+                    sql += " AND trade_date <= :end"
+                    params["end"] = end
+                sql += " ORDER BY trade_date DESC LIMIT :limit"
+                params["limit"] = limit
+                df = pd.read_sql(sa_text(sql), engine, params=params)
+                if not df.empty and "trade_date" in df.columns:
+                    df["time"] = pd.to_datetime(df["trade_date"])
+                    df = df.drop(columns=["trade_date"])
+                return df
 
             # ETF 代码：路由到 etf_daily 表
             if self._is_etf_code(ts_code):

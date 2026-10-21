@@ -7,6 +7,8 @@ GET  /data/continuous/plan         - 持续获取计划（骨架）
 """
 
 from fastapi import APIRouter, HTTPException, Query
+from fastapi.encoders import jsonable_encoder
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 from typing import List, Optional
 
@@ -204,7 +206,10 @@ async def continuous_sectors_run(body: SectorSyncRequest = SectorSyncRequest()):
             body.member_limit,
         )
         if not result.get("ok"):
-            raise HTTPException(status_code=400, detail=result.get("error") or result)
+            return JSONResponse(
+                status_code=400,
+                content=jsonable_encoder(result.get("error") or result),
+            )
         return result
     except HTTPException:
         raise
@@ -226,7 +231,10 @@ async def continuous_indices_run(body: IndexSyncRequest = IndexSyncRequest()):
             body.lookback_days,
         )
         if not result.get("ok"):
-            raise HTTPException(status_code=400, detail=result.get("error") or result)
+            return JSONResponse(
+                status_code=400,
+                content=jsonable_encoder(result.get("error") or result),
+            )
         return result
     except HTTPException:
         raise

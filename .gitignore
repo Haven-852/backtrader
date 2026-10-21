@@ -39,7 +39,7 @@ htmlcov/
 .cache
 nosetests.xml
 coverage.xml
-
+data\A股分钟行情
 # Translations
 *.mo
 *.pot
@@ -72,3 +72,19 @@ datas/*.py
 
 # Local InfluxDB engine data (runtime, do not version)
 data/influxdb/
+# 本地行情/大数据目录不入库
+data/
+
+# Secrets / local env
+.env
+backend/.env
+*.env
+!.env.example
+!backend/.env.example
+backend/.env.localbak
+backend/.env.*bak
+
+# 本地临时脚本
+_tmp_*.py
+_run_fill_batch.py
+

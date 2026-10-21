@@ -830,7 +830,6 @@ class MonitorSettingsPatch(BaseModel):
     monitor_cooldown_minutes: Optional[int] = None
     monitor_use_llm: Optional[bool] = None
     monitor_model: Optional[str] = None
-    monitor_report_prompt: Optional[str] = None
     monitor_enable_daily_drop: Optional[bool] = None
     monitor_enable_daily_rise: Optional[bool] = None
     monitor_enable_peak_pullback: Optional[bool] = None

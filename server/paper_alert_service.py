@@ -450,7 +450,7 @@ class PaperAlertService:
             chat_type = int((os.getenv("WECOM_AIBOT_CHAT_TYPE") or "1").strip() or "1")
         except ValueError:
             chat_type = 1
-        body = f"**{title}**\n{content}"[:4000]
+        body = f"**{title}**\n{content}"[:6000]
         try:
             frames = _aibot_roundtrip([
                 _aibot_subscribe(bot_id, secret),

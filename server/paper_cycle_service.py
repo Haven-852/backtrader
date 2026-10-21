@@ -135,7 +135,6 @@ DEFAULT_CONFIG = {
     "monitor_cooldown_minutes": 45,
     "monitor_use_llm": True,
     "monitor_model": "deepseek-chat",
-    "monitor_report_prompt": "",
     "monitor_enable_daily_drop": True,
     "monitor_enable_daily_rise": True,
     "monitor_enable_peak_pullback": True,

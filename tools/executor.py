@@ -38,6 +38,12 @@ async def execute_tool(skill_id: str, tool_id: str, payload: Dict[str, Any] | No
         from tools.kb_market_toolkit import kb_market_toolkit
         return kb_market_toolkit.build_today(payload.get("trade_date"))
 
+    if skill_id == "auction-screen":
+        return await _exec_auction_screen(tool_id, payload)
+
+    if skill_id == "sector-intraday":
+        return await _exec_sector_intraday(tool_id, payload)
+
     # QuantSkills 外部包
     from tools.quantskill_runtime import PACKAGE_DIRS, execute_quantskill
     if skill_id in PACKAGE_DIRS:
@@ -248,6 +254,34 @@ async def _exec_sql_toolkit(sql_toolkit, tool_id: str, payload: Dict[str, Any]) 
             return {"ok": False, "error": "缺少参数 question"}
         return await sql_toolkit.natural_language_query(str(question))
 
+    if tool_id in ("list-custom-tables", "list_custom_tables"):
+        return await sql_toolkit.list_custom_tables()
+
+    if tool_id in ("create-custom-table", "create_custom_table"):
+        prompt = payload.get("prompt") or payload.get("question") or ""
+        if not prompt:
+            return {"ok": False, "error": "缺少参数 prompt（用自然语言描述要建的表）"}
+        profile_id = payload.get("profile_id")
+        dry_run = payload.get("dry_run")
+        if isinstance(dry_run, str):
+            dry_run = dry_run.strip().lower() in ("1", "true", "yes", "y")
+        return await sql_toolkit.create_custom_table(
+            str(prompt),
+            profile_id=int(profile_id) if profile_id not in (None, "") else None,
+            dry_run=bool(dry_run),
+            table_name=payload.get("table_name"),
+            user_id=str(payload.get("user_id") or "default"),
+        )
+
+    if tool_id in ("delete-custom-table", "delete_custom_table"):
+        table_name = payload.get("table_name") or payload.get("name") or ""
+        if not table_name:
+            return {"ok": False, "error": "缺少参数 table_name（仅可删自己创建的 u_* 表）"}
+        return await sql_toolkit.delete_custom_table(
+            str(table_name),
+            user_id=str(payload.get("user_id") or "default"),
+        )
+
     return {"ok": False, "error": f"未知工具: {tool_id}"}
 
 
@@ -341,6 +375,93 @@ async def _exec_datahubco(toolkit, tool_id: str, payload: Dict[str, Any]) -> Dic
             source=str(payload.get("source") or "auto"),
             write_back=bool(write_back),
             include_auction=bool(include_auction),
+        )
+
+    if tool_id in ("sanitize-ml-train-daily", "sanitize_ml_train_daily"):
+        from tools.ml_train_sanitize_toolkit import ml_train_sanitize_toolkit
+
+        return await ml_train_sanitize_toolkit.run_async(
+            action=str(payload.get("action") or "audit"),
+            limit=payload.get("limit"),
+            offset=int(payload.get("offset") or 0),
+            skip_gaps=payload.get("skip_gaps"),
+            dry_run=payload.get("dry_run"),
+            limit_rows=payload.get("limit_rows") or payload.get("limit"),
+            from_row=payload.get("from_row"),
+            fill_gaps_after=payload.get("fill_gaps_after"),
+            max_batches=payload.get("max_batches"),
+            reset=payload.get("reset"),
+        )
+
+    if tool_id in ("fill-market-universe", "fill_market_universe"):
+        from tools.market_universe_toolkit import market_universe_toolkit
+
+        sync_basic = payload.get("sync_stock_basic")
+        if sync_basic is None:
+            sync_basic = True
+        return await market_universe_toolkit.run_async(
+            action=str(payload.get("action") or "fill"),
+            list_status=str(payload.get("list_status") or "L"),
+            page_size=int(payload.get("page_size") or payload.get("limit") or 5000),
+            sync_stock_basic=bool(sync_basic),
+            max_pages=int(payload.get("max_pages") or 20),
+        )
+
+    if tool_id in ("fill-ml-train-daily", "fill_ml_train_daily"):
+        from tools.ml_train_toolkit import ml_train_toolkit
+
+        return await ml_train_toolkit.run_async(
+            action=str(payload.get("action") or "check_env"),
+            ts_code=payload.get("ts_code"),
+            start_date=payload.get("start_date") or "2016-01-01",
+            end_date=payload.get("end_date"),
+            limit=int(payload.get("limit") or 1),
+            offset=int(payload.get("offset") or 0),
+            skip_env_check=bool(payload.get("skip_env_check") or False),
+            skip_existing=False if payload.get("skip_existing") is False else True,
+            only_mainboard=bool(payload.get("only_mainboard") or False),
+            upsert_chunk=int(payload.get("upsert_chunk") or 500),
+            fetch_index=False if payload.get("fetch_index") is False else True,
+            require_ram_gb=payload.get("require_ram_gb"),
+            ts_codes=payload.get("ts_codes"),
+            limit_days=payload.get("limit_days"),
+            allow_defaults=False if payload.get("allow_defaults") is False else True,
+            fetch_sw_proxy=False if payload.get("fetch_sw_proxy") is False else True,
+            from_row=payload.get("from_row"),
+            reset=payload.get("reset"),
+            auto_fill=payload.get("auto_fill"),
+        )
+
+    if tool_id in ("fill-mainboard-mins", "fill_mainboard_mins"):
+        write_back = payload.get("write_back")
+        if write_back is None:
+            write_back = True
+        include_auction = payload.get("include_auction")
+        if include_auction is None:
+            include_auction = True
+        skip_existing = payload.get("skip_existing")
+        if skip_existing is None:
+            skip_existing = True
+        only_traded = payload.get("only_traded")
+        if only_traded is None:
+            only_traded = True
+        exclude_st = payload.get("exclude_st")
+        if exclude_st is None:
+            exclude_st = True
+        limit = payload.get("limit")
+        return await toolkit.fill_mainboard_mins_async(
+            trade_date=payload.get("trade_date"),
+            action=str(payload.get("action") or "fill"),
+            source=str(payload.get("source") or "auto"),
+            write_back=bool(write_back),
+            include_auction=bool(include_auction),
+            skip_existing=bool(skip_existing),
+            min_bars=int(payload.get("min_bars") or 60),
+            max_workers=int(payload.get("max_workers") or 6),
+            limit=int(limit) if limit not in (None, "") else None,
+            offset=int(payload.get("offset") or 0),
+            only_traded=bool(only_traded),
+            exclude_st=bool(exclude_st),
         )
 
     if tool_id == "ensure-and-get":
@@ -463,4 +584,37 @@ async def _exec_datahubco(toolkit, tool_id: str, payload: Dict[str, Any]) -> Dic
             limit=int(payload.get("limit") or 50),
         )
 
+    return {"ok": False, "error": f"未知工具: {tool_id}"}
+
+
+async def _exec_auction_screen(tool_id: str, payload: Dict[str, Any]) -> Dict[str, Any]:
+    import asyncio
+
+    from tools.auction_screen_toolkit import auction_screen_toolkit
+
+    if tool_id in ("mainboard-buy", "mainboard_buy"):
+        return await asyncio.to_thread(
+            auction_screen_toolkit.screen_mainboard_buy,
+            payload.get("trade_date"),
+            int(payload.get("top_n") or 20),
+            float(payload.get("strong_pct") or 5.0),
+            int(payload.get("strong_top_n") or 80),
+            bool(payload["fetch_missing"]) if "fetch_missing" in payload else True,
+        )
+    return {"ok": False, "error": f"未知工具: {tool_id}"}
+
+
+async def _exec_sector_intraday(tool_id: str, payload: Dict[str, Any]) -> Dict[str, Any]:
+    import asyncio
+
+    from tools.sector_intraday_toolkit import sector_intraday_toolkit
+
+    if tool_id in ("l2-tone", "l2_tone"):
+        return await asyncio.to_thread(
+            sector_intraday_toolkit.l2_intraday_tone,
+            payload.get("trade_date"),
+            int(payload.get("top_n") or 10),
+            int(payload.get("member_limit") or 15),
+            int(payload.get("sample_every_min") or 5),
+        )
     return {"ok": False, "error": f"未知工具: {tool_id}"}

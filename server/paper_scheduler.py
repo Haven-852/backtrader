@@ -268,7 +268,6 @@ class PaperScheduler:
         if aid and alert_on and bucket and bucket != last_alert:
             try:
                 from server.paper_alert_service import paper_alert_service
-                import asyncio
 
                 logger.info("定时器：持仓告警扫描 %s account=%s", bucket, aid)
                 result = await asyncio.to_thread(

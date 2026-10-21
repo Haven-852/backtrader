@@ -1627,6 +1627,368 @@ class DatahubcoToolkit:
             "note": note,
         }
 
+    # ------------------------------------------------------------------ #
+    # 主板全市场分时批量（训练 LightGBM 用）
+    # ------------------------------------------------------------------ #
+    MAINBOARD_INDEX_KEY = "intraday:mainboard:{ymd}:codes"
+
+    def _list_mainboard_codes(
+        self,
+        trade_date: date,
+        *,
+        only_traded: bool = True,
+        exclude_st: bool = True,
+    ) -> List[Dict[str, str]]:
+        """沪主板 60xxxx.SH + 深主板 00xxxx.SZ。"""
+        from data_layer.db_manager import storage_manager
+        from sqlalchemy import text as sa_text
+
+        eng = storage_manager.get_postgres_engine()
+        if not eng:
+            return []
+        with eng.connect() as conn:
+            if only_traded:
+                rows = conn.execute(
+                    sa_text(
+                        """
+                        SELECT d.ts_code, COALESCE(b.name, '') AS name
+                        FROM stock_daily d
+                        LEFT JOIN ref_stock_basic b ON b.ts_code = d.ts_code
+                        WHERE d.trade_date = :d
+                          AND (
+                            d.ts_code LIKE '60%.SH'
+                            OR d.ts_code LIKE '00%.SZ'
+                          )
+                        ORDER BY d.ts_code
+                        """
+                    ),
+                    {"d": trade_date},
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    sa_text(
+                        """
+                        SELECT ts_code, COALESCE(name, '') AS name
+                        FROM ref_stock_basic
+                        WHERE COALESCE(list_status, 'L') = 'L'
+                          AND (
+                            ts_code LIKE '60%.SH'
+                            OR ts_code LIKE '00%.SZ'
+                          )
+                        ORDER BY ts_code
+                        """
+                    )
+                ).fetchall()
+        out = []
+        for r in rows:
+            code = str(r.ts_code or "").upper()
+            name = str(r.name or "")
+            if exclude_st and ("ST" in name.upper()):
+                continue
+            out.append({"ts_code": code, "name": name})
+        return out
+
+    def _mins_bar_count_local(self, ts_code: str, trade_date: date) -> Dict[str, int]:
+        """本地 Redis / PG 已有分钟根数。"""
+        redis_n = 0
+        pg_n = 0
+        try:
+            redis_n = int(self.intraday.redis_bars_count(ts_code, trade_date) or 0)
+        except Exception:
+            pass
+        try:
+            df = self.intraday.query_pg(ts_code, trade_date)
+            pg_n = 0 if df is None else int(len(df))
+        except Exception:
+            pass
+        return {"redis": redis_n, "pg": pg_n, "best": max(redis_n, pg_n)}
+
+    def _save_mainboard_index(self, trade_date: date, codes: List[str]) -> bool:
+        r = None
+        try:
+            from data_layer.db_manager import storage_manager
+
+            r = storage_manager.get_redis_client()
+        except Exception:
+            return False
+        if not r:
+            return False
+        key = self.MAINBOARD_INDEX_KEY.format(ymd=trade_date.strftime("%Y%m%d"))
+        try:
+            pipe = r.pipeline()
+            pipe.delete(key)
+            if codes:
+                pipe.sadd(key, *codes)
+                pipe.expire(key, 48 * 3600)
+            pipe.execute()
+            return True
+        except Exception as e:
+            logger.warning("写主板分时索引失败: %s", e)
+            return False
+
+    def _load_mainboard_index(self, trade_date: date) -> List[str]:
+        try:
+            from data_layer.db_manager import storage_manager
+
+            r = storage_manager.get_redis_client()
+            if not r:
+                return []
+            key = self.MAINBOARD_INDEX_KEY.format(ymd=trade_date.strftime("%Y%m%d"))
+            members = r.smembers(key) or set()
+            out = []
+            for m in members:
+                if isinstance(m, bytes):
+                    m = m.decode("utf-8", errors="ignore")
+                out.append(str(m).upper())
+            return sorted(out)
+        except Exception:
+            return []
+
+    def fill_mainboard_mins(
+        self,
+        trade_date: Optional[str] = None,
+        *,
+        action: str = "fill",
+        source: str = "auto",
+        write_back: bool = True,
+        include_auction: bool = True,
+        skip_existing: bool = True,
+        min_bars: int = 60,
+        max_workers: int = 6,
+        limit: Optional[int] = None,
+        offset: int = 0,
+        only_traded: bool = True,
+        exclude_st: bool = True,
+    ) -> Dict[str, Any]:
+        """
+        批量拉取主板个股当日 1 分钟分时 → Redis（主缓存）+ Timescale PG。
+
+        action:
+          - fill: 批量补数（默认）
+          - status: 只统计覆盖，不拉远端
+          - index: 返回 Redis 训练索引里的代码列表
+
+        训练读取：
+          - Redis key 单票：intraday:{ts_code}:{YYYYMMDD}
+          - Redis 索引集合：intraday:mainboard:{YYYYMMDD}:codes
+        """
+        try:
+            phase = self.intraday.session_phase()
+            d = _parse_date(trade_date) or phase.get("trade_date") or datetime.now().date()
+            action = (action or "fill").strip().lower()
+            if action not in ("fill", "status", "index"):
+                return {"ok": False, "error": "action 应为 fill / status / index"}
+
+            if action == "index":
+                codes = self._load_mainboard_index(d)
+                return {
+                    "ok": True,
+                    "action": "index",
+                    "trade_date": d.isoformat(),
+                    "count": len(codes),
+                    "codes": codes,
+                    "redis_index_key": self.MAINBOARD_INDEX_KEY.format(ymd=d.strftime("%Y%m%d")),
+                    "redis_bar_key_pattern": "intraday:{ts_code}:" + d.strftime("%Y%m%d"),
+                    "note": "用索引 codes 批量读 Redis 单票 key，即可组装 LightGBM 训练样本。",
+                }
+
+            universe = self._list_mainboard_codes(
+                d, only_traded=bool(only_traded), exclude_st=bool(exclude_st)
+            )
+            total = len(universe)
+            if total == 0:
+                return {
+                    "ok": False,
+                    "error": (
+                        f"{d.isoformat()} 主板股票池为空。"
+                        "若 only_traded=true，请先确保当日 stock_daily 已入库；"
+                        "或设 only_traded=false 用 ref_stock_basic 全列表。"
+                    ),
+                    "trade_date": d.isoformat(),
+                }
+
+            offset = max(0, int(offset or 0))
+            if limit is None or int(limit) <= 0:
+                slice_u = universe[offset:]
+            else:
+                slice_u = universe[offset : offset + int(limit)]
+
+            # status：只扫本地覆盖
+            if action == "status":
+                redis_ok = pg_ok = both = 0
+                samples = []
+                for item in slice_u:
+                    code = item["ts_code"]
+                    cnt = self._mins_bar_count_local(code, d)
+                    if cnt["redis"] >= int(min_bars):
+                        redis_ok += 1
+                    if cnt["pg"] >= int(min_bars):
+                        pg_ok += 1
+                    if cnt["best"] >= int(min_bars):
+                        both += 1
+                    if len(samples) < 8:
+                        samples.append({"ts_code": code, **cnt})
+                indexed = self._load_mainboard_index(d)
+                return {
+                    "ok": True,
+                    "action": "status",
+                    "trade_date": d.isoformat(),
+                    "universe_total": total,
+                    "checked": len(slice_u),
+                    "offset": offset,
+                    "min_bars": int(min_bars),
+                    "redis_ready": redis_ok,
+                    "pg_ready": pg_ok,
+                    "local_ready": both,
+                    "coverage_pct": round(100.0 * both / max(1, len(slice_u)), 2),
+                    "index_count": len(indexed),
+                    "samples": samples,
+                    "redis_index_key": self.MAINBOARD_INDEX_KEY.format(ymd=d.strftime("%Y%m%d")),
+                    "next_hint": (
+                        "覆盖不足时调用 fill-mainboard-mins action=fill；"
+                        "可设 limit/offset 分批，或一次拉全量（较慢）。"
+                    ),
+                }
+
+            # fill
+            max_workers = max(1, min(int(max_workers or 6), 12))
+            min_bars = max(1, int(min_bars or 60))
+            source = (source or "auto").strip().lower()
+            ok_codes: List[str] = []
+            skipped: List[str] = []
+            failed: List[Dict[str, str]] = []
+            fetched_n = 0
+            redis_written_n = 0
+
+            # 先并入已有索引，便于增量
+            existing_index = set(self._load_mainboard_index(d))
+
+            def one(item: Dict[str, str]) -> Dict[str, Any]:
+                code = item["ts_code"]
+                local = self._mins_bar_count_local(code, d)
+                if skip_existing and local["best"] >= min_bars:
+                    # 确保 Redis 也有一份（训练优先 Redis）
+                    if local["redis"] < min_bars and write_back and local["pg"] >= min_bars:
+                        try:
+                            packed = self.intraday.get(
+                                ts_code=code,
+                                trade_date=d.strftime("%Y%m%d"),
+                                history=False,
+                            )
+                            # get() 会在有数据时写入 redis
+                            return {
+                                "ts_code": code,
+                                "status": "skipped_warm_redis",
+                                "bars": int((packed or {}).get("count") or local["best"]),
+                                "redis_written": bool((packed or {}).get("redis_written")),
+                                "source": (packed or {}).get("source") or "local",
+                            }
+                        except Exception:
+                            pass
+                    return {
+                        "ts_code": code,
+                        "status": "skipped_existing",
+                        "bars": local["best"],
+                        "redis_written": local["redis"] >= min_bars,
+                        "source": "local",
+                    }
+                try:
+                    packed = self.get_mins(
+                        ts_code=code,
+                        trade_date=d.isoformat(),
+                        limit=500,
+                        source=source if source in ("auto", "pg", "datahubco") else "auto",
+                        write_back=bool(write_back),
+                        include_auction=bool(include_auction),
+                    )
+                    if not packed.get("ok"):
+                        return {
+                            "ts_code": code,
+                            "status": "failed",
+                            "error": str(packed.get("error") or "无分时"),
+                        }
+                    n = int(packed.get("count") or 0)
+                    # get_mins auto 路径可能已写 Redis；再确认
+                    redis_n = self._mins_bar_count_local(code, d)["redis"]
+                    return {
+                        "ts_code": code,
+                        "status": "ok" if n >= min_bars else "thin",
+                        "bars": n,
+                        "redis_bars": redis_n,
+                        "redis_written": redis_n > 0,
+                        "source": packed.get("source_used"),
+                        "fetched_remote": bool(packed.get("fetched_remote")),
+                    }
+                except Exception as e:
+                    return {"ts_code": code, "status": "failed", "error": str(e)[:200]}
+
+            from concurrent.futures import ThreadPoolExecutor, as_completed
+
+            results = []
+            with ThreadPoolExecutor(max_workers=max_workers) as pool:
+                futs = {pool.submit(one, it): it["ts_code"] for it in slice_u}
+                for fut in as_completed(futs):
+                    results.append(fut.result())
+
+            for r in results:
+                st = r.get("status")
+                code = r.get("ts_code")
+                if st in ("ok", "skipped_existing", "skipped_warm_redis", "thin"):
+                    if int(r.get("bars") or 0) > 0 or int(r.get("redis_bars") or 0) > 0:
+                        ok_codes.append(code)
+                    if st.startswith("skipped"):
+                        skipped.append(code)
+                    if r.get("fetched_remote"):
+                        fetched_n += 1
+                    if r.get("redis_written"):
+                        redis_written_n += 1
+                    if st == "thin" and int(r.get("bars") or 0) < min_bars:
+                        failed.append({"ts_code": code, "error": f"分钟数不足 bars={r.get('bars')}"})
+                else:
+                    failed.append({"ts_code": code, "error": r.get("error") or st})
+
+            all_ready = sorted(set(existing_index) | set(ok_codes))
+            index_ok = self._save_mainboard_index(d, all_ready)
+            next_offset = offset + len(slice_u)
+            more = next_offset < total
+
+            return {
+                "ok": True,
+                "action": "fill",
+                "trade_date": d.isoformat(),
+                "universe_total": total,
+                "batch_size": len(slice_u),
+                "offset": offset,
+                "next_offset": next_offset if more else None,
+                "has_more": more,
+                "ok_count": len(ok_codes),
+                "skipped_count": len(skipped),
+                "failed_count": len(failed),
+                "fetched_remote": fetched_n,
+                "redis_written": redis_written_n,
+                "index_count": len(all_ready),
+                "index_saved": index_ok,
+                "redis_index_key": self.MAINBOARD_INDEX_KEY.format(ymd=d.strftime("%Y%m%d")),
+                "redis_bar_key_pattern": "intraday:{ts_code}:" + d.strftime("%Y%m%d"),
+                "failed_samples": failed[:20],
+                "ok_samples": ok_codes[:20],
+                "training_hint": (
+                    "LightGBM：先 action=index 取 codes，再按 intraday:{code}:{ymd} 从 Redis "
+                    "读 bars（含 open/high/low/close/vol/amount）。也可用 PG stock_intraday_mins。"
+                ),
+                "next_hint": (
+                    f"还有剩余，请用 offset={next_offset} 继续调用。"
+                    if more
+                    else "本批已覆盖当前切片；可用 action=status 检查全市场覆盖。"
+                ),
+            }
+        except Exception as e:
+            logger.exception("fill_mainboard_mins failed")
+            return {"ok": False, "error": str(e)}
+
+    async def fill_mainboard_mins_async(self, **kwargs) -> Dict[str, Any]:
+        return await asyncio.to_thread(self.fill_mainboard_mins, **kwargs)
+
     # async wrappers
     async def list_datasets_async(self) -> Dict[str, Any]:
         return await asyncio.to_thread(self.list_datasets)

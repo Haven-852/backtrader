@@ -103,6 +103,11 @@ class SQLToolkitManager:
             if kw in sql_upper.split():
                 return f"禁止使用 {kw} 操作。仅允许只读查询。"
 
+        from server.hidden_tables import sql_touches_hidden
+
+        if sql_touches_hidden(stripped):
+            return "内部配置表不可查询。"
+
         return None
 
     # ─────────────────────────────────────────────────
@@ -131,7 +136,9 @@ class SQLToolkitManager:
                 for k, v in t.items():
                     if hasattr(v, "item"):
                         t[k] = v.item()
+            from server.hidden_tables import drop_hidden_table_rows
 
+            tables = drop_hidden_table_rows(tables, "tablename")
             return {"ok": True, "tables": tables, "count": len(tables)}
         except Exception as e:
             logger.error(f"列出表失败: {e}")
@@ -147,6 +154,9 @@ class SQLToolkitManager:
                     self.engine,
                 )
                 tables = df.to_dict(orient="records")
+                from server.hidden_tables import drop_hidden_table_rows
+
+                tables = drop_hidden_table_rows(tables, "tablename")
                 return {"ok": True, "tables": tables, "count": len(tables), "fallback": True}
             except Exception as e0:
                 logger.warning(f"information_schema 列表示败: {e0}")
@@ -158,7 +168,10 @@ class SQLToolkitManager:
                     tool = ListSQLDatabaseTool(db=self.db)
                     result = await tool.arun(tool_input="")
                     tables = [t.strip() for t in result.split(",") if t.strip()]
-                    return {"ok": True, "tables": [{"tablename": t} for t in tables], "count": len(tables)}
+                    from server.hidden_tables import drop_hidden_table_rows
+
+                    rows = drop_hidden_table_rows([{"tablename": t} for t in tables], "tablename")
+                    return {"ok": True, "tables": rows, "count": len(rows)}
                 except Exception as e2:
                     return {"ok": False, "error": str(e2), "tables": []}
 
@@ -177,6 +190,11 @@ class SQLToolkitManager:
         if self.engine:
             try:
                 tnames = [t.strip() for t in table_names.split(",") if t.strip()]
+                from server.hidden_tables import is_hidden_pg_table
+
+                hidden = [t for t in tnames if is_hidden_pg_table(t)]
+                if hidden:
+                    return {"ok": False, "error": "内部配置表不可查看"}
                 all_cols = []
                 for tname in tnames:
                     sql = """
@@ -323,6 +341,63 @@ class SQLToolkitManager:
                 "suggestion": "手动写 SQL",
             }
         except Exception as e:
+            return {"ok": False, "error": str(e)}
+
+    # ─────────────────────────────────────────────────
+    # Tool 6/7: 用户自定义表（大模型建表 + 目录）
+    # ─────────────────────────────────────────────────
+
+    async def list_custom_tables(self) -> dict:
+        """列出可供大模型使用的用户自定义表。"""
+        try:
+            from server.custom_table_service import custom_table_service
+
+            custom_table_service.ensure()
+            catalog = custom_table_service.llm_catalog()
+            return {"ok": True, "tables": catalog, "count": len(catalog)}
+        except Exception as e:
+            return {"ok": False, "error": str(e), "tables": []}
+
+    async def create_custom_table(
+        self,
+        prompt: str,
+        *,
+        profile_id=None,
+        dry_run: bool = False,
+        table_name=None,
+        user_id: str = "default",
+    ) -> dict:
+        """
+        用自然语言描述需求，经大模型设计后创建 u_ 前缀表。
+        建表后可 list-tables / info-table / query-exec。
+        """
+        try:
+            from server.custom_table_service import custom_table_service
+
+            return await custom_table_service.ai_create(
+                prompt,
+                profile_id=profile_id,
+                user_id=user_id,
+                dry_run=dry_run,
+                for_llm=True,
+                table_name_override=table_name,
+            )
+        except ValueError as e:
+            return {"ok": False, "error": str(e)}
+        except Exception as e:
+            logger.exception("create_custom_table failed")
+            return {"ok": False, "error": str(e)}
+
+    async def delete_custom_table(self, table_name: str, *, user_id: str = "default") -> dict:
+        """仅删除用户自己创建的自定义表；系统表一律拒绝。"""
+        try:
+            from server.custom_table_service import custom_table_service
+
+            return custom_table_service.delete_table(table_name, user_id=user_id)
+        except ValueError as e:
+            return {"ok": False, "error": str(e)}
+        except Exception as e:
+            logger.exception("delete_custom_table failed")
             return {"ok": False, "error": str(e)}
 
 

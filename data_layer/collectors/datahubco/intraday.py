@@ -628,9 +628,20 @@ class IntradayFetcher:
         return self._normalize_mins_df(ts_code, df, trade_date)
 
     def fetch_remote(self, ts_code: str, trade_date: date, live: bool = False) -> pd.DataFrame:
+        """拉取远端 1 分钟。
+
+        优先级：最近交易日（含周末对应的上一个交易日）→ 腾讯/东财实时分时；
+        其余历史日或实时源失败 → Datahubco stk_mins（可能未开权限）。
+        """
         today = datetime.now(TZ_SH).date()
+        try:
+            session_trade = self.session_phase().get("trade_date") or today
+        except Exception:
+            session_trade = today
+        # 日历今天或会话最近交易日：腾讯/东财比 stk_mins 更稳（尤其盘后/周末）
+        prefer_live_quote = trade_date == today or trade_date == session_trade
         session_df = pd.DataFrame()
-        if trade_date == today:
+        if prefer_live_quote:
             qq = self.fetch_tencent_today(ts_code, trade_date)
             if qq is not None and not qq.empty:
                 session_df = qq
@@ -641,7 +652,7 @@ class IntradayFetcher:
         if session_df is None or session_df.empty:
             session_df = self.fetch_stk_mins(ts_code, trade_date)
         auction_df = pd.DataFrame()
-        if trade_date == today:
+        if prefer_live_quote:
             auction_df = self.fetch_eastmoney_auction(ts_code, trade_date)
         return self._combine_auction_and_session(auction_df, session_df)
 
