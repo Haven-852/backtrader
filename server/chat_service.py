@@ -46,6 +46,7 @@ class ChatRequest:
     system_prompt: Optional[str] = None
     temperature: float = 0.7
     max_tokens: int = 4096
+    thinking: Optional[str] = None
     # 交易 Agent：paper_trade 模式仅暴露纸面工具
     agent_mode: Optional[str] = None  # "paper_trade" | None
     tool_skills: Optional[List[str]] = None
@@ -154,6 +155,8 @@ class ChatService:
         "deepseek-chat": "deepseek",
         "deepseek-reasoner": "deepseek",
         "deepseek-r1": "deepseek",
+        "deepseek-flash": "deepseek",
+        "deepseek-v4-pro": "deepseek",
         "deepseek": "deepseek",
         # Anthropic 系列
         "claude-3-opus": "anthropic",
@@ -253,7 +256,7 @@ class ChatService:
             if ":" in (model or ""):
                 actual_model = model
         elif provider:
-            actual_model = model
+            actual_model = provider.default_model if model in (provider_name, "deepseek", "openai") else model
         else:
             actual_model = model
 
@@ -368,22 +371,29 @@ class ChatService:
         self, provider: ModelProvider, model: str, messages: List[Dict], request: ChatRequest
     ) -> ChatResponse:
         """OpenAI 兼容格式的对话调用"""
+        payload = {
+            "model": model,
+            "messages": messages,
+            "temperature": request.temperature,
+            "max_tokens": request.max_tokens,
+        }
+        if request.thinking == "disabled":
+            payload["thinking"] = {"type": "disabled"}
         async with httpx.AsyncClient(timeout=120.0) as client:
             resp = await client.post(
                 provider.get_chat_url(),
                 headers=provider.get_headers(),
-                json={
-                    "model": model,
-                    "messages": messages,
-                    "temperature": request.temperature,
-                    "max_tokens": request.max_tokens,
-                },
+                json=payload,
             )
             resp.raise_for_status()
             data = resp.json()
             choice = data["choices"][0]
+            message = choice.get("message") or {}
+            content = message.get("content") or ""
+            if not str(content).strip():
+                content = message.get("reasoning_content") or ""
             return ChatResponse(
-                content=choice["message"]["content"],
+                content=content or "",
                 model=data.get("model", model),
                 provider=request.provider,
                 usage=data.get("usage", {}),

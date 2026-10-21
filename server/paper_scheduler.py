@@ -5,9 +5,10 @@
 - 交易日 09:30：对绑定账户跑一键日课（T+1 日切 + 风控 + 一次分时做T）
 - 交易日 13:00：判断持仓明天上涨概率，大于 60% 满仓，否则留出 20% 现金
 - 交易日 09:30–11:30、13:00–15:00：每 5 分钟对 watchlist 再扫一次分时做T
+- 同频：若开启 alert_auto_enabled，对绑定账户做持仓告警扫描并推送（微信/企微等）
 - 交易日周五 15:10：周复盘（可关）
 
-依赖后端进程一直运行。晚间选股、开市日课、周复盘每个日历日只跑一次；盘中做T每个 5 分钟格子跑一次。
+依赖后端进程一直运行。晚间选股、开市日课、周复盘每个日历日只跑一次；盘中做T/告警每个 5 分钟格子跑一次。
 """
 
 from __future__ import annotations
@@ -257,6 +258,52 @@ class PaperScheduler:
             logger.info("盘中做T完成 ok=%s count=%s", result.get("ok"), result.get("count"))
             if not result.get("ok"):
                 self.last_error = str(result.get("error"))
+
+        # 持仓告警：盘中与做T同频；也可在仅开启告警时扫描
+        cfg = paper_cycle_service.get_config().get("config") or {}
+        aid = cfg.get("scheduler_account_id")
+        alert_on = bool(cfg.get("alert_auto_enabled"))
+        bucket = self.session_bucket(now, int(cfg.get("t_scan_minutes") or 5))
+        last_alert = str(cfg.get("alert_last_scan_bucket") or "")
+        if aid and alert_on and bucket and bucket != last_alert:
+            try:
+                from server.paper_alert_service import paper_alert_service
+                import asyncio
+
+                logger.info("定时器：持仓告警扫描 %s account=%s", bucket, aid)
+                result = await asyncio.to_thread(
+                    paper_alert_service.scan_account, int(aid), notify=True, force=False
+                )
+                paper_cycle_service.update_config({"alert_last_scan_bucket": bucket})
+                logger.info(
+                    "告警扫描完成 fired=%s channels=%s",
+                    result.get("fired_count"),
+                    result.get("channels"),
+                )
+            except Exception as e:
+                self.last_error = f"告警扫描失败: {e}"
+                logger.exception("告警扫描失败")
+
+        # 现实自选监控：不依赖账户，盘中同频扫描 + LLM Markdown 推送
+        cfg = paper_cycle_service.get_config().get("config") or {}
+        mon_on = bool(cfg.get("monitor_auto_enabled"))
+        bucket = self.session_bucket(now, int(cfg.get("t_scan_minutes") or 5))
+        last_mon = str(cfg.get("monitor_last_scan_bucket") or "")
+        if mon_on and bucket and bucket != last_mon:
+            try:
+                from server.paper_monitor_service import paper_monitor_service
+
+                logger.info("定时器：自选监控扫描 %s", bucket)
+                result = await paper_monitor_service.scan(notify=True)
+                paper_cycle_service.update_config({"monitor_last_scan_bucket": bucket})
+                logger.info(
+                    "自选监控完成 fired=%s report=%s",
+                    result.get("fired_count"),
+                    result.get("report_id"),
+                )
+            except Exception as e:
+                self.last_error = f"自选监控失败: {e}"
+                logger.exception("自选监控失败")
 
         cfg = paper_cycle_service.get_config().get("config") or {}
         if self.should_weekly(now, cfg) and cfg.get("scheduler_account_id"):

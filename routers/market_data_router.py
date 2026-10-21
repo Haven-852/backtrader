@@ -13,6 +13,9 @@ GET  /market/indices              → 指数快照
 GET  /market/index-kline          → 指数K线
 GET  /market/industry-stats       → 行业统计
 GET  /market/stock-search         → 股票搜索
+GET  /market/futures/catalog      → 期货主连分类
+GET  /market/futures/board        → 期货主连看板（日线快照）
+GET  /market/futures/kline        → 期货日/周/月K线
 """
 
 from fastapi import APIRouter, HTTPException, Query
@@ -232,3 +235,133 @@ async def search_stocks(
         return {"keyword": q, "results": stocks, "count": len(stocks)}
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"搜索股票失败: {str(e)}")
+
+
+# ─── 期货行情中心 ──────────────────────────────────────
+
+@router.get("/futures/catalog")
+async def futures_catalog():
+    """期货主连分类目录"""
+    try:
+        from server.futures_market_service import futures_market_service
+        import asyncio
+
+        return await asyncio.to_thread(futures_market_service.catalog)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"期货目录失败: {e}")
+
+
+@router.get("/futures/board")
+async def futures_board(
+    category: Optional[str] = Query(None, description="分类名，空=全部"),
+    refresh: bool = Query(False, description="强制刷新缓存"),
+):
+    """期货主连看板快照（日线），按分类布局"""
+    try:
+        from server.futures_market_service import futures_market_service
+        import asyncio
+
+        return await asyncio.to_thread(
+            futures_market_service.get_board,
+            category=category,
+            force_refresh=refresh,
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"期货看板失败: {e}")
+
+
+@router.get("/futures/kline")
+async def futures_kline(
+    ts_code: str = Query(..., min_length=1, description="合约代码，如 AU.SHF / SC.INE"),
+    freq: str = Query(default="daily", description="daily | weekly | monthly"),
+    start: Optional[str] = Query(None, description="开始日期 YYYY-MM-DD"),
+    end: Optional[str] = Query(None, description="结束日期 YYYY-MM-DD"),
+    limit: int = Query(default=300, ge=1, le=2000),
+):
+    """期货日/周/月 K 线（周月由日线聚合）"""
+    try:
+        from server.futures_market_service import futures_market_service
+        import asyncio
+
+        result = await asyncio.to_thread(
+            futures_market_service.get_kline,
+            ts_code=ts_code,
+            freq=freq,
+            start=start,
+            end=end,
+            limit=limit,
+        )
+        if not result.get("ok"):
+            raise HTTPException(status_code=404, detail=result.get("error") or "无数据")
+        return result
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"期货K线失败: {e}")
+
+
+@router.get("/futures/coverage")
+async def futures_coverage(
+    category: Optional[str] = Query(None),
+    ts_codes: Optional[str] = Query(None, description="逗号分隔合约"),
+    asof: Optional[str] = Query(None, description="目标交易日 YYYY-MM-DD"),
+):
+    """检查行情中心主连是否缺失/日期落后于上一交易日"""
+    try:
+        from server.futures_market_service import futures_market_service
+        import asyncio
+
+        codes = [c.strip() for c in (ts_codes or "").split(",") if c.strip()] or None
+        return await asyncio.to_thread(
+            futures_market_service.check_coverage,
+            ts_codes=codes,
+            category=category,
+            asof=asof,
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"覆盖检查失败: {e}")
+
+
+@router.post("/futures/sync")
+async def futures_sync(
+    category: Optional[str] = Query(None),
+    ts_codes: Optional[str] = Query(None, description="逗号分隔合约"),
+    asof: Optional[str] = Query(None),
+    force: bool = Query(False),
+    lookback_days: int = Query(5, ge=1, le=60),
+):
+    """补齐上一交易日期货日线并写入 fut_daily"""
+    try:
+        from server.futures_market_service import futures_market_service
+        import asyncio
+
+        codes = [c.strip() for c in (ts_codes or "").split(",") if c.strip()] or None
+        return await asyncio.to_thread(
+            futures_market_service.sync_quotes,
+            ts_codes=codes,
+            category=category,
+            asof=asof,
+            lookback_days=lookback_days,
+            force=force,
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"期货补数失败: {e}")
+
+
+@router.get("/futures/board-live")
+async def futures_board_live(
+    category: Optional[str] = Query(None),
+    force: bool = Query(False, description="强制重拉远端"),
+):
+    """自动对齐上一交易日后返回看板（供行情中心定时刷新）"""
+    try:
+        from server.futures_market_service import futures_market_service
+        import asyncio
+
+        return await asyncio.to_thread(
+            futures_market_service.ensure_prev_day_board,
+            category=category,
+            force=force,
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"期货看板刷新失败: {e}")

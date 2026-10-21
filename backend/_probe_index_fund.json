@@ -1,0 +1,353 @@
+[
+  {
+    "api": "index_basic",
+    "kw": {
+      "limit": 3
+    },
+    "rows": 3,
+    "cols": [
+      "ts_code",
+      "name",
+      "market",
+      "publisher",
+      "category",
+      "base_date",
+      "base_point",
+      "list_date"
+    ]
+  },
+  {
+    "api": "index_basic",
+    "kw": {
+      "market": "SSE"
+    },
+    "rows": 208,
+    "cols": [
+      "ts_code",
+      "name",
+      "market",
+      "publisher",
+      "category",
+      "base_date",
+      "base_point",
+      "list_date"
+    ]
+  },
+  {
+    "api": "index_weekly",
+    "kw": {
+      "ts_code": "000001.SH",
+      "start_date": "20260101",
+      "end_date": "20260923"
+    },
+    "rows": 36,
+    "cols": [
+      "ts_code",
+      "trade_date",
+      "close",
+      "open",
+      "high",
+      "low",
+      "pre_close",
+      "change",
+      "pct_chg",
+      "vol",
+      "amount"
+    ]
+  },
+  {
+    "api": "index_monthly",
+    "kw": {
+      "ts_code": "000001.SH",
+      "start_date": "20240101",
+      "end_date": "20260923"
+    },
+    "rows": 32,
+    "cols": [
+      "ts_code",
+      "trade_date",
+      "close",
+      "open",
+      "high",
+      "low",
+      "pre_close",
+      "change",
+      "pct_chg",
+      "vol",
+      "amount"
+    ]
+  },
+  {
+    "api": "index_dailybasic",
+    "kw": {
+      "trade_date": "20260923"
+    },
+    "rows": 15,
+    "cols": [
+      "ts_code",
+      "trade_date",
+      "total_mv",
+      "float_mv",
+      "total_share",
+      "float_share",
+      "free_share",
+      "turnover_rate",
+      "turnover_rate_f",
+      "pe",
+      "pe_ttm",
+      "pb"
+    ]
+  },
+  {
+    "api": "index_dailybasic",
+    "kw": {
+      "ts_code": "000001.SH",
+      "start_date": "20260901",
+      "end_date": "20260923"
+    },
+    "rows": 17,
+    "cols": [
+      "ts_code",
+      "trade_date",
+      "total_mv",
+      "float_mv",
+      "total_share",
+      "float_share",
+      "free_share",
+      "turnover_rate",
+      "turnover_rate_f",
+      "pe",
+      "pe_ttm",
+      "pb"
+    ]
+  },
+  {
+    "api": "index_classify",
+    "kw": {
+      "level": "L1",
+      "src": "SW2021"
+    },
+    "rows": 31,
+    "cols": [
+      "index_code",
+      "industry_name",
+      "level",
+      "industry_code",
+      "is_pub",
+      "parent_code",
+      "src"
+    ]
+  },
+  {
+    "api": "index_classify",
+    "kw": {
+      "src": "SW2021"
+    },
+    "rows": 511,
+    "cols": [
+      "index_code",
+      "industry_name",
+      "level",
+      "industry_code",
+      "is_pub",
+      "parent_code",
+      "src"
+    ]
+  },
+  {
+    "api": "index_weight",
+    "kw": {
+      "index_code": "000300.SH",
+      "start_date": "20260901",
+      "end_date": "20260923"
+    },
+    "rows": 0,
+    "cols": []
+  },
+  {
+    "api": "index_weight",
+    "kw": {
+      "index_code": "000300.SH",
+      "trade_date": "20260829"
+    },
+    "rows": 0,
+    "cols": []
+  },
+  {
+    "api": "index_weight",
+    "kw": {
+      "index_code": "000300.SH",
+      "trade_date": "20260630"
+    },
+    "rows": 300,
+    "cols": [
+      "index_code",
+      "con_code",
+      "trade_date",
+      "weight"
+    ]
+  },
+  {
+    "api": "fund_basic",
+    "kw": {
+      "limit": 3
+    },
+    "rows": 3,
+    "cols": [
+      "ts_code",
+      "name",
+      "management",
+      "custodian",
+      "fund_type",
+      "found_date",
+      "due_date",
+      "list_date",
+      "issue_date",
+      "delist_date",
+      "issue_amount",
+      "m_fee",
+      "c_fee",
+      "duration_year",
+      "p_value",
+      "min_amount",
+      "exp_return",
+      "benchmark",
+      "status",
+      "invest_type",
+      "type",
+      "trustee",
+      "purc_startdate",
+      "redm_startdate",
+      "market"
+    ]
+  },
+  {
+    "api": "fund_basic",
+    "kw": {
+      "market": "E",
+      "limit": 5
+    },
+    "rows": 5,
+    "cols": [
+      "ts_code",
+      "name",
+      "management",
+      "custodian",
+      "fund_type",
+      "found_date",
+      "due_date",
+      "list_date",
+      "issue_date",
+      "delist_date",
+      "issue_amount",
+      "m_fee",
+      "c_fee",
+      "duration_year",
+      "p_value",
+      "min_amount",
+      "exp_return",
+      "benchmark",
+      "status",
+      "invest_type",
+      "type",
+      "trustee",
+      "purc_startdate",
+      "redm_startdate",
+      "market"
+    ]
+  },
+  {
+    "api": "fund_nav",
+    "kw": {
+      "ts_code": "510300.SH",
+      "start_date": "20260901",
+      "end_date": "20260923"
+    },
+    "rows": 17,
+    "cols": [
+      "ts_code",
+      "ann_date",
+      "nav_date",
+      "unit_nav",
+      "accum_nav",
+      "accum_div",
+      "net_asset",
+      "adj_nav",
+      "update_flag"
+    ]
+  },
+  {
+    "api": "fund_div",
+    "kw": {
+      "ts_code": "510300.SH"
+    },
+    "rows": 22,
+    "cols": [
+      "ts_code",
+      "ann_date",
+      "imp_anndate",
+      "base_date",
+      "div_proc",
+      "record_date",
+      "ex_date",
+      "pay_date",
+      "earpay_date",
+      "net_ex_date",
+      "div_cash",
+      "base_unit",
+      "ear_distr",
+      "ear_amount",
+      "account_date",
+      "base_year"
+    ]
+  },
+  {
+    "api": "fund_portfolio",
+    "kw": {
+      "ts_code": "510300.SH"
+    },
+    "rows": 1000,
+    "cols": [
+      "ts_code",
+      "ann_date",
+      "end_date",
+      "symbol",
+      "mkv",
+      "amount",
+      "stk_mkv_ratio",
+      "stk_float_ratio"
+    ]
+  },
+  {
+    "api": "fund_portfolio",
+    "kw": {
+      "ts_code": "510300.SH",
+      "period": "20241231"
+    },
+    "rows": 337,
+    "cols": [
+      "ts_code",
+      "ann_date",
+      "end_date",
+      "symbol",
+      "mkv",
+      "amount",
+      "stk_mkv_ratio",
+      "stk_float_ratio"
+    ]
+  },
+  {
+    "api": "fund_adj",
+    "kw": {
+      "ts_code": "510300.SH",
+      "start_date": "20260901",
+      "end_date": "20260923"
+    },
+    "rows": 17,
+    "cols": [
+      "ts_code",
+      "trade_date",
+      "adj_factor"
+    ]
+  }
+]

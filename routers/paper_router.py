@@ -30,7 +30,13 @@ POST /paper/cycle/risk-check              - 鍥炴挙娓呬粨
 POST /paper/cycle/daily-t0                - 鎸佷粨鏃ュ害鍋歍/缁定
 POST /paper/cycle/weekly-review           - 鍛ㄥ鐩樿皟 A/B
 POST /paper/cycle/run-trading-day         - 涓€閿棩璇?
-GET  /paper/cycle/config|runs|actions     - 閰嶇疆涓庢祦姘?
+GET  /paper/cycle/config|runs|actions     - 配置与流水
+GET  /paper/alerts/settings               - 持仓告警配置
+PATCH /paper/alerts/settings              - 更新告警阈值/开关
+POST /paper/alerts/scan                   - 手动扫描持仓告警
+POST /paper/alerts/test                   - 测试推送通道
+GET  /paper/alerts/events                 - 告警事件列表
+GET  /paper/alerts/channels               - 推送通道就绪状态
 """
 
 from typing import Any, Dict, List, Optional
@@ -560,8 +566,12 @@ async def cycle_scheduler_toggle(body: SchedulerToggleRequest):
     if body.enabled:
         if body.account_id is None:
             cfg = paper_cycle_service.get_config().get("config") or {}
-            if not cfg.get("scheduler_account_id"):
-                raise HTTPException(status_code=400, detail="璇峰厛閫夋嫨瑕佽嚜鍔ㄤ氦鏄撶殑璐︽埛")
+            # 允许仅开「现实自选监控」时不绑虚拟账户；选股/做T仍需账户
+            if not cfg.get("scheduler_account_id") and not cfg.get("monitor_auto_enabled"):
+                raise HTTPException(
+                    status_code=400,
+                    detail="请先选择虚拟账户，或先开启「现实自选监控」后再开定时器",
+                )
         paper_scheduler.start()
     else:
         await paper_scheduler.stop()
@@ -698,3 +708,230 @@ async def cycle_actions(
     from server.paper_cycle_service import paper_cycle_service
 
     return paper_cycle_service.list_actions(account_id=account_id, asof=asof, limit=limit)
+
+
+# ------------------------------------------------------------------ #
+# 持仓告警
+# ------------------------------------------------------------------ #
+
+
+class AlertSettingsPatch(BaseModel):
+    alert_auto_enabled: Optional[bool] = None
+    alert_stop_loss_pct: Optional[float] = None
+    alert_take_profit_pct: Optional[float] = None
+    alert_peak_pullback_pct: Optional[float] = None
+    alert_daily_drop_pct: Optional[float] = None
+    alert_daily_rise_pct: Optional[float] = None
+    alert_cooldown_minutes: Optional[int] = None
+    alert_enable_stop_loss: Optional[bool] = None
+    alert_enable_take_profit: Optional[bool] = None
+    alert_enable_peak_pullback: Optional[bool] = None
+    alert_enable_daily_drop: Optional[bool] = None
+    alert_enable_daily_rise: Optional[bool] = None
+    alert_auto_sell_stop: Optional[bool] = None
+    alert_channels: Optional[str] = None
+
+
+class AlertScanRequest(BaseModel):
+    account_id: int
+    notify: bool = True
+
+
+class AlertTestRequest(BaseModel):
+    message: Optional[str] = None
+
+
+@router.get("/alerts/settings")
+async def alert_settings_get():
+    from server.paper_alert_service import paper_alert_service
+
+    return paper_alert_service.get_settings()
+
+
+@router.patch("/alerts/settings")
+async def alert_settings_patch(body: AlertSettingsPatch):
+    from server.paper_alert_service import paper_alert_service
+
+    patch = {k: v for k, v in body.model_dump().items() if v is not None}
+    return paper_alert_service.update_settings(patch)
+
+
+@router.get("/alerts/channels")
+async def alert_channels():
+    from server.paper_alert_service import paper_alert_service
+
+    return {"ok": True, "channels": paper_alert_service.available_channels()}
+
+
+@router.post("/alerts/scan")
+async def alert_scan(body: AlertScanRequest):
+    try:
+        from server.paper_alert_service import paper_alert_service
+        import asyncio
+
+        return await asyncio.to_thread(
+            paper_alert_service.scan_account,
+            body.account_id,
+            notify=body.notify,
+            force=False,
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"告警扫描失败: {e}")
+
+
+@router.post("/alerts/test")
+async def alert_test(body: Optional[AlertTestRequest] = None):
+    try:
+        from server.paper_alert_service import paper_alert_service
+        import asyncio
+
+        msg = (body.message if body else None) or None
+        return await asyncio.to_thread(paper_alert_service.test_notify, msg)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"测试推送失败: {e}")
+
+
+@router.get("/alerts/events")
+async def alert_events(
+    account_id: Optional[int] = Query(None),
+    limit: int = Query(50, ge=1, le=200),
+):
+    from server.paper_alert_service import paper_alert_service
+
+    return paper_alert_service.list_events(account_id=account_id, limit=limit)
+
+
+# ------------------------------------------------------------------ #
+# 现实自选监控（不绑虚拟账户）
+# ------------------------------------------------------------------ #
+
+
+class MonitorAddRequest(BaseModel):
+    ts_code: str
+    name: Optional[str] = None
+    cost_basis: Optional[float] = None
+    note: Optional[str] = None
+
+
+class MonitorUpdateRequest(BaseModel):
+    cost_basis: Optional[float] = None
+    note: Optional[str] = None
+    name: Optional[str] = None
+    active: Optional[bool] = None
+
+
+class MonitorSettingsPatch(BaseModel):
+    monitor_auto_enabled: Optional[bool] = None
+    monitor_daily_drop_pct: Optional[float] = None
+    monitor_daily_rise_pct: Optional[float] = None
+    monitor_peak_pullback_pct: Optional[float] = None
+    monitor_stop_loss_pct: Optional[float] = None
+    monitor_take_profit_pct: Optional[float] = None
+    monitor_cooldown_minutes: Optional[int] = None
+    monitor_use_llm: Optional[bool] = None
+    monitor_model: Optional[str] = None
+    monitor_report_prompt: Optional[str] = None
+    monitor_enable_daily_drop: Optional[bool] = None
+    monitor_enable_daily_rise: Optional[bool] = None
+    monitor_enable_peak_pullback: Optional[bool] = None
+    monitor_enable_stop_loss: Optional[bool] = None
+    monitor_enable_take_profit: Optional[bool] = None
+
+
+class MonitorScanRequest(BaseModel):
+    notify: bool = True
+    use_llm: Optional[bool] = None
+    force_report: bool = False
+
+
+@router.get("/monitor/settings")
+async def monitor_settings_get():
+    from server.paper_monitor_service import paper_monitor_service
+
+    return paper_monitor_service.get_settings()
+
+
+@router.patch("/monitor/settings")
+async def monitor_settings_patch(body: MonitorSettingsPatch):
+    from server.paper_monitor_service import paper_monitor_service
+
+    patch = {k: v for k, v in body.model_dump().items() if v is not None}
+    return paper_monitor_service.update_settings(patch)
+
+
+@router.get("/monitor/pool")
+async def monitor_pool_list(active_only: bool = Query(True)):
+    from server.paper_monitor_service import paper_monitor_service
+
+    return paper_monitor_service.list_pool(active_only=active_only)
+
+
+@router.post("/monitor/pool")
+async def monitor_pool_add(body: MonitorAddRequest):
+    from server.paper_monitor_service import paper_monitor_service
+
+    return paper_monitor_service.add_symbol(
+        body.ts_code,
+        name=body.name,
+        cost_basis=body.cost_basis,
+        note=body.note,
+    )
+
+
+@router.patch("/monitor/pool/{ts_code}")
+async def monitor_pool_update(ts_code: str, body: MonitorUpdateRequest):
+    from server.paper_monitor_service import paper_monitor_service
+
+    return paper_monitor_service.update_symbol(
+        ts_code,
+        cost_basis=body.cost_basis,
+        note=body.note,
+        name=body.name,
+        active=body.active,
+    )
+
+
+@router.delete("/monitor/pool/{ts_code}")
+async def monitor_pool_remove(ts_code: str, hard: bool = Query(False)):
+    from server.paper_monitor_service import paper_monitor_service
+
+    return paper_monitor_service.remove_symbol(ts_code, hard=hard)
+
+
+@router.get("/monitor/resolve")
+async def monitor_resolve(q: str = Query(..., min_length=1)):
+    from server.paper_monitor_service import paper_monitor_service
+
+    return paper_monitor_service.resolve_symbol(q)
+
+
+@router.post("/monitor/scan")
+async def monitor_scan(body: Optional[MonitorScanRequest] = None):
+    try:
+        from server.paper_monitor_service import paper_monitor_service
+
+        b = body or MonitorScanRequest()
+        return await paper_monitor_service.scan(
+            notify=b.notify,
+            use_llm=b.use_llm,
+            force_report=b.force_report,
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"自选监控扫描失败: {e}")
+
+
+@router.get("/monitor/reports")
+async def monitor_reports(limit: int = Query(20, ge=1, le=100)):
+    from server.paper_monitor_service import paper_monitor_service
+
+    return paper_monitor_service.list_reports(limit=limit)
+
+
+@router.get("/monitor/reports/{report_id}")
+async def monitor_report_detail(report_id: int):
+    from server.paper_monitor_service import paper_monitor_service
+
+    out = paper_monitor_service.get_report(report_id)
+    if not out.get("ok"):
+        raise HTTPException(status_code=404, detail=out.get("error") or "未找到")
+    return out

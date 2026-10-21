@@ -709,6 +709,783 @@ class SectorDataFetcher:
             "daily": pd.DataFrame(daily_rows),
         }
 
+    def _known_boards(self, level: str) -> List[Dict[str, str]]:
+        if not self.engine:
+            return []
+        with self.engine.connect() as conn:
+            rows = conn.execute(
+                sa_text(
+                    """
+                    SELECT DISTINCT ON (ts_code) ts_code, name, industry_level
+                    FROM sector_dc_index_daily
+                    WHERE industry_level = :lv AND idx_type = '行业板块'
+                    ORDER BY ts_code, trade_date DESC
+                    """
+                ),
+                {"lv": level},
+            ).fetchall()
+        out = []
+        for row in rows:
+            code = _norm_bk_code(row[0])
+            if code:
+                out.append({"ts_code": code, "name": row[1] or code, "industry_level": row[2] or level})
+        return out
+
+    def _em_kline_map(self, ts_code: str, beg: str, end: str, retries: int = 1) -> Dict[str, Dict[str, Any]]:
+        raw = ts_code.replace(".DC", "")
+        params = {
+            "secid": f"90.{raw}",
+            "klt": "101",
+            "fqt": "1",
+            "beg": beg,
+            "end": end,
+            "fields1": "f1,f2,f3,f4,f5,f6",
+            "fields2": "f51,f52,f53,f54,f55,f56,f57,f58,f59,f60,f61",
+        }
+        payload = None
+        last_err: Optional[Exception] = None
+        for url in EM_KLINE_URLS:
+            try:
+                payload = self._em_http_json(url, params, retries=retries)
+                break
+            except Exception as e:
+                last_err = e
+        if payload is None:
+            raise RuntimeError(last_err or "kline empty")
+        lines = ((payload.get("data") or {}).get("klines") or [])
+        found: Dict[str, Dict[str, Any]] = {}
+        for line in lines:
+            parts = str(line).split(",")
+            if len(parts) < 10:
+                continue
+            ymd = parts[0].replace("-", "")[:8]
+            found[ymd] = {
+                "open": _em_num(parts[1]),
+                "close": _em_num(parts[2]),
+                "high": _em_num(parts[3]),
+                "low": _em_num(parts[4]),
+                "vol": _em_int(parts[5]),
+                "amount": _em_num(parts[6]),
+                "swing": _em_num(parts[7]),
+                "pct_change": _em_num(parts[8]),
+                "change": _em_num(parts[9]),
+                "turnover_rate": _em_num(parts[10]) if len(parts) > 10 else None,
+            }
+        return found
+
+    def _amount_scale(self, boards: Sequence[Dict[str, str]], sample_day: date) -> float:
+        """用库内已有成交额校准东财 K 线金额单位。对不上就返回 0，表示这一天不写成交额。"""
+        if not self.engine or not boards:
+            return 1.0
+        ymd = sample_day.strftime("%Y%m%d")
+        with self.engine.connect() as conn:
+            for board in boards[:8]:
+                row = conn.execute(
+                    sa_text(
+                        """
+                        SELECT amount FROM sector_dc_daily
+                        WHERE ts_code = :c AND trade_date = :d AND amount IS NOT NULL AND amount > 0
+                        """
+                    ),
+                    {"c": board["ts_code"], "d": sample_day},
+                ).fetchone()
+                if not row:
+                    continue
+                try:
+                    bars = self._em_kline_map(board["ts_code"], ymd, ymd)
+                except Exception:
+                    continue
+                remote = (bars.get(ymd) or {}).get("amount")
+                if not remote:
+                    continue
+                ratio = float(row[0]) / float(remote)
+                for scale in (1.0, 1000.0, 10000.0, 0.001, 0.0001):
+                    if 0.5 <= ratio / scale <= 2:
+                        return scale
+                return 0.0
+        return 1.0
+
+    def _backfill_from_sw(self, ymd: str, target: date, level: str, codes: Set[str]) -> Dict[str, Any]:
+        try:
+            packed = self.fetch_sw_overlay(ymd)
+        except Exception as e:
+            return {"ok": False, "error": str(e)}
+        idx = packed.get("index")
+        daily = packed.get("daily")
+        if idx is None or idx.empty:
+            return {"ok": False, "error": "申万日行情为空"}
+        idx = idx.loc[idx["ts_code"].isin(codes)].copy()
+        if idx.empty:
+            return {"ok": False, "error": "申万行业名称没有对上这一层板块"}
+        idx["industry_level"] = level
+        idx["idx_type"] = IDX_TYPE_INDUSTRY
+        n_idx = self.upsert_index(idx)
+        n_daily = 0
+        if daily is not None and not daily.empty:
+            daily = daily.loc[daily["ts_code"].isin(codes)].copy()
+            n_daily = self.upsert_daily(daily)
+        return {
+            "ok": True,
+            "trade_date": target.isoformat(),
+            "level": level,
+            "source": "sw_daily",
+            "boards": len(codes),
+            "index_rows": n_idx,
+            "daily_rows": n_daily,
+            "moneyflow_rows": 0,
+            "unmatched": len(codes) - int(idx["ts_code"].nunique()),
+            "note": "东财板块接口不可用，按申万日行情里同名行业写入涨跌和成交额。上涨家数、领涨股、主力净额没有来源，留空。名称对不上的板块不补。",
+        }
+
+    def backfill_level_day(self, trade_date: str, level: str = "东财二级行业") -> Dict[str, Any]:
+        """补某一天的行业板块行情。东财接口不可用时，用申万同名行业的涨跌和成交额，对不上的板块留空。"""
+        self.ensure_tables()
+        ymd = str(trade_date).replace("-", "")[:8]
+        try:
+            target = datetime.strptime(ymd, "%Y%m%d").date()
+        except ValueError:
+            return {"ok": False, "error": f"无法识别交易日 {trade_date}"}
+        level = level or "东财二级行业"
+
+        try:
+            remote = self.fetch_dc_index(ymd)
+        except Exception as e:
+            remote = pd.DataFrame()
+            logger.info("dc_index %s 不可用: %s", ymd, e)
+        if remote is not None and not remote.empty and "industry_level" in remote.columns:
+            hit = remote.loc[remote["industry_level"] == level]
+            if not hit.empty:
+                n_idx = self.upsert_index(hit)
+                n_daily = 0
+                try:
+                    daily = self.fetch_dc_daily(ymd)
+                    if daily is not None and not daily.empty and "ts_code" in daily.columns:
+                        codes = set(hit["ts_code"].astype(str))
+                        daily = daily.loc[daily["ts_code"].astype(str).isin(codes)]
+                        n_daily = self.upsert_daily(daily)
+                except Exception as e:
+                    logger.info("dc_daily %s 不可用: %s", ymd, e)
+                return {
+                    "ok": True,
+                    "trade_date": target.isoformat(),
+                    "level": level,
+                    "source": "datahubco",
+                    "index_rows": n_idx,
+                    "daily_rows": n_daily,
+                    "moneyflow_rows": 0,
+                    "failed": 0,
+                }
+
+        boards = self._known_boards(level)
+        if not boards:
+            return {"ok": False, "error": f"库里没有{level}代码，无法按板块补 {target.isoformat()}"}
+        codes = {b["ts_code"] for b in boards}
+
+        sw_packed = self._backfill_from_sw(ymd, target, level, codes)
+        if sw_packed.get("ok"):
+            return sw_packed
+
+        probe = boards[0]["ts_code"]
+        try:
+            self._em_kline_map(probe, ymd, ymd)
+        except Exception as e:
+            return {
+                "ok": False,
+                "error": f"Datahubco 没有东财板块接口，东财日K也失败（{e}）。申万名称能对上的板块也没有写入。",
+                "trade_date": target.isoformat(),
+                "level": level,
+                "sw_error": sw_packed.get("error"),
+            }
+
+        sample_day = None
+        if self.engine:
+            with self.engine.connect() as conn:
+                sample_day = conn.execute(
+                    sa_text(
+                        """
+                        SELECT MAX(trade_date) FROM sector_dc_daily d
+                        JOIN sector_dc_index_daily i
+                          ON i.ts_code = d.ts_code AND i.trade_date = d.trade_date
+                        WHERE i.industry_level = :lv AND d.amount IS NOT NULL
+                          AND d.trade_date <> :target
+                        """
+                    ),
+                    {"lv": level, "target": target},
+                ).scalar()
+        scale = self._amount_scale(boards, sample_day) if isinstance(sample_day, date) else 1.0
+
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+
+        index_rows: List[Dict[str, Any]] = []
+        daily_rows: List[Dict[str, Any]] = []
+        errors: List[str] = []
+
+        def pull(board: Dict[str, str]) -> Optional[Dict[str, Any]]:
+            bars = self._em_kline_map(board["ts_code"], ymd, ymd)
+            bar = bars.get(ymd)
+            if not bar or bar.get("pct_change") is None:
+                return None
+            return {"board": board, "bar": bar}
+
+        with ThreadPoolExecutor(max_workers=6) as pool:
+            futures = [pool.submit(pull, board) for board in boards]
+            for fut in as_completed(futures):
+                try:
+                    got = fut.result()
+                except Exception as e:
+                    errors.append(str(e)[:160])
+                    continue
+                if not got:
+                    errors.append("empty")
+                    continue
+                board = got["board"]
+                bar = got["bar"]
+                amount = bar.get("amount")
+                if amount is not None and scale:
+                    amount = amount * scale
+                elif scale == 0:
+                    amount = None
+                index_rows.append({
+                    "ts_code": board["ts_code"],
+                    "trade_date": target,
+                    "name": board["name"],
+                    "pct_change": bar.get("pct_change"),
+                    "idx_type": IDX_TYPE_INDUSTRY,
+                    "industry_level": board["industry_level"],
+                })
+                daily_rows.append({
+                    "ts_code": board["ts_code"],
+                    "trade_date": target,
+                    "open": bar.get("open"),
+                    "high": bar.get("high"),
+                    "low": bar.get("low"),
+                    "close": bar.get("close"),
+                    "change": bar.get("change"),
+                    "pct_change": bar.get("pct_change"),
+                    "vol": bar.get("vol"),
+                    "amount": amount,
+                    "swing": bar.get("swing"),
+                    "turnover_rate": bar.get("turnover_rate"),
+                    "category": IDX_TYPE_INDUSTRY,
+                })
+
+        if not index_rows:
+            sample = errors[0] if errors else "没有返回"
+            return {
+                "ok": False,
+                "error": f"东财日 K 没有补上 {target.isoformat()}：{sample}",
+                "trade_date": target.isoformat(),
+                "level": level,
+                "failed": len(errors),
+            }
+        n_idx = self.upsert_index(pd.DataFrame(index_rows))
+        n_daily = self.upsert_daily(pd.DataFrame(daily_rows))
+        return {
+            "ok": True,
+            "trade_date": target.isoformat(),
+            "level": level,
+            "source": "eastmoney_kline",
+            "amount_scale": scale,
+            "boards": len(boards),
+            "index_rows": n_idx,
+            "daily_rows": n_daily,
+            "moneyflow_rows": 0,
+            "failed": len([e for e in errors if e]),
+            "note": "上涨家数、领涨股、主力净额这天的日 K 里没有，留空，不编造。",
+        }
+
+    def fill_board_history(self, ts_code: str, start_date: str, end_date: str) -> Dict[str, Any]:
+        """补一个板块区间内的涨跌、成分股日线、上涨家数，以及尚未填写的沪深300环境。"""
+        code = _norm_bk_code(ts_code)
+        if not code:
+            return {"ok": False, "error": "缺少板块代码"}
+        try:
+            start = datetime.strptime(str(start_date).replace("-", "")[:8], "%Y%m%d").date()
+            end = datetime.strptime(str(end_date).replace("-", "")[:8], "%Y%m%d").date()
+        except ValueError:
+            return {"ok": False, "error": "日期无法识别"}
+        if end < start:
+            return {"ok": False, "error": "结束日早于开始日"}
+        with self.engine.connect() as conn:
+            meta = conn.execute(
+                sa_text(
+                    """
+                    SELECT name, industry_level FROM sector_dc_index_daily
+                    WHERE ts_code = :code
+                    ORDER BY trade_date DESC LIMIT 1
+                    """
+                ),
+                {"code": code},
+            ).fetchone()
+        if not meta:
+            return {"ok": False, "error": f"库里没有 {code} 的板块名称，无法写入"}
+        source = "eastmoney_kline"
+        bars: Dict[str, Dict[str, Any]] = {}
+        em_error = ""
+        try:
+            bars = self._em_kline_map(code, start.strftime("%Y%m%d"), end.strftime("%Y%m%d"), retries=3)
+        except Exception as e:
+            em_error = str(e)
+        if not bars:
+            try:
+                bars = self._sw_history(str(meta[0] or ""), start, end)
+                source = "sw_daily"
+            except Exception as e:
+                return {
+                    "ok": False,
+                    "error": f"东财日K没有返回：{em_error or '空'}；申万日行情也没有对上：{e}",
+                    "ts_code": code,
+                }
+        index_rows = []
+        daily_rows = []
+        for ymd, bar in bars.items():
+            if bar.get("pct_change") is None:
+                continue
+            try:
+                day = datetime.strptime(ymd, "%Y%m%d").date()
+            except ValueError:
+                continue
+            if day < start or day > end:
+                continue
+            index_rows.append({
+                "ts_code": code,
+                "trade_date": day,
+                "name": meta[0],
+                "pct_change": bar.get("pct_change"),
+                "idx_type": IDX_TYPE_INDUSTRY,
+                "industry_level": meta[1] or "东财二级行业",
+            })
+            daily_row = {
+                "ts_code": code,
+                "trade_date": day,
+                "open": bar.get("open"),
+                "high": bar.get("high"),
+                "low": bar.get("low"),
+                "close": bar.get("close"),
+                "change": bar.get("change"),
+                "pct_change": bar.get("pct_change"),
+                "vol": bar.get("vol"),
+                "turnover_rate": bar.get("turnover_rate"),
+                "category": IDX_TYPE_INDUSTRY,
+            }
+            if source == "sw_daily" and bar.get("amount") is not None:
+                daily_row["amount"] = bar.get("amount")
+            daily_rows.append(daily_row)
+        if not index_rows:
+            return {"ok": False, "error": "东财日K在这个区间里没有涨跌幅", "ts_code": code}
+        n_idx = self.upsert_index(pd.DataFrame(index_rows))
+        n_daily = self.upsert_daily(pd.DataFrame(daily_rows))
+        members = self._ashare_members(code)
+        stock_rows = self._fill_member_bars(members, start, end)
+        breadth_rows = self._write_breadth(code, start, end)
+        index_rows_n = self._fill_benchmark(start, end)
+        regime_rows = self._write_regimes(start, end)
+        return {
+            "ok": True,
+            "ts_code": code,
+            "name": meta[0],
+            "source": source,
+            "index_rows": n_idx,
+            "daily_rows": n_daily,
+            "member_count": len(members),
+            "stock_rows": stock_rows,
+            "breadth_rows": breadth_rows,
+            "benchmark_rows": index_rows_n,
+            "regime_rows": regime_rows,
+            "note": (
+                "板块涨跌来自东财日K。" if source == "eastmoney_kline"
+                else "东财日K没有连上，板块涨跌改用申万同名行业。"
+            ) + "上涨家数用成分股日线统计，B股不计入。市场环境按沪深300的均线规则补写，库里已有的判断不覆盖。",
+        }
+
+    def _sw_history(self, name: str, start: date, end: date) -> Dict[str, Dict[str, Any]]:
+        """按板块名称找到申万行业，再拉取这一段日行情。"""
+        wanted = (name or "").strip()
+        if not wanted:
+            raise RuntimeError("没有板块名称")
+        lookup = pd.DataFrame()
+        day = end
+        for _ in range(12):
+            lookup = self.client.query("sw_daily", trade_date=day.strftime("%Y%m%d"), limit=5000)
+            if lookup is not None and not lookup.empty:
+                break
+            day = day.fromordinal(day.toordinal() - 1)
+        if lookup is None or lookup.empty:
+            raise RuntimeError("申万日行情没有返回行业列表")
+        lookup = lookup.copy()
+        lookup.columns = [str(c).lower() for c in lookup.columns]
+        hits = []
+        for _, row in lookup.iterrows():
+            nm = str(row.get("name") or "").strip()
+            if nm == wanted or nm.startswith(wanted):
+                hits.append((nm, str(row.get("ts_code") or "")))
+        hits.sort(key=lambda item: (0 if item[0] == wanted else 1, 1 if item[0].startswith("非") else 0, len(item[0])))
+        if not hits or not hits[0][1]:
+            raise RuntimeError(f"申万行业里没有「{wanted}」")
+        sw_code = hits[0][1]
+        df = self.client.query(
+            "sw_daily",
+            ts_code=sw_code,
+            start_date=start.strftime("%Y%m%d"),
+            end_date=end.strftime("%Y%m%d"),
+        )
+        if df is None or df.empty:
+            raise RuntimeError(f"{sw_code} 在这个区间没有日行情")
+        df = df.copy()
+        df.columns = [str(c).lower() for c in df.columns]
+        found: Dict[str, Dict[str, Any]] = {}
+        for _, row in df.iterrows():
+            raw_day = str(row.get("trade_date") or "").replace("-", "")[:8]
+            if len(raw_day) != 8 or not raw_day.isdigit():
+                continue
+            amount = _em_num(row.get("amount"))
+            if amount is not None:
+                amount = amount * 10000.0
+            found[raw_day] = {
+                "open": _em_num(row.get("open")),
+                "close": _em_num(row.get("close")),
+                "high": _em_num(row.get("high")),
+                "low": _em_num(row.get("low")),
+                "vol": _em_int(row.get("vol")),
+                "amount": amount,
+                "pct_change": _em_num(row.get("pct_change")),
+                "change": _em_num(row.get("change")),
+            }
+        return found
+
+    def fill_market_history(self, start_date: str, end_date: str) -> Dict[str, Any]:
+        """补全部东财二级行业在整段日期上的涨跌和上涨家数。已有长历史的板块不覆盖。"""
+        try:
+            start = datetime.strptime(str(start_date).replace("-", "")[:8], "%Y%m%d").date()
+            end = datetime.strptime(str(end_date).replace("-", "")[:8], "%Y%m%d").date()
+        except ValueError:
+            return {"ok": False, "error": "日期无法识别"}
+        with self.engine.connect() as conn:
+            boards = conn.execute(
+                sa_text(
+                    """
+                    SELECT i.ts_code, i.name, COALESCE(c.n, 0)
+                    FROM (
+                        SELECT DISTINCT ON (ts_code) ts_code, name, industry_level
+                        FROM sector_dc_index_daily
+                        WHERE industry_level = '东财二级行业' AND idx_type = '行业板块'
+                        ORDER BY ts_code, trade_date DESC
+                    ) i
+                    LEFT JOIN (
+                        SELECT ts_code, COUNT(*) AS n
+                        FROM sector_dc_index_daily
+                        WHERE pct_change IS NOT NULL AND trade_date BETWEEN :a AND :b
+                        GROUP BY ts_code
+                    ) c ON c.ts_code = i.ts_code
+                    """
+                ),
+                {"a": start, "b": end},
+            ).fetchall()
+        pending = [
+            {"ts_code": row[0], "name": row[1], "level": "东财二级行业"}
+            for row in boards
+            if int(row[2] or 0) < 200 and row[1]
+        ]
+        sw_map = self._sw_name_map(end)
+        written = 0
+        unmatched = []
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+
+        jobs = []
+        for board in pending:
+            sw_code = sw_map.get(str(board["name"]).strip())
+            if not sw_code:
+                unmatched.append(board["name"])
+                continue
+            jobs.append((board, sw_code))
+
+        def pull(board: Dict[str, str], sw_code: str) -> List[Dict[str, Any]]:
+            df = self.client.query(
+                "sw_daily",
+                ts_code=sw_code,
+                start_date=start.strftime("%Y%m%d"),
+                end_date=end.strftime("%Y%m%d"),
+            )
+            if df is None or df.empty:
+                return []
+            df = df.copy()
+            df.columns = [str(c).lower() for c in df.columns]
+            rows = []
+            for _, item in df.iterrows():
+                raw_day = str(item.get("trade_date") or "").replace("-", "")[:8]
+                pct = _em_num(item.get("pct_change"))
+                if len(raw_day) != 8 or pct is None:
+                    continue
+                rows.append({
+                    "ts_code": board["ts_code"],
+                    "trade_date": datetime.strptime(raw_day, "%Y%m%d").date(),
+                    "name": board["name"],
+                    "pct_change": pct,
+                    "idx_type": IDX_TYPE_INDUSTRY,
+                    "industry_level": "东财二级行业",
+                })
+            return rows
+
+        frames: List[Dict[str, Any]] = []
+        with ThreadPoolExecutor(max_workers=4) as pool:
+            futures = [pool.submit(pull, board, sw_code) for board, sw_code in jobs]
+            for fut in as_completed(futures):
+                try:
+                    frames.extend(fut.result() or [])
+                except Exception as e:
+                    logger.warning("全市场板块行情没有写入: %s", e)
+        if frames:
+            written = self.upsert_index(pd.DataFrame(frames))
+        breadth = self._write_market_breadth(start, end)
+        regimes = self._write_regimes(start, end)
+        return {
+            "ok": True,
+            "boards": len(boards),
+            "fetched_boards": len(jobs),
+            "unmatched": unmatched[:30],
+            "unmatched_count": len(unmatched),
+            "index_rows": written,
+            "breadth_rows": breadth,
+            "regime_rows": regimes,
+            "note": "全市场板块涨跌按申万同名行业写入，已有较长历史的板块不覆盖。上涨家数用成分股日线统计。名称对不上的板块留空。",
+        }
+
+    def _sw_name_map(self, end: date) -> Dict[str, str]:
+        lookup = pd.DataFrame()
+        day = end
+        for _ in range(12):
+            lookup = self.client.query("sw_daily", trade_date=day.strftime("%Y%m%d"), limit=5000)
+            if lookup is not None and not lookup.empty:
+                break
+            day = day.fromordinal(day.toordinal() - 1)
+        found: Dict[str, str] = {}
+        if lookup is None or lookup.empty:
+            return found
+        lookup = lookup.copy()
+        lookup.columns = [str(c).lower() for c in lookup.columns]
+        for _, row in lookup.iterrows():
+            name = str(row.get("name") or "").strip()
+            code = str(row.get("ts_code") or "").strip()
+            if name and code and not name.startswith("非"):
+                found.setdefault(name, code)
+        return found
+
+    def _write_market_breadth(self, start: date, end: date) -> int:
+        with self.engine.begin() as conn:
+            result = conn.execute(
+                sa_text(
+                    """
+                    UPDATE sector_dc_index_daily AS i
+                    SET up_num = s.up_num, down_num = s.down_num, updated_at = CURRENT_TIMESTAMP
+                    FROM (
+                        SELECT d.ts_code, d.trade_date,
+                               COUNT(*) FILTER (WHERE sd.pct_chg > 0)::int AS up_num,
+                               COUNT(*) FILTER (WHERE sd.pct_chg < 0)::int AS down_num,
+                               COUNT(sd.pct_chg)::int AS n
+                        FROM sector_dc_index_daily d
+                        JOIN (
+                            SELECT DISTINCT ON (ts_code, con_code) ts_code, con_code
+                            FROM sector_dc_member
+                            WHERE con_code NOT LIKE '200%' AND con_code NOT LIKE '900%'
+                            ORDER BY ts_code, con_code, trade_date DESC
+                        ) m ON m.ts_code = d.ts_code
+                        JOIN stock_daily sd
+                          ON sd.ts_code = m.con_code AND sd.trade_date = d.trade_date
+                        WHERE d.industry_level = '东财二级行业'
+                          AND d.trade_date BETWEEN :a AND :b
+                          AND d.up_num IS NULL
+                          AND d.pct_change IS NOT NULL
+                        GROUP BY d.ts_code, d.trade_date
+                    ) s
+                    WHERE i.ts_code = s.ts_code AND i.trade_date = s.trade_date AND s.n >= 5
+                    """
+                ),
+                {"a": start, "b": end},
+            )
+        return int(result.rowcount or 0)
+
+    def _ashare_members(self, code: str) -> List[str]:
+        with self.engine.connect() as conn:
+            rows = conn.execute(
+                sa_text(
+                    """
+                    SELECT DISTINCT ON (con_code) con_code
+                    FROM sector_dc_member
+                    WHERE ts_code = :code AND con_code IS NOT NULL
+                    ORDER BY con_code, trade_date DESC
+                    """
+                ),
+                {"code": code},
+            ).fetchall()
+        codes = []
+        for row in rows:
+            symbol = str(row[0] or "")
+            if symbol.startswith("200") or symbol.startswith("900"):
+                continue
+            codes.append(symbol)
+        return codes
+
+    def _fill_member_bars(self, codes: Sequence[str], start: date, end: date) -> int:
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+
+        needed = []
+        with self.engine.connect() as conn:
+            for symbol in codes:
+                row = conn.execute(
+                    sa_text(
+                        """
+                        SELECT COUNT(*), MIN(trade_date) FROM stock_daily
+                        WHERE ts_code = :code AND trade_date BETWEEN :a AND :b
+                        """
+                    ),
+                    {"code": symbol, "a": start, "b": end},
+                ).fetchone()
+                count = int(row[0] or 0)
+                first = row[1]
+                if count >= 200 and first is not None and first <= start:
+                    continue
+                needed.append(symbol)
+        if not needed:
+            return 0
+        written = 0
+
+        def pull(symbol: str) -> int:
+            frames = self._selective.fetch_remote(
+                symbol, start.strftime("%Y%m%d"), end.strftime("%Y%m%d"), freqs=["daily"],
+            )
+            return int(self._selective.upsert_bars("daily", frames.get("daily")))
+
+        with ThreadPoolExecutor(max_workers=4) as pool:
+            futures = [pool.submit(pull, symbol) for symbol in needed]
+            for fut in as_completed(futures):
+                try:
+                    written += int(fut.result() or 0)
+                except Exception as e:
+                    logger.warning("成分股日线没有写入: %s", e)
+        return written
+
+    def _write_breadth(self, code: str, start: date, end: date) -> int:
+        with self.engine.begin() as conn:
+            result = conn.execute(
+                sa_text(
+                    """
+                    UPDATE sector_dc_index_daily AS i
+                    SET up_num = s.up_num, down_num = s.down_num, updated_at = CURRENT_TIMESTAMP
+                    FROM (
+                        SELECT d.trade_date,
+                               COUNT(*) FILTER (WHERE sd.pct_chg > 0)::int AS up_num,
+                               COUNT(*) FILTER (WHERE sd.pct_chg < 0)::int AS down_num,
+                               COUNT(sd.pct_chg)::int AS n
+                        FROM sector_dc_index_daily d
+                        JOIN (
+                            SELECT DISTINCT con_code FROM sector_dc_member
+                            WHERE ts_code = :code
+                              AND con_code NOT LIKE '200%'
+                              AND con_code NOT LIKE '900%'
+                        ) m ON TRUE
+                        LEFT JOIN stock_daily sd
+                          ON sd.ts_code = m.con_code AND sd.trade_date = d.trade_date
+                        WHERE d.ts_code = :code
+                          AND d.trade_date BETWEEN :a AND :b
+                          AND d.up_num IS NULL
+                        GROUP BY d.trade_date
+                    ) s
+                    WHERE i.ts_code = :code AND i.trade_date = s.trade_date AND s.n >= 5
+                    """
+                ),
+                {"code": code, "a": start, "b": end},
+            )
+        return int(result.rowcount or 0)
+
+    def _fill_benchmark(self, start: date, end: date) -> int:
+        with self.engine.connect() as conn:
+            have = conn.execute(
+                sa_text(
+                    """
+                    SELECT COUNT(*), MIN(trade_date) FROM index_daily
+                    WHERE ts_code = '000300.SH' AND trade_date BETWEEN :a AND :b
+                    """
+                ),
+                {"a": start, "b": end},
+            ).fetchone()
+        if int(have[0] or 0) >= 200 and have[1] is not None and have[1] <= start:
+            return 0
+        df = self.client.query(
+            "index_daily",
+            ts_code="000300.SH",
+            start_date=start.strftime("%Y%m%d"),
+            end_date=end.strftime("%Y%m%d"),
+        )
+        normalized = self._selective._normalize_bars(df, "000300.SH")
+        return int(self._selective.upsert_bars("daily", normalized, table="index_daily"))
+
+    def _write_regimes(self, start: date, end: date) -> int:
+        """用沪深300收盘和均线补没有标签的交易日。已有标签保持不变。"""
+        import json
+
+        with self.engine.connect() as conn:
+            rows = conn.execute(
+                sa_text(
+                    """
+                    SELECT trade_date, close FROM index_daily
+                    WHERE ts_code = '000300.SH' AND close IS NOT NULL
+                    ORDER BY trade_date
+                    """
+                )
+            ).fetchall()
+            existing = {
+                row[0]
+                for row in conn.execute(sa_text("SELECT DISTINCT trade_date FROM market_regime")).fetchall()
+            }
+        closes = [(row[0], float(row[1])) for row in rows if row[0] is not None and row[1] is not None]
+        pending = []
+        for index in range(60, len(closes)):
+            day, close = closes[index]
+            if day < start or day > end or day in existing:
+                continue
+            window20 = [item[1] for item in closes[index - 19:index + 1]]
+            window60 = [item[1] for item in closes[index - 59:index + 1]]
+            ma20 = sum(window20) / len(window20)
+            ma60 = sum(window60) / len(window60)
+            base20 = closes[index - 20][1]
+            base60 = closes[index - 60][1]
+            ret20 = close / base20 - 1 if base20 else 0
+            ret60 = close / base60 - 1 if base60 else 0
+            if close > ma60 and ma20 > ma60 and ret20 >= 0.03:
+                label = "牛"
+            elif close < ma60 and ma20 < ma60 and ret20 <= -0.03:
+                label = "熊"
+            elif ret20 > 0 and ret60 < 0:
+                label = "修复"
+            else:
+                label = "震荡"
+            pending.append({
+                "day": day,
+                "label": label,
+                "evidence": json.dumps({
+                    "source": "000300.SH",
+                    "rule": "收盘相对20日和60日均线，已有市场环境不覆盖",
+                    "close": round(close, 4),
+                    "ma20": round(ma20, 4),
+                    "ma60": round(ma60, 4),
+                    "ret20": round(ret20, 4),
+                    "ret60": round(ret60, 4),
+                }, ensure_ascii=False),
+            })
+        if not pending:
+            return 0
+        with self.engine.begin() as conn:
+            conn.execute(
+                sa_text(
+                    """
+                    INSERT INTO market_regime (trade_date, regime_label, confidence, evidence)
+                    VALUES (:day, :label, 0.5, CAST(:evidence AS jsonb))
+                    """
+                ),
+                pending,
+            )
+        return len(pending)
+
     # ─── 一次完整同步 ─────────────────────────────────
 
     def sync_day(

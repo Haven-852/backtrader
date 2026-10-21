@@ -61,7 +61,7 @@
           <i class="fa-solid fa-globe w-5 text-center"></i>
           <div>
             <div class="font-medium text-sm">行情中心</div>
-            <div class="text-xs text-zinc-500">全市场 · 30张表</div>
+            <div class="text-xs text-zinc-500">期货主连 · 日周月线</div>
           </div>
         </div>
 

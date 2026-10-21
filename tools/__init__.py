@@ -155,7 +155,11 @@ SKILL_REGISTRY: Dict[str, Dict[str, Any]] = {
         "category": "数据获取",
                 "desc": (
                     "PostgreSQL 优先读取日线/分钟行情与资金基本面；库内缺失时自动用 Datahubco 拉取、入库并返回。"
-                    "支持龙虎榜/大宗/两融/北向/资金流/现金流/业绩预告/十大股东及个股二级三级板块资金。"
+                    "支持龙虎榜/席位/大宗/两融/北向/资金流/"
+                    "利润表/资产负债/现金流/财务指标/主营构成/审计/分红/快报/披露日程/业绩预告/十大股东、"
+                    "指数主档/周月线/估值/行业分类/权重、基金主档/净值/分红/持仓/复权、"
+                    "限售解禁/质押/增减持/筹码/研报/同花顺概念成分/可转债/期货主档、"
+                    "每日指标/复权因子/涨跌停价/涨跌停榜/停复牌/新股，及个股二级三级板块资金。"
                 ),
         "enabled": True,
         "tools": [
@@ -246,11 +250,83 @@ SKILL_REGISTRY: Dict[str, Dict[str, Any]] = {
                 },
             },
             {
+                "id": "fill-sector-gap",
+                "name": "补板块缺日",
+                "desc": (
+                    "某一天的东财行业板块行情不在库里时使用。"
+                    "按该层级已有板块代码，从 Datahubco 或东财日K补涨跌幅和成交额并写入 PostgreSQL。"
+                    "上涨家数、领涨股、主力净额若来源没有，就留空，不要估算。"
+                ),
+                "params": [
+                    {"name": "trade_date", "label": "交易日", "type": "text", "required": True, "placeholder": "2026-09-23"},
+                    {"name": "level", "label": "层级", "type": "text", "required": False, "placeholder": "东财二级行业"},
+                ],
+                "returns": "index_rows / daily_rows / source",
+                "openai_parameters": {
+                    "type": "object",
+                    "properties": {
+                        "trade_date": {"type": "string", "description": "缺少行情的交易日，YYYY-MM-DD 或 YYYYMMDD"},
+                        "level": {
+                            "type": "string",
+                            "description": "东财一级行业、东财二级行业或东财三级行业",
+                            "default": "东财二级行业",
+                        },
+                    },
+                    "required": ["trade_date"],
+                },
+            },
+            {
+                "id": "fill-sector-history",
+                "name": "补板块历史",
+                "desc": (
+                    "一个东财板块在一段日期里行情不够时使用。"
+                    "拉取该板块东财日K、成分股日线和沪深300，写入数据库。"
+                    "上涨家数由成分股涨跌统计。已有的市场环境标签不覆盖。"
+                ),
+                "params": [
+                    {"name": "ts_code", "label": "板块代码", "type": "text", "required": True, "placeholder": "BK1277.DC"},
+                    {"name": "start_date", "label": "开始日", "type": "text", "required": True, "placeholder": "20200101"},
+                    {"name": "end_date", "label": "结束日", "type": "text", "required": True, "placeholder": "20260930"},
+                ],
+                "returns": "index_rows / breadth_rows / regime_rows",
+                "openai_parameters": {
+                    "type": "object",
+                    "properties": {
+                        "ts_code": {"type": "string", "description": "东财板块代码，如 BK1277.DC"},
+                        "start_date": {"type": "string", "description": "开始日 YYYYMMDD 或 YYYY-MM-DD"},
+                        "end_date": {"type": "string", "description": "结束日 YYYYMMDD 或 YYYY-MM-DD"},
+                    },
+                    "required": ["ts_code", "start_date", "end_date"],
+                },
+            },
+            {
+                "id": "fill-market-history",
+                "name": "补全市场板块历史",
+                "desc": (
+                    "要在全部东财二级行业上验证一条规则、而多数板块缺少整段行情时使用。"
+                    "按申万同名行业写入涨跌，再用成分股日线补上涨家数。"
+                    "已有较长历史的板块不覆盖。名称对不上的板块留空。"
+                ),
+                "params": [
+                    {"name": "start_date", "label": "开始日", "type": "text", "required": True, "placeholder": "20200101"},
+                    {"name": "end_date", "label": "结束日", "type": "text", "required": True, "placeholder": "20260930"},
+                ],
+                "returns": "index_rows / breadth_rows / unmatched_count",
+                "openai_parameters": {
+                    "type": "object",
+                    "properties": {
+                        "start_date": {"type": "string", "description": "开始日 YYYYMMDD"},
+                        "end_date": {"type": "string", "description": "结束日 YYYYMMDD"},
+                    },
+                    "required": ["start_date", "end_date"],
+                },
+            },
+            {
                 "id": "get-mins",
                 "name": "⏱️ 获取分钟分时",
                 "desc": (
-                    "获取个股 1 分钟分时（stock_intraday_mins）。"
-                    "默认 source=auto：库内足够直接返回；不足则 Datahubco/当日实时源拉取并写入 Timescale。"
+                    "获取个股 1 分钟分时。主缓存在 Redis，Timescale stock_intraday_mins 为持久化。"
+                    "source=auto：先 Redis → 再 PG → 都没有才 Datahubco 补数并写回。"
                     "source=pg 只读库；source=datahubco 强制远端。"
                 ),
                 "params": [
@@ -449,12 +525,20 @@ SKILL_REGISTRY: Dict[str, Dict[str, Any]] = {
                 "name": "💰 资金与基本面",
                 "desc": (
                     "拉取龙虎榜/大宗交易/融资融券/北向持股/个股资金流/"
-                    "现金流量表/业绩预告/十大股东/板块资金，并写入对应 PostgreSQL 表。"
+                    "利润表/资产负债表/现金流量表/财务指标(ROE·EPS)/"
+                    "主营构成/审计意见/分红送转/业绩快报/财报披露日程/"
+                    "业绩预告/十大股东/板块资金/"
+                    "指数主档/周月线/每日估值/行业分类/成分权重/"
+                    "基金主档/净值/分红/持仓/复权因子/"
+                    "限售解禁/股权质押/股东增减持/筹码摘要与明细/券商研报/"
+                    "同花顺概念成分/可转债基础与日线/期货主档/"
+                    "每日指标/复权因子/涨跌停价/涨跌停榜/停复牌/龙虎榜席位/新股，"
+                    "并写入对应 PostgreSQL 表。"
                     "默认 source=auto：库优先，不足则 Datahubco 补数入库。"
                 ),
                 "params": [
-                    {"name": "dataset", "label": "数据集", "type": "text", "required": True, "placeholder": "moneyflow|top_list|block_trade|..."},
-                    {"name": "ts_code", "label": "代码", "type": "text", "required": False, "placeholder": "000001.SZ"},
+                    {"name": "dataset", "label": "数据集", "type": "text", "required": True, "placeholder": "index_basic|fund_nav|index_weight|..."},
+                    {"name": "ts_code", "label": "代码", "type": "text", "required": False, "placeholder": "000001.SZ / 000300.SH / 510300.SH"},
                     {"name": "trade_date", "label": "交易日", "type": "text", "required": False, "placeholder": "20260918"},
                     {"name": "start_date", "label": "开始日", "type": "text", "required": False, "placeholder": "20240101"},
                     {"name": "end_date", "label": "结束日", "type": "text", "required": False, "placeholder": "20241231"},
@@ -468,25 +552,55 @@ SKILL_REGISTRY: Dict[str, Dict[str, Any]] = {
                         "dataset": {
                             "type": "string",
                             "description": (
-                                "top_list(龙虎榜)/block_trade(大宗)/margin(两融汇总)/"
-                                "margin_detail(两融明细)/moneyflow(资金流)/hk_hold(北向持股)/"
-                                "cashflow(现金流量表)/forecast(业绩预告)/top10_holders(十大股东)/"
-                                "sector_moneyflow(板块资金)"
+                                "top_list(龙虎榜)/top_inst(龙虎榜席位)/block_trade(大宗)/"
+                                "margin(两融汇总)/margin_detail(两融明细)/moneyflow(资金流)/"
+                                "hk_hold(北向持股)/income(利润表)/balancesheet(资产负债表)/"
+                                "cashflow(现金流量表)/fina_indicator(财务指标ROE·EPS)/"
+                                "fina_mainbz(主营构成)/fina_audit(审计意见)/dividend(分红送转)/"
+                                "express(业绩快报)/disclosure_date(财报披露日程)/"
+                                "forecast(业绩预告)/top10_holders(十大股东)/sector_moneyflow(板块资金)/"
+                                "index_basic(指数主档)/index_weekly(指数周线)/index_monthly(指数月线)/"
+                                "index_dailybasic(指数每日估值)/index_classify(行业分类申万)/"
+                                "index_weight(指数权重)/fund_basic(基金主档)/fund_nav(基金净值)/"
+                                "fund_div(基金分红)/fund_portfolio(基金持仓)/fund_adj(基金复权)/"
+                                "share_float(限售解禁)/pledge_stat(股权质押)/stk_holdertrade(增减持)/"
+                                "cyq_perf(筹码摘要)/cyq_chips(筹码明细)/report_rc(券商研报)/"
+                                "ths_member(同花顺概念成分)/cb_basic(可转债基础)/cb_daily(可转债日线)/"
+                                "fut_basic(期货主档)/"
+                                "daily_basic(每日指标)/adj_factor(复权因子)/stk_limit(涨跌停价)/"
+                                "limit_list(涨跌停榜)/suspend_d(停复牌)/new_share(新股)"
                             ),
                             "enum": [
-                                "top_list", "block_trade", "margin", "margin_detail",
-                                "moneyflow", "hk_hold", "cashflow", "forecast",
+                                "top_list", "top_inst", "block_trade", "margin", "margin_detail",
+                                "moneyflow", "hk_hold",
+                                "income", "balancesheet", "cashflow", "fina_indicator",
+                                "fina_mainbz", "fina_audit", "dividend", "express",
+                                "disclosure_date", "forecast",
                                 "top10_holders", "sector_moneyflow",
+                                "index_basic", "index_weekly", "index_monthly",
+                                "index_dailybasic", "index_classify", "index_weight",
+                                "fund_basic", "fund_nav", "fund_div", "fund_portfolio", "fund_adj",
+                                "share_float", "pledge_stat", "stk_holdertrade",
+                                "cyq_perf", "cyq_chips", "report_rc",
+                                "ths_member", "cb_basic", "cb_daily", "fut_basic",
+                                "daily_basic", "adj_factor", "stk_limit",
+                                "limit_list", "suspend_d", "new_share",
                             ],
                         },
                         "ts_code": {
                             "type": "string",
-                            "description": "个股代码；margin/sector_moneyflow/top_list全日可不传",
+                            "description": (
+                                "个股/指数/基金/可转债/期货/概念代码；"
+                                "margin/sector_moneyflow/top_list/limit_list/new_share/"
+                                "disclosure_date/index_basic/fund_basic/index_classify/"
+                                "index_dailybasic/cyq_perf/report_rc/cb_basic/cb_daily/fut_basic "
+                                "全日可不传。index_weight 传指数代码；ths_member 传概念如 885556.TI"
+                            ),
                         },
-                        "trade_date": {"type": "string", "description": "交易日 YYYYMMDD（龙虎榜/大宗/两融汇总等）"},
+                        "trade_date": {"type": "string", "description": "交易日 YYYYMMDD（龙虎榜/涨跌停榜/两融汇总/指数估值/筹码/可转债日线等）"},
                         "start_date": {"type": "string", "description": "开始日 YYYYMMDD"},
                         "end_date": {"type": "string", "description": "结束日 YYYYMMDD"},
-                        "period": {"type": "string", "description": "财报/股东报告期，如 20241231"},
+                        "period": {"type": "string", "description": "财报/持仓/披露报告期如 20241231；index_classify 可传 L1/L2/L3"},
                         "source": {
                             "type": "string",
                             "enum": ["auto", "pg", "datahubco"],
@@ -501,7 +615,12 @@ SKILL_REGISTRY: Dict[str, Dict[str, Any]] = {
                         "limit": {"type": "integer", "description": "返回条数上限，默认 500", "default": 500},
                         "content_type": {
                             "type": "string",
-                            "description": "板块资金 content_type，默认 行业",
+                            "description": (
+                                "板块资金用「行业/概念」；涨跌停榜 U/D/Z；fina_mainbz 用 P/D/I；"
+                                "index_basic 用市场 SSE/SZSE；fund_basic 用 E/O；"
+                                "index_classify 用 SW2021 或 L1/L2/L3；"
+                                "fut_basic 用交易所 DCE/SHFE/CZCE/CFFEX/INE/GFEX"
+                            ),
                             "default": "行业",
                         },
                     },
@@ -576,12 +695,173 @@ SKILL_REGISTRY: Dict[str, Dict[str, Any]] = {
 **Datahubco 行情补数**：需要个股/指数/ETF/板块行情或分钟分时时优先用本技能，不要先 list-tables。
 
 1. 日线/周线/月线：`get-bars` / `ensure-and-get`（source=auto）：库里有就直接返回；没有或过旧则拉 Datahubco → 写入 PG → 返回。
-2. **1 分钟分时**：优先 `get-mins`（或 `get-bars` + dataset=stock_mins）。
+2. **1 分钟分时**：优先 `get-mins`（或 `get-bars` + dataset=stock_mins）。顺序：Redis → PG → Datahubco 补数。
 3. 东财板块成分：`get-sector-members` → 可选 `filter-st-suspend`。
-4. 龙虎榜/大宗/两融/北向/资金流/现金流/业绩预告/十大股东：`get-fund-data`（dataset=...）。
+4. 龙虎榜/席位/大宗/两融/北向/资金流；利润表/资产负债/现金流/财务指标/主营构成/审计/分红/快报/披露日程/预告/十大股东；指数主档/周月线/估值/行业分类/权重；基金主档/净值/分红/持仓/复权；限售解禁/质押/增减持/筹码/研报/同花顺概念成分/可转债/期货主档；每日指标/复权/涨跌停价/涨跌停榜/停复牌/新股：`get-fund-data`（dataset=...）。
 5. 个股所属二级/三级板块资金：`get-stock-sector-moneyflow`。
 6. 只要库内结果：`source=pg`；强制远端：`source=datahubco`；不入库设 `write_back=false`。
 7. 先确认覆盖可用 `coverage`；任意 OpenAPI 用 `remote-query`。
+""",
+    },
+    "futures-market": {
+        "id": "futures-market",
+        "name": "期货行情中心",
+        "icon": "chart-area",
+        "category": "行情数据",
+        "desc": (
+            "读取行情中心期货主连报价（贵金属/有色/能源/黑色/农产品/股指/广期所等）；"
+            "检查是否缺失或落后于上一交易日；从 Datahubco 补日线并写入 fut_daily；支持日/周/月K线。"
+        ),
+        "enabled": True,
+        "tools": [
+            {
+                "id": "list-catalog",
+                "name": "主连目录",
+                "desc": "列出行情中心期货分类与合约代码",
+                "params": [],
+                "returns": "categories",
+                "openai_parameters": {"type": "object", "properties": {}, "required": []},
+            },
+            {
+                "id": "get-board",
+                "name": "主连看板",
+                "desc": "读取行情中心分类看板；默认先对齐上一交易日",
+                "params": [
+                    {"name": "category", "label": "分类", "type": "text", "required": False},
+                    {"name": "ensure", "label": "先补数", "type": "boolean", "required": False},
+                    {"name": "force", "label": "强制重拉", "type": "boolean", "required": False},
+                ],
+                "returns": "sections/asof",
+                "openai_parameters": {
+                    "type": "object",
+                    "properties": {
+                        "category": {
+                            "type": "string",
+                            "description": "贵金属/有色金属/能源化工/黑色建材/农产品/股指国债/广期所/国际贵金属，空=全部",
+                        },
+                        "ensure": {"type": "boolean", "description": "是否先对齐上一交易日，默认 true"},
+                        "force": {"type": "boolean", "description": "强制重拉远端"},
+                    },
+                    "required": [],
+                },
+            },
+            {
+                "id": "get-quotes",
+                "name": "读取报价",
+                "desc": "读取指定合约或分类的最新主连价格（现价/涨跌/持仓等）",
+                "params": [
+                    {"name": "ts_codes", "label": "合约", "type": "text", "required": False},
+                    {"name": "category", "label": "分类", "type": "text", "required": False},
+                    {"name": "ensure", "label": "先补数", "type": "boolean", "required": False},
+                ],
+                "returns": "quotes",
+                "openai_parameters": {
+                    "type": "object",
+                    "properties": {
+                        "ts_codes": {
+                            "type": "string",
+                            "description": "合约代码，逗号分隔，如 AU.SHF,SC.INE",
+                        },
+                        "category": {"type": "string", "description": "分类过滤"},
+                        "ensure": {"type": "boolean", "default": True},
+                    },
+                    "required": [],
+                },
+            },
+            {
+                "id": "get-kline",
+                "name": "期货K线",
+                "desc": "日/周/月K线；缺数时先补日线入库再返回",
+                "params": [
+                    {"name": "ts_code", "label": "合约", "type": "text", "required": True},
+                    {"name": "freq", "label": "周期", "type": "text", "required": False},
+                    {"name": "limit", "label": "条数", "type": "number", "required": False},
+                ],
+                "returns": "bars/stats",
+                "openai_parameters": {
+                    "type": "object",
+                    "properties": {
+                        "ts_code": {"type": "string", "description": "如 AU.SHF / SC.INE / IF.CFX"},
+                        "freq": {"type": "string", "enum": ["daily", "weekly", "monthly"], "default": "daily"},
+                        "start": {"type": "string"},
+                        "end": {"type": "string"},
+                        "limit": {"type": "integer", "default": 120},
+                        "ensure": {"type": "boolean", "default": True},
+                    },
+                    "required": ["ts_code"],
+                },
+            },
+            {
+                "id": "check-coverage",
+                "name": "覆盖检查",
+                "desc": "检查主连是否缺失或日期落后于上一交易日",
+                "params": [
+                    {"name": "ts_codes", "label": "合约", "type": "text", "required": False},
+                    {"name": "category", "label": "分类", "type": "text", "required": False},
+                    {"name": "asof", "label": "目标日", "type": "text", "required": False},
+                ],
+                "returns": "missing/stale",
+                "openai_parameters": {
+                    "type": "object",
+                    "properties": {
+                        "ts_codes": {"type": "string"},
+                        "category": {"type": "string"},
+                        "asof": {"type": "string", "description": "YYYY-MM-DD，默认上一交易日"},
+                    },
+                    "required": [],
+                },
+            },
+            {
+                "id": "sync-quotes",
+                "name": "补数入库",
+                "desc": "从 Datahubco 拉取缺失/过旧的主连日线并写入 fut_daily",
+                "params": [
+                    {"name": "ts_codes", "label": "合约", "type": "text", "required": False},
+                    {"name": "category", "label": "分类", "type": "text", "required": False},
+                    {"name": "asof", "label": "目标日", "type": "text", "required": False},
+                    {"name": "force", "label": "强制", "type": "boolean", "required": False},
+                ],
+                "returns": "filled/missing/upserted",
+                "openai_parameters": {
+                    "type": "object",
+                    "properties": {
+                        "ts_codes": {"type": "string", "description": "空=行情中心全部主连"},
+                        "category": {"type": "string"},
+                        "asof": {"type": "string"},
+                        "lookback_days": {"type": "integer", "default": 5},
+                        "force": {"type": "boolean", "default": False},
+                    },
+                    "required": [],
+                },
+            },
+            {
+                "id": "ensure-and-get",
+                "name": "补数并读取",
+                "desc": "一站式：检查→补数入库→返回最新报价。缺数或日期不对时优先用本工具",
+                "params": [
+                    {"name": "ts_codes", "label": "合约", "type": "text", "required": False},
+                    {"name": "category", "label": "分类", "type": "text", "required": False},
+                    {"name": "force", "label": "强制", "type": "boolean", "required": False},
+                ],
+                "returns": "sync+quotes",
+                "openai_parameters": {
+                    "type": "object",
+                    "properties": {
+                        "ts_codes": {"type": "string"},
+                        "category": {"type": "string"},
+                        "force": {"type": "boolean", "default": False},
+                    },
+                    "required": [],
+                },
+            },
+        ],
+        "instructions": """
+**期货行情中心**：问黄金/原油/橡胶/股指期货等主连价格、涨跌、持仓时用本技能。
+
+1. 先 `get-quotes` / `get-board`（默认会对齐上一交易日）。
+2. 若返回缺失、日期不对、或用户说“数据没有/过期” → `check-coverage` 再 `sync-quotes`，或直接 `ensure-and-get`。
+3. 看走势用 `get-kline`（freq=daily|weekly|monthly）。
+4. 不要编造期货价格；A股指数仍用行情看板/datahubco 指数接口。
 """,
     },
     "t0-intraday": T0_SKILL,
@@ -591,8 +871,8 @@ SKILL_REGISTRY: Dict[str, Dict[str, Any]] = {
         "icon": "wallet",
         "category": "模拟交易",
         "desc": (
-            "虚拟账户模拟交易：开户、查仓、用 1 分钟分时盯市盈亏、感知日线、下单（次日开盘/当日收盘）、"
-            "结算 pending、成交统计。盘中盈亏禁止用日线估算。仅纸面成交，不连接真实券商。"
+            "虚拟账户模拟交易：开户、查仓、分时盯市（无分时回退上一交易日收盘价计入净值）、感知日线、下单（次日开盘/当日收盘）、"
+            "结算 pending、成交统计。仅纸面成交，不连接真实券商。"
         ),
         "enabled": True,
         "tools": [
@@ -676,7 +956,7 @@ SKILL_REGISTRY: Dict[str, Dict[str, Any]] = {
             {
                 "id": "get-account",
                 "name": "账户详情",
-                "desc": "查询账户现金/净值及持仓。盯市默认用 1 分钟分时末价；无分时则 pnl_ready=false，不会用收盘价冒充。",
+                "desc": "查询账户现金/净值及持仓。优先分时末价；无分时则用上一交易日收盘价（quote_source=daily_close）计入市值。",
                 "params": [
                     {"name": "account_id", "label": "账户ID", "type": "number", "required": True},
                 ],
@@ -685,7 +965,7 @@ SKILL_REGISTRY: Dict[str, Dict[str, Any]] = {
                     "type": "object",
                     "properties": {
                         "account_id": {"type": "integer", "description": "纸面账户 ID"},
-                        "mark": {"type": "boolean", "description": "是否用分时末价盯市，默认 true；无分时不计盘中盈亏"},
+                        "mark": {"type": "boolean", "description": "是否盯市，默认 true；无分时回退上一交易日收盘价"},
                     },
                     "required": ["account_id"],
                 },
@@ -693,7 +973,7 @@ SKILL_REGISTRY: Dict[str, Dict[str, Any]] = {
             {
                 "id": "list-positions",
                 "name": "持仓列表",
-                "desc": "查询账户持仓：用对应分时末价计算浮动盈亏；无分时报 missing，不用日线估算",
+                "desc": "查询账户持仓：优先分时末价；无分时用上一交易日收盘价计价（daily_close）",
                 "params": [
                     {"name": "account_id", "label": "账户ID", "type": "number", "required": True},
                 ],
@@ -815,7 +1095,7 @@ SKILL_REGISTRY: Dict[str, Dict[str, Any]] = {
             {
                 "id": "mark",
                 "name": "盯市",
-                "desc": "按 1 分钟分时末价更新净值。没有分时的持仓不计盘中盈亏，不会回退到日线收盘价。",
+                "desc": "更新净值：优先 1 分钟分时末价；无分时（如非交易日）回退上一交易日收盘价计入市值。",
                 "params": [
                     {"name": "account_id", "label": "账户ID", "type": "number", "required": True},
                 ],
@@ -1070,8 +1350,9 @@ def build_agent_system_prompt(
 
 ## 行为要求
 1. 缺数据 → 先选手册中的**专用技能**。测某日高低命中：先 `t0_intraday__load_day`，再 `t0_intraday__hit_test`（含 A/B/C/D 组合）。禁止先 list_tables，禁止用 SQL 代替 hit-test。结论看 combo_ranking。
-2. 需要个股/指数/ETF/板块日线或 **1 分钟分时**：优先 `datahubco_data__get_bars` / `datahubco_data__get_mins`（默认库优先，缺则 Datahubco 补数入库）。不要先 list_tables。
-2b. 龙虎榜/大宗/两融/北向/资金流/现金流/业绩预告/十大股东：`datahubco_data__get_fund_data`；个股二级/三级板块资金：`datahubco_data__get_stock_sector_moneyflow`。
+2. 需要个股/指数/ETF/板块日线或 **1 分钟分时**：优先 `datahubco_data__get_bars` / `datahubco_data__get_mins`（日线 PG 优先；**分时先 Redis 再 PG**，缺则 Datahubco 补数入库）。不要先 list_tables。
+2a. **期货主连 / 行情中心价格**：`futures_market__get_quotes` / `futures_market__ensure_and_get`；缺数或日期不对 → `futures_market__sync_quotes`。禁止编造期货价格。
+2b. 龙虎榜/席位/大宗/两融/北向/资金流；利润表/资产负债/现金流/财务指标/主营构成/审计/分红/快报/披露日程/预告/十大股东；指数主档/周月线/估值/行业分类/权重；基金主档/净值/分红/持仓/复权；限售解禁/质押/增减持/筹码/研报/同花顺概念成分/可转债/期货主档；每日指标/复权/涨跌停价/涨跌停榜/停复牌/新股：`datahubco_data__get_fund_data`；个股二级/三级板块资金：`datahubco_data__get_stock_sector_moneyflow`。
 2c. 用户要生成今日市场记忆、今日行情复盘并准备写入知识库时，调用 `kb_market__today`（知识库-市场记忆-今日）。用工具返回的事实写给用户看。禁止编造涨停家数和成交额。禁止声称已经写入知识库，写入由用户点击「填入市场记忆」完成。
 3. 只有没有专用技能、且不知道表名时，才 list_tables / info_table。
 4. 拿到工具结果后必须用中文给出结论（卖点、依据、捕获率）；不要为了「再确认」继续查 SQL。

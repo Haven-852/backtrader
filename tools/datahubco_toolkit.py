@@ -2,7 +2,9 @@
 Datahubco 数据工具箱（给大模型 Agent）
 
 策略：
-  - source=auto（默认）：先查 PostgreSQL；覆盖不足再拉 Datahubco → 写入 PG → 返回
+  - 日线/周月线等 source=auto：先查 PostgreSQL；不足再拉 Datahubco → 写入 PG → 返回
+  - 分钟分时 stock_mins source=auto：先查 Redis → 再 PG/Timescale → 都没有才 Datahubco 补数
+    （可写回 Redis + stock_intraday_mins）
   - source=pg：只读数据库
   - source=datahubco：直接读 Datahubco；可选 write_back 入库
 
@@ -200,10 +202,15 @@ class DatahubcoToolkit:
             "fund_datasets": fund_items,
             "sources": ["auto", "pg", "datahubco"],
             "note": (
-                "auto=库内有则直接返回；不足则 Datahubco 拉取并入库后返回。"
-                "datahubco=强制远端；write_back 控制是否写入 PG。"
+                "日线等：auto=PG 有则返回，不足则 Datahubco 拉取并入库。"
+                "分时 stock_mins：auto=先 Redis，再 PG/Timescale，都没有再 Datahubco 补数（可写回 Redis+PG）。"
+                "datahubco=强制远端；write_back 控制是否写入。"
                 "板块成分用 get_sector_members；剔除 ST/停牌用 filter_st_suspend。"
-                "龙虎榜/大宗/两融/北向/资金流/现金流/业绩预告/十大股东用 get_fund_data；"
+                "龙虎榜/大宗/两融/北向/资金流/利润表/资产负债/现金流/财务指标/"
+                "主营构成/审计/分红/快报/披露日程/业绩预告/十大股东用 get_fund_data；"
+                "指数主档/周月线/估值/行业分类/权重、基金主档/净值/分红/持仓/复权也用 get_fund_data；"
+                "限售解禁/质押/增减持/筹码/研报/同花顺概念成分/可转债/期货主档也用 get_fund_data；"
+                "每日指标/复权因子/涨跌停价/涨跌停榜/停复牌/龙虎榜席位/新股也用 get_fund_data；"
                 "个股二级/三级板块资金用 get_stock_sector_moneyflow。"
             ),
         }
@@ -226,7 +233,16 @@ class DatahubcoToolkit:
                 if not d:
                     phase = self.intraday.session_phase()
                     d = phase["trade_date"]
+                redis_n = int(self.intraday.redis_bars_count(code, d) or 0)
                 meta = self._pg_mins_meta(code, d)
+                meta = {
+                    **meta,
+                    "redis_count": redis_n,
+                    "local_count": max(int(meta.get("count") or 0), redis_n),
+                    "prefer": "redis" if redis_n >= _MINS_SUFFICIENT else (
+                        "pg" if int(meta.get("count") or 0) >= _MINS_SUFFICIENT else "remote"
+                    ),
+                }
                 return {
                     "ok": True,
                     "ts_code": code,
@@ -234,7 +250,8 @@ class DatahubcoToolkit:
                     "table": table,
                     "trade_date": d.isoformat(),
                     "coverage": meta,
-                    "sufficient": int(meta.get("count") or 0) >= _MINS_SUFFICIENT,
+                    "sufficient": int(meta.get("local_count") or 0) >= _MINS_SUFFICIENT,
+                    "note": "分时优先看 Redis；PG/Timescale 为持久化备份",
                 }
             start = _parse_date(start_date)
             end = _parse_date(end_date)
@@ -374,6 +391,36 @@ class DatahubcoToolkit:
             logger.exception("get_bars failed")
             return {"ok": False, "error": str(e), "ts_code": ts_code, "dataset": dataset}
 
+    def fill_sector_gap(self, trade_date: str, level: str = "东财二级行业") -> Dict[str, Any]:
+        """补指定交易日的东财行业板块行情并写入 PostgreSQL。"""
+        try:
+            if not trade_date:
+                return {"ok": False, "error": "缺少 trade_date"}
+            return self.sector.backfill_level_day(str(trade_date), level or "东财二级行业")
+        except Exception as e:
+            logger.exception("fill_sector_gap failed")
+            return {"ok": False, "error": str(e), "trade_date": trade_date, "level": level}
+
+    def fill_market_history(self, start_date: str, end_date: str) -> Dict[str, Any]:
+        """补全部东财二级行业在一段日期里的涨跌和上涨家数，并写入数据库。"""
+        try:
+            if not start_date or not end_date:
+                return {"ok": False, "error": "缺少 start_date 或 end_date"}
+            return self.sector.fill_market_history(str(start_date), str(end_date))
+        except Exception as e:
+            logger.exception("fill_market_history failed")
+            return {"ok": False, "error": str(e)}
+
+    def fill_sector_history(self, ts_code: str, start_date: str, end_date: str) -> Dict[str, Any]:
+        """补一个板块一段日期的行情、上涨家数和沪深300环境，并写入数据库。"""
+        try:
+            if not ts_code or not start_date or not end_date:
+                return {"ok": False, "error": "缺少 ts_code、start_date 或 end_date"}
+            return self.sector.fill_board_history(str(ts_code), str(start_date), str(end_date))
+        except Exception as e:
+            logger.exception("fill_sector_history failed")
+            return {"ok": False, "error": str(e), "ts_code": ts_code}
+
     def remote_query(
         self,
         api: str,
@@ -428,11 +475,12 @@ class DatahubcoToolkit:
         include_auction: bool = True,
     ) -> Dict[str, Any]:
         """
-        获取个股 1 分钟分时（stock_intraday_mins）。
+        获取个股 1 分钟分时。
 
+        本地存储：当日/近期主缓存在 Redis；Timescale `stock_intraday_mins` 为持久化。
         source:
-          - auto: 库内足够则直接返回；不足则拉远端（Datahubco stk_mins / 当日东财腾讯）并默认入库
-          - pg: 只读 Timescale
+          - auto: Redis → PG → Datahubco（缺则补数；write_back 时写 Redis/PG）
+          - pg: 只读 Timescale（不经 Redis）
           - datahubco: 强制远端；write_back 控制是否写入
         """
         try:
@@ -462,6 +510,43 @@ class DatahubcoToolkit:
                 remote = self.intraday.fetch_remote(code, d, live=live)
                 upserted = 0
                 if write_back and remote is not None and not remote.empty:
+                    # 与 IntradayFetcher.get 一致：当日写 Redis + PG
+                    packed = self.intraday.get(
+                        ts_code=code,
+                        trade_date=d.strftime("%Y%m%d"),
+                        history=False,
+                    )
+                    if packed.get("ok"):
+                        bars = list(packed.get("bars") or [])
+                        if not include_auction:
+                            bars = [
+                                b for b in bars
+                                if b.get("phase") != "auction" and b.get("freq") != "auction"
+                            ]
+                        if len(bars) > limit:
+                            bars = bars[-limit:]
+                        return {
+                            "ok": True,
+                            "ts_code": code,
+                            "name": packed.get("name"),
+                            "trade_date": d.isoformat(),
+                            "dataset": "stock_mins",
+                            "table": table,
+                            "freq": "1min",
+                            "source_used": str(packed.get("source") or "datahubco"),
+                            "fetched_remote": True,
+                            "upserted": int(packed.get("pg_written") or 0),
+                            "redis_hit": False,
+                            "session": packed.get("session"),
+                            "session_phase": packed.get("session_phase"),
+                            "pre_close": packed.get("pre_close"),
+                            "last": packed.get("last"),
+                            "pct_chg": packed.get("pct_chg"),
+                            "count": len(bars),
+                            "data": bars,
+                            "latest": bars[-1] if bars else None,
+                            "message": packed.get("message"),
+                        }
                     upserted = int(self.intraday.upsert_mins(remote))
                     if d == phase["trade_date"] and phase.get("phase") == "after_close":
                         self.intraday.upsert_daily_from_mins(code, d, remote)
@@ -477,7 +562,7 @@ class DatahubcoToolkit:
                     limit=limit, include_auction=include_auction,
                 )
 
-            # auto：复用 IntradayFetcher.get（当日 Redis + 历史 PG 优先，缺则远端入库）
+            # auto：先 Redis，再 PG；都不够再 Datahubco 补数
             if write_back:
                 packed = self.intraday.get(
                     ts_code=code,
@@ -499,7 +584,12 @@ class DatahubcoToolkit:
                 if len(bars) > limit:
                     bars = bars[-limit:]
                 src = str(packed.get("source") or "auto")
-                fetched = src not in ("timescale", "redis", "pg")
+                was_cache = (
+                    (not packed.get("redis_written"))
+                    and int(packed.get("pg_written") or 0) == 0
+                    and src in ("redis", "timescale", "pg")
+                )
+                fetched = not was_cache
                 return {
                     "ok": True,
                     "ts_code": code,
@@ -508,8 +598,13 @@ class DatahubcoToolkit:
                     "dataset": "stock_mins",
                     "table": table,
                     "freq": "1min",
-                    "source_used": src,
+                    "source_used": src if was_cache else (
+                        "datahubco+redis" if packed.get("redis_written") else (
+                            "datahubco+pg" if int(packed.get("pg_written") or 0) else src
+                        )
+                    ),
                     "fetched_remote": fetched,
+                    "redis_hit": src == "redis" and was_cache,
                     "upserted": int(packed.get("pg_written") or 0),
                     "session": packed.get("session"),
                     "session_phase": packed.get("session_phase"),
@@ -522,7 +617,40 @@ class DatahubcoToolkit:
                     "message": packed.get("message"),
                 }
 
-            # auto + 不写回：库够用读库，否则只读远端
+            # auto + 不写回：Redis → PG → 只读远端
+            cached = self.intraday.peek_redis(code, d)
+            if cached and len(cached.get("bars") or []) >= _MINS_SUFFICIENT:
+                bars = list(cached.get("bars") or [])
+                if not include_auction:
+                    bars = [
+                        b for b in bars
+                        if b.get("phase") != "auction" and b.get("freq") != "auction"
+                    ]
+                if len(bars) > limit:
+                    bars = bars[-limit:]
+                return {
+                    "ok": True,
+                    "ts_code": code,
+                    "name": cached.get("name"),
+                    "trade_date": d.isoformat(),
+                    "dataset": "stock_mins",
+                    "table": table,
+                    "freq": "1min",
+                    "source_used": "redis",
+                    "fetched_remote": False,
+                    "redis_hit": True,
+                    "upserted": 0,
+                    "session": cached.get("session"),
+                    "session_phase": cached.get("session_phase") or phase.get("phase"),
+                    "pre_close": cached.get("pre_close"),
+                    "last": cached.get("last"),
+                    "pct_chg": cached.get("pct_chg"),
+                    "count": len(bars),
+                    "data": bars,
+                    "latest": bars[-1] if bars else None,
+                    "message": "命中 Redis 分时缓存（未写回）",
+                }
+
             meta = self._pg_mins_meta(code, d)
             if int(meta.get("count") or 0) >= _MINS_SUFFICIENT:
                 df = self.intraday.query_pg(code, d)
@@ -535,7 +663,7 @@ class DatahubcoToolkit:
             return self._ok_mins(
                 code, d, remote, source_used="datahubco", fetched=True, upserted=0,
                 limit=limit, include_auction=include_auction,
-                note="write_back=false，未写入数据库",
+                note="write_back=false，未写入 Redis/数据库",
             )
         except Exception as e:
             logger.exception("get_mins failed")
@@ -1422,8 +1550,14 @@ class DatahubcoToolkit:
         content_type: str = "行业",
     ) -> Dict[str, Any]:
         """
-        获取并可选写入：龙虎榜 / 大宗 / 两融 / 北向持股 / 资金流 /
-        现金流量表 / 业绩预告 / 十大股东 / 板块资金。
+        获取并可选写入：龙虎榜 / 席位 / 大宗 / 两融 / 北向持股 / 资金流 /
+        利润表 / 资产负债表 / 现金流量表 / 财务指标 / 主营构成 / 审计意见 /
+        分红送转 / 业绩快报 / 财报披露日程 / 业绩预告 / 十大股东 / 板块资金 /
+        指数主档 / 周月线 / 每日估值 / 行业分类 / 成分权重 /
+        基金主档 / 净值 / 分红 / 持仓 / 复权因子 /
+        限售解禁 / 股权质押 / 股东增减持 / 筹码摘要与明细 / 券商研报 /
+        同花顺概念成分 / 可转债基础与日线 / 期货主档 /
+        每日指标 / 复权因子 / 涨跌停价 / 涨跌停榜 / 停复牌 / 新股。
         """
         try:
             return self.fund.get(
@@ -1502,6 +1636,15 @@ class DatahubcoToolkit:
 
     async def get_bars_async(self, **kwargs) -> Dict[str, Any]:
         return await asyncio.to_thread(self.get_bars, **kwargs)
+
+    async def fill_sector_gap_async(self, **kwargs) -> Dict[str, Any]:
+        return await asyncio.to_thread(self.fill_sector_gap, **kwargs)
+
+    async def fill_sector_history_async(self, **kwargs) -> Dict[str, Any]:
+        return await asyncio.to_thread(self.fill_sector_history, **kwargs)
+
+    async def fill_market_history_async(self, **kwargs) -> Dict[str, Any]:
+        return await asyncio.to_thread(self.fill_market_history, **kwargs)
 
     async def remote_query_async(self, **kwargs) -> Dict[str, Any]:
         return await asyncio.to_thread(self.remote_query, **kwargs)

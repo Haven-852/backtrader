@@ -83,9 +83,10 @@
           </div>
           <div class="text-xs text-zinc-500 pt-1">已经完成的成交。还没买的可以留空。</div>
           <div class="grid grid-cols-2 gap-3">
-            <label class="text-xs text-zinc-400">实际买入<input v-model="plan.executed_price" type="number" step="0.01" class="field" /></label>
-            <label class="text-xs text-zinc-400">实际卖出<input v-model="plan.sell_price" type="number" step="0.01" class="field" /></label>
+            <label class="text-xs text-zinc-400">实际买入价<input v-model="plan.executed_price" type="number" step="0.01" class="field" /></label>
+            <label class="text-xs text-zinc-400">实际卖出价<input v-model="plan.sell_price" type="number" step="0.01" class="field" /></label>
             <label class="text-xs text-zinc-400">实际仓位 %<input v-model="plan.actual_position_pct" type="number" step="0.1" class="field" /></label>
+            <label class="text-xs text-zinc-400">实际止损<input v-model="plan.actual_stop_price" type="number" step="0.01" class="field" /></label>
             <label class="text-xs text-zinc-400">实际收益 %<input v-model="plan.return_pct" type="number" step="0.01" class="field" /></label>
             <label class="text-xs text-zinc-400">最大浮盈 MFE %<input v-model="plan.max_favorable_excursion" type="number" step="0.01" class="field" /></label>
             <label class="text-xs text-zinc-400">最大浮亏 MAE %<input v-model="plan.max_adverse_excursion" type="number" step="0.01" class="field" /></label>
@@ -98,6 +99,42 @@
           </div>
           <label v-if="plan.followed_plan === 'no'" class="block text-xs text-zinc-400">偏离原因
             <textarea v-model="plan.deviation_reason" rows="2" class="mt-1 w-full bg-zinc-950 border border-zinc-800 rounded-lg px-3 py-2 text-sm text-zinc-100"></textarea>
+          </label>
+          <div class="text-xs text-zinc-500 pt-1">能力对照。方向、板块、选股和买卖点按这些字段计算，不按这笔赚亏打分。</div>
+          <div class="grid grid-cols-2 gap-3">
+            <label class="text-xs text-zinc-400">市场方向判断
+              <select v-model="plan.market_view" class="field">
+                <option value="">还没判断</option>
+                <option>看多</option>
+                <option>震荡</option>
+                <option>看空</option>
+              </select>
+            </label>
+            <label class="text-xs text-zinc-400">指数实际涨跌 %<input v-model="plan.market_return_pct" type="number" step="0.01" class="field" /></label>
+            <label class="text-xs text-zinc-400">板块判断
+              <select v-model="plan.sector_view" class="field">
+                <option value="">还没判断</option>
+                <option>会强于大盘</option>
+                <option>与大盘同步</option>
+                <option>会弱于大盘</option>
+              </select>
+            </label>
+            <label class="text-xs text-zinc-400">板块实际涨跌 %<input v-model="plan.sector_return_pct" type="number" step="0.01" class="field" /></label>
+            <label class="text-xs text-zinc-400 col-span-2">板块名称<input v-model="plan.sector_name" class="field" /></label>
+          </div>
+          <label class="block text-xs text-zinc-400">个股选择理由
+            <textarea v-model="plan.stock_reason" rows="2" class="mt-1 w-full bg-zinc-950 border border-zinc-800 rounded-lg px-3 py-2 text-sm text-zinc-100"></textarea>
+          </label>
+          <label class="block text-xs text-zinc-400">卖出理由
+            <select v-model="plan.exit_style" class="field">
+              <option value="">还没卖出</option>
+              <option>计划退出</option>
+              <option>提前退出</option>
+              <option>延迟退出</option>
+            </select>
+          </label>
+          <label class="block text-xs text-zinc-400">复盘结论
+            <textarea v-model="plan.review_conclusion" rows="2" placeholder="这笔哪里做对、哪里做错。不按赚亏下结论。" class="mt-1 w-full bg-zinc-950 border border-zinc-800 rounded-lg px-3 py-2 text-sm text-zinc-100"></textarea>
           </label>
           <label class="block text-xs text-zinc-400">失败归因
             <select v-model="plan.failure_cause" class="field">
@@ -197,6 +234,12 @@
             <div>实际卖出 {{ money(current.sell_price) }} · 实际收益 {{ fmtPct(current.return_pct) }}</div>
             <div>最大浮盈 MFE {{ fmtPct(current.max_favorable_excursion) }} · 最大浮亏 MAE {{ fmtPct(current.max_adverse_excursion) }}</div>
             <div>是否按计划执行：{{ followedText(current.followed_plan) }}</div>
+            <div v-if="current.actual_stop_price != null">实际止损 {{ money(current.actual_stop_price) }}</div>
+            <div v-if="current.market_view">市场方向 {{ current.market_view }} · 指数 {{ fmtPct(current.market_return_pct) }}</div>
+            <div v-if="current.sector_view">板块判断 {{ current.sector_view }}<template v-if="current.sector_name">（{{ current.sector_name }}）</template> · 板块 {{ fmtPct(current.sector_return_pct) }}</div>
+            <div v-if="current.stock_reason">个股选择：{{ current.stock_reason }}</div>
+            <div v-if="current.exit_style">卖出理由：{{ current.exit_style }}</div>
+            <div v-if="current.review_conclusion" class="whitespace-pre-wrap">复盘结论：{{ current.review_conclusion }}</div>
             <div v-if="current.deviation_reason">偏离原因：{{ current.deviation_reason }}</div>
             <div v-for="line in deviationLines" :key="line" class="text-amber-300 text-xs mt-1">⚠ {{ line }}</div>
           </template>
@@ -352,6 +395,8 @@ function blankPlan() {
     reasons: [], invalidation: [], direction: '做多', trade_date: '', strategy_name: '',
     holding_mode: 'days', planned_holding_days: '', followed_plan: '', deviation_reason: '',
     failure_cause: '', lesson: '', rule_intent: 'none',
+    market_view: '', market_return_pct: '', sector_view: '', sector_name: '', sector_return_pct: '',
+    stock_reason: '', exit_style: '', actual_stop_price: '', review_conclusion: '',
   }
 }
 const invalidOptions = ['跌破突破位', '板块强度明显下降', '龙头出现明显退潮', '成交量快速萎缩']
@@ -582,6 +627,15 @@ async function startEdit(trade: any) {
     max_adverse_excursion: t.max_adverse_excursion ?? '',
     followed_plan: t.followed_plan === true ? 'yes' : t.followed_plan === false ? 'no' : '',
     deviation_reason: t.deviation_reason || '',
+    market_view: t.market_view || '',
+    market_return_pct: t.market_return_pct ?? '',
+    sector_view: t.sector_view || '',
+    sector_name: t.sector_name || '',
+    sector_return_pct: t.sector_return_pct ?? '',
+    stock_reason: t.stock_reason || '',
+    exit_style: t.exit_style || '',
+    actual_stop_price: t.actual_stop_price ?? '',
+    review_conclusion: t.review_conclusion || '',
     failure_cause: t.primary_category || '',
     lesson: t.lesson?.content || '',
     logic_result: t.logic_result || 'UNDETERMINED',

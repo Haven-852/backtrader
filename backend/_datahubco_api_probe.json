@@ -1,0 +1,680 @@
+{
+  "missing": [
+    {
+      "cat": "基础",
+      "api": "new_share",
+      "rows": 124,
+      "cols": [
+        "ts_code",
+        "sub_code",
+        "name",
+        "ipo_date",
+        "issue_date"
+      ],
+      "sec": 1.16
+    },
+    {
+      "cat": "基础",
+      "api": "suspend_d",
+      "rows": 206,
+      "cols": [
+        "ts_code",
+        "trade_date",
+        "suspend_timing",
+        "suspend_type"
+      ],
+      "sec": 0.95
+    },
+    {
+      "cat": "基础",
+      "api": "stk_limit",
+      "rows": 5647,
+      "cols": [
+        "trade_date",
+        "ts_code",
+        "up_limit",
+        "down_limit"
+      ],
+      "sec": 7.47
+    },
+    {
+      "cat": "行情",
+      "api": "adj_factor",
+      "rows": 17,
+      "cols": [
+        "ts_code",
+        "trade_date",
+        "adj_factor"
+      ],
+      "sec": 1.32
+    },
+    {
+      "cat": "行情",
+      "api": "daily_basic",
+      "rows": 17,
+      "cols": [
+        "ts_code",
+        "trade_date",
+        "close",
+        "turnover_rate",
+        "turnover_rate_f"
+      ],
+      "sec": 0.48
+    },
+    {
+      "cat": "行情",
+      "api": "pro_bar",
+      "rows": "param_or_perm",
+      "cols": [],
+      "note": "Datahubco pro_bar HTTP 400: 请指定正确的接口名",
+      "sec": 1.05
+    },
+    {
+      "cat": "指数",
+      "api": "index_basic",
+      "rows": 3,
+      "cols": [
+        "ts_code",
+        "name",
+        "market",
+        "publisher",
+        "category"
+      ],
+      "sec": 1.0
+    },
+    {
+      "cat": "指数",
+      "api": "index_weekly",
+      "rows": 36,
+      "cols": [
+        "ts_code",
+        "trade_date",
+        "close",
+        "open",
+        "high"
+      ],
+      "sec": 1.65
+    },
+    {
+      "cat": "指数",
+      "api": "index_monthly",
+      "rows": 32,
+      "cols": [
+        "ts_code",
+        "trade_date",
+        "close",
+        "open",
+        "high"
+      ],
+      "sec": 1.24
+    },
+    {
+      "cat": "指数",
+      "api": "index_weight",
+      "rows": 0,
+      "cols": [],
+      "sec": 1.6
+    },
+    {
+      "cat": "指数",
+      "api": "index_dailybasic",
+      "rows": 15,
+      "cols": [
+        "ts_code",
+        "trade_date",
+        "total_mv",
+        "float_mv",
+        "total_share"
+      ],
+      "sec": 1.8
+    },
+    {
+      "cat": "指数",
+      "api": "index_classify",
+      "rows": 31,
+      "cols": [
+        "index_code",
+        "industry_name",
+        "level",
+        "industry_code",
+        "is_pub"
+      ],
+      "sec": 1.09
+    },
+    {
+      "cat": "基金",
+      "api": "fund_basic",
+      "rows": 3,
+      "cols": [
+        "ts_code",
+        "name",
+        "management",
+        "custodian",
+        "fund_type"
+      ],
+      "sec": 1.84
+    },
+    {
+      "cat": "基金",
+      "api": "fund_nav",
+      "rows": 17,
+      "cols": [
+        "ts_code",
+        "ann_date",
+        "nav_date",
+        "unit_nav",
+        "accum_nav"
+      ],
+      "sec": 2.0
+    },
+    {
+      "cat": "基金",
+      "api": "fund_div",
+      "rows": 22,
+      "cols": [
+        "ts_code",
+        "ann_date",
+        "imp_anndate",
+        "base_date",
+        "div_proc"
+      ],
+      "sec": 1.04
+    },
+    {
+      "cat": "基金",
+      "api": "fund_portfolio",
+      "rows": 1000,
+      "cols": [
+        "ts_code",
+        "ann_date",
+        "end_date",
+        "symbol",
+        "mkv"
+      ],
+      "sec": 2.18
+    },
+    {
+      "cat": "基金",
+      "api": "fund_adj",
+      "rows": 17,
+      "cols": [
+        "ts_code",
+        "trade_date",
+        "adj_factor"
+      ],
+      "sec": 3.54
+    },
+    {
+      "cat": "财务",
+      "api": "income",
+      "rows": 12,
+      "cols": [
+        "ts_code",
+        "ann_date",
+        "f_ann_date",
+        "end_date",
+        "report_type"
+      ],
+      "sec": 0.78
+    },
+    {
+      "cat": "财务",
+      "api": "balancesheet",
+      "rows": 18,
+      "cols": [
+        "ts_code",
+        "ann_date",
+        "f_ann_date",
+        "end_date",
+        "report_type"
+      ],
+      "sec": 1.15
+    },
+    {
+      "cat": "财务",
+      "api": "fina_indicator",
+      "rows": 12,
+      "cols": [
+        "ts_code",
+        "ann_date",
+        "end_date",
+        "eps",
+        "dt_eps"
+      ],
+      "sec": 2.9
+    },
+    {
+      "cat": "财务",
+      "api": "fina_audit",
+      "rows": 39,
+      "cols": [
+        "ts_code",
+        "ann_date",
+        "end_date",
+        "audit_result",
+        "audit_fees"
+      ],
+      "sec": 1.47
+    },
+    {
+      "cat": "财务",
+      "api": "fina_mainbz",
+      "rows": 150,
+      "cols": [
+        "ts_code",
+        "end_date",
+        "bz_item",
+        "bz_code",
+        "bz_sales"
+      ],
+      "sec": 2.56
+    },
+    {
+      "cat": "财务",
+      "api": "express",
+      "rows": 0,
+      "cols": [],
+      "sec": 1.46
+    },
+    {
+      "cat": "财务",
+      "api": "dividend",
+      "rows": 98,
+      "cols": [
+        "ts_code",
+        "end_date",
+        "ann_date",
+        "div_proc",
+        "stk_div"
+      ],
+      "sec": 1.67
+    },
+    {
+      "cat": "财务",
+      "api": "disclosure_date",
+      "rows": 5437,
+      "cols": [
+        "ts_code",
+        "ann_date",
+        "end_date",
+        "pre_date",
+        "actual_date"
+      ],
+      "sec": 3.32
+    },
+    {
+      "cat": "资金",
+      "api": "top_inst",
+      "rows": 720,
+      "cols": [
+        "trade_date",
+        "ts_code",
+        "exalter",
+        "buy",
+        "buy_rate"
+      ],
+      "sec": 2.0
+    },
+    {
+      "cat": "资金",
+      "api": "pledge_stat",
+      "rows": 646,
+      "cols": [
+        "ts_code",
+        "end_date",
+        "pledge_count",
+        "unrest_pledge",
+        "rest_pledge"
+      ],
+      "sec": 1.0
+    },
+    {
+      "cat": "资金",
+      "api": "pledge_detail",
+      "rows": 0,
+      "cols": [],
+      "sec": 3.82
+    },
+    {
+      "cat": "资金",
+      "api": "repurchase",
+      "rows": 0,
+      "cols": [],
+      "sec": 3.62
+    },
+    {
+      "cat": "资金",
+      "api": "share_float",
+      "rows": 106,
+      "cols": [
+        "ts_code",
+        "ann_date",
+        "float_date",
+        "float_share",
+        "float_ratio"
+      ],
+      "sec": 1.0
+    },
+    {
+      "cat": "资金",
+      "api": "stk_holdertrade",
+      "rows": 17,
+      "cols": [
+        "ts_code",
+        "ann_date",
+        "holder_name",
+        "holder_type",
+        "in_de"
+      ],
+      "sec": 3.42
+    },
+    {
+      "cat": "板块",
+      "api": "ths_member",
+      "rows": 456,
+      "cols": [
+        "ts_code",
+        "con_code",
+        "con_name"
+      ],
+      "sec": 1.07
+    },
+    {
+      "cat": "涨跌停",
+      "api": "limit_list_d",
+      "rows": 90,
+      "cols": [
+        "trade_date",
+        "ts_code",
+        "industry",
+        "name",
+        "close"
+      ],
+      "sec": 1.08
+    },
+    {
+      "cat": "资讯",
+      "api": "news",
+      "rows": "param_or_perm",
+      "cols": [],
+      "note": "Datahubco news HTTP 403: no Tushare token has permission for this API",
+      "sec": 1.29
+    },
+    {
+      "cat": "研报",
+      "api": "report_rc",
+      "rows": 5000,
+      "cols": [
+        "ts_code",
+        "name",
+        "report_date",
+        "report_title",
+        "report_type"
+      ],
+      "sec": 11.29
+    },
+    {
+      "cat": "研报",
+      "api": "cyq_perf",
+      "rows": 5000,
+      "cols": [
+        "ts_code",
+        "trade_date",
+        "his_low",
+        "his_high",
+        "cost_5pct"
+      ],
+      "sec": 3.9
+    },
+    {
+      "cat": "研报",
+      "api": "cyq_chips",
+      "rows": 103,
+      "cols": [
+        "ts_code",
+        "trade_date",
+        "price",
+        "percent"
+      ],
+      "sec": 2.41
+    },
+    {
+      "cat": "其他",
+      "api": "cb_basic",
+      "rows": 3,
+      "cols": [
+        "ts_code",
+        "bond_full_name",
+        "bond_short_name",
+        "cb_type",
+        "cb_code"
+      ],
+      "sec": 1.77
+    },
+    {
+      "cat": "其他",
+      "api": "cb_daily",
+      "rows": 315,
+      "cols": [
+        "ts_code",
+        "trade_date",
+        "pre_close",
+        "open",
+        "high"
+      ],
+      "sec": 1.18
+    },
+    {
+      "cat": "其他",
+      "api": "fut_basic",
+      "rows": 3,
+      "cols": [
+        "ts_code",
+        "symbol",
+        "exchange",
+        "name",
+        "fut_code"
+      ],
+      "sec": 1.31
+    },
+    {
+      "cat": "其他",
+      "api": "fut_daily",
+      "rows": "param_or_perm",
+      "cols": [],
+      "note": "HTTPSConnectionPool(host='datahubco.com', port=443): Read timed out. (read timeout=8)",
+      "sec": 9.14
+    }
+  ],
+  "have": [
+    {
+      "cat": "基础",
+      "api": "trade_cal",
+      "rows": 10,
+      "cols": [
+        "exchange",
+        "cal_date",
+        "is_open",
+        "pretrade_date"
+      ],
+      "sec": 1.22
+    },
+    {
+      "cat": "基础",
+      "api": "stock_basic",
+      "rows": 3,
+      "cols": [
+        "ts_code",
+        "symbol",
+        "name",
+        "area",
+        "industry"
+      ],
+      "sec": 3.2
+    }
+  ],
+  "unavailable": [
+    {
+      "cat": "基础",
+      "api": "namechange",
+      "error": "Datahubco namechange HTTP 400: unknown api_name: namechange",
+      "sec": 1.48
+    },
+    {
+      "cat": "基础",
+      "api": "stock_company",
+      "error": "Datahubco stock_company HTTP 400: unknown api_name: stock_company",
+      "sec": 1.33
+    },
+    {
+      "cat": "基础",
+      "api": "stk_managers",
+      "error": "Datahubco stk_managers HTTP 400: unknown api_name: stk_managers",
+      "sec": 3.12
+    },
+    {
+      "cat": "基础",
+      "api": "hs_const",
+      "error": "Datahubco hs_const HTTP 400: unknown api_name: hs_const",
+      "sec": 0.63
+    },
+    {
+      "cat": "行情",
+      "api": "hk_daily",
+      "error": "Datahubco hk_daily HTTP 400: unknown api_name: hk_daily",
+      "sec": 1.33
+    },
+    {
+      "cat": "指数",
+      "api": "index_member",
+      "error": "Datahubco index_member HTTP 400: unknown api_name: index_member",
+      "sec": 0.64
+    },
+    {
+      "cat": "资金",
+      "api": "moneyflow_hsgt",
+      "error": "Datahubco moneyflow_hsgt HTTP 400: unknown api_name: moneyflow_hsgt",
+      "sec": 3.76
+    },
+    {
+      "cat": "资金",
+      "api": "moneyflow_cnt_dc",
+      "error": "Datahubco moneyflow_cnt_dc HTTP 400: unknown api_name: moneyflow_cnt_dc",
+      "sec": 0.88
+    },
+    {
+      "cat": "北向",
+      "api": "hsgt_top10",
+      "error": "Datahubco hsgt_top10 HTTP 400: unknown api_name: hsgt_top10",
+      "sec": 0.43
+    },
+    {
+      "cat": "北向",
+      "api": "ggt_top10",
+      "error": "Datahubco ggt_top10 HTTP 400: unknown api_name: ggt_top10",
+      "sec": 1.21
+    },
+    {
+      "cat": "北向",
+      "api": "ggt_daily",
+      "error": "Datahubco ggt_daily HTTP 400: unknown api_name: ggt_daily",
+      "sec": 0.72
+    },
+    {
+      "cat": "板块",
+      "api": "dc_hot",
+      "error": "Datahubco dc_hot HTTP 400: unknown api_name: dc_hot",
+      "sec": 1.57
+    },
+    {
+      "cat": "板块",
+      "api": "ths_index",
+      "error": "Datahubco ths_index HTTP 400: unknown api_name: ths_index",
+      "sec": 1.39
+    },
+    {
+      "cat": "板块",
+      "api": "ths_daily",
+      "error": "Datahubco ths_daily HTTP 400: unknown api_name: ths_daily",
+      "sec": 0.64
+    },
+    {
+      "cat": "板块",
+      "api": "ci_daily",
+      "error": "Datahubco ci_daily HTTP 400: unknown api_name: ci_daily",
+      "sec": 0.4
+    },
+    {
+      "cat": "涨跌停",
+      "api": "limit_list",
+      "error": "Datahubco limit_list HTTP 400: unknown api_name: limit_list",
+      "sec": 3.66
+    },
+    {
+      "cat": "涨跌停",
+      "api": "limit_cpt_list",
+      "error": "Datahubco limit_cpt_list HTTP 400: unknown api_name: limit_cpt_list",
+      "sec": 9.99
+    },
+    {
+      "cat": "涨跌停",
+      "api": "limit_step",
+      "error": "Datahubco limit_step HTTP 400: unknown api_name: limit_step",
+      "sec": 0.62
+    },
+    {
+      "cat": "涨跌停",
+      "api": "kpl_list",
+      "error": "Datahubco kpl_list HTTP 400: unknown api_name: kpl_list",
+      "sec": 2.5
+    },
+    {
+      "cat": "涨跌停",
+      "api": "stk_auction_o",
+      "error": "Datahubco stk_auction_o HTTP 400: unknown api_name: stk_auction_o",
+      "sec": 0.95
+    },
+    {
+      "cat": "涨跌停",
+      "api": "stk_auction_c",
+      "error": "Datahubco stk_auction_c HTTP 400: unknown api_name: stk_auction_c",
+      "sec": 1.19
+    },
+    {
+      "cat": "资讯",
+      "api": "anns",
+      "error": "Datahubco anns HTTP 400: unknown api_name: anns",
+      "sec": 1.48
+    },
+    {
+      "cat": "资讯",
+      "api": "cctv_news",
+      "error": "Datahubco cctv_news HTTP 400: unknown api_name: cctv_news",
+      "sec": 1.37
+    },
+    {
+      "cat": "资讯",
+      "api": "irm_qa_sz",
+      "error": "Datahubco irm_qa_sz HTTP 400: unknown api_name: irm_qa_sz",
+      "sec": 0.94
+    },
+    {
+      "cat": "其他",
+      "api": "concept",
+      "error": "Datahubco concept HTTP 400: unknown api_name: concept",
+      "sec": 1.22
+    },
+    {
+      "cat": "其他",
+      "api": "concept_detail",
+      "error": "Datahubco concept_detail HTTP 400: unknown api_name: concept_detail",
+      "sec": 8.18
+    },
+    {
+      "cat": "其他",
+      "api": "bak_daily",
+      "error": "Datahubco bak_daily HTTP 400: unknown api_name: bak_daily",
+      "sec": 1.68
+    }
+  ]
+}

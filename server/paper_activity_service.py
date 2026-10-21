@@ -395,8 +395,9 @@ def enrich_positions(
         d = dict(p)
         qty = _f(d.get("quantity"))
         avg = _f(d.get("avg_cost"))
-        px = _f(d.get("market_price")) if str(d.get("quote_source") or "") == "intraday" else 0.0
-        quoted = str(d.get("quote_source") or "") == "intraday" and px > 0
+        qsrc = str(d.get("quote_source") or "")
+        px = _f(d.get("market_price")) if qsrc in ("intraday", "daily_close") else 0.0
+        quoted = qsrc in ("intraday", "daily_close") and px > 0
         if not quoted:
             d["name"] = d.get("name") or names.get(d.get("ts_code") or "", "") or ""
             d["market_price"] = None

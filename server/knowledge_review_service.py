@@ -147,19 +147,14 @@ def _followed(v: Any) -> Optional[bool]:
 
 def _skill_inputs(body: Dict[str, Any]) -> Dict[str, Any]:
     out: Dict[str, Any] = {}
-    for key in ("market_view", "horizon", "sector_name", "confidence", "exit_style"):
+    for key in ("market_view", "sector_view", "sector_name", "stock_reason", "exit_style", "exit_reason", "review_conclusion"):
         text = str(body.get(key) or "").strip()
         if text:
             out[key] = text
-    for key in ("market_return_pct", "sector_return_pct", "post_exit_max_pct"):
+    for key in ("market_return_pct", "sector_return_pct", "actual_stop_price"):
         num = _num(body.get(key))
         if num is not None:
             out[key] = num
-    nested = body.get("skill_inputs")
-    if isinstance(nested, dict):
-        for key, value in nested.items():
-            if key not in out and value not in (None, ""):
-                out[key] = value
     return out
 
 
@@ -322,10 +317,11 @@ class KnowledgeReviewService:
                 sa_text(
                     """
                     SELECT o.id, o.trade_date, o.opportunity_type, o.opportunity_score,
-                           o.confidence, o.status, s.symbol, s.name
+                           o.confidence, o.status, o.phase, o.sector_name, o.trigger_reason,
+                           s.symbol, s.name
                     FROM opportunity o
                     LEFT JOIN stocks s ON s.id = o.stock_id
-                    ORDER BY o.trade_date DESC NULLS LAST, o.created_at DESC
+                    ORDER BY o.trade_date DESC NULLS LAST, o.opportunity_score DESC NULLS LAST, o.created_at DESC
                     LIMIT 8
                     """
                 )
@@ -367,7 +363,12 @@ class KnowledgeReviewService:
 
         with self.engine.begin() as conn:
             for ddl in POSTGRES_DDL_LIST:
-                if "trade_thesis ADD COLUMN" in ddl or "trade_outcome ADD COLUMN" in ddl or "attribution ADD COLUMN" in ddl:
+                if (
+                    "trade_thesis ADD COLUMN" in ddl
+                    or "trade_outcome ADD COLUMN" in ddl
+                    or "attribution ADD COLUMN" in ddl
+                    or "opportunity ADD COLUMN" in ddl
+                ):
                     conn.execute(sa_text(ddl))
         self._ready = True
 
@@ -407,6 +408,17 @@ class KnowledgeReviewService:
         dev = item.get("execution_deviation") if isinstance(item.get("execution_deviation"), dict) else {}
         item["followed_plan"] = dev.get("followed_plan")
         item["deviation_reason"] = dev.get("reason") or ""
+        raw_inputs = item.get("skill_inputs")
+        if isinstance(raw_inputs, str):
+            try:
+                raw_inputs = json.loads(raw_inputs)
+            except json.JSONDecodeError:
+                raw_inputs = {}
+        if isinstance(raw_inputs, dict):
+            item["skill_inputs"] = raw_inputs
+            for key, value in raw_inputs.items():
+                if item.get(key) in (None, ""):
+                    item[key] = value
         if not isinstance(item.get("execution_deviation"), dict):
             item["execution_deviation"] = _deviation(
                 item.get("exec_planned_pos") if item.get("exec_planned_pos") is not None else item.get("planned_position_pct"),
@@ -703,7 +715,7 @@ class KnowledgeReviewService:
         if inputs:
             with self.engine.begin() as conn:
                 conn.execute(
-                    text("UPDATE trade_thesis SET skill_inputs = CAST(:s AS jsonb) WHERE id = :id"),
+                    sa_text("UPDATE trade_thesis SET skill_inputs = CAST(:s AS jsonb) WHERE id = :id"),
                     {"id": tid, "s": json.dumps(inputs, ensure_ascii=False)},
                 )
         if _num(body.get("executed_price")) is not None:
@@ -760,10 +772,12 @@ class KnowledgeReviewService:
             packed = self.start_experiment(tid, lesson)
             if not packed.get("ok"):
                 return packed
+            self._remember_skill(tid)
             out = self.get_trade(tid)
             out["message"] = "已保存交易，并放进实验室。验证之前不会变成规则。"
             out["experiment"] = packed.get("experiment")
             return out
+        self._remember_skill(tid)
         out = self.get_trade(tid)
         if intent == "lesson":
             out["message"] = "已保存为经验。它还不是规则。"
@@ -918,7 +932,18 @@ class KnowledgeReviewService:
                 packed = self.save_lesson(thesis_id, lesson)
                 if not packed.get("ok"):
                     return packed
+        self._remember_skill(thesis_id)
         return self.get_trade(thesis_id)
+
+    def _remember_skill(self, thesis_id: str) -> None:
+        try:
+            packed = self.get_trade(thesis_id)
+            if not packed.get("ok"):
+                return
+            from server.skill_profile_service import skill_profile_service
+            skill_profile_service.save_trade(packed["trade"])
+        except Exception:
+            logger.exception("交易能力评分没有写入")
 
     def _replace_execution(self, thesis_id: str, body: Dict[str, Any]) -> Dict[str, Any]:
         packed = self.get_trade(thesis_id)
@@ -1257,9 +1282,11 @@ class KnowledgeReviewService:
         sql = {
             "market": "SELECT id, trade_date, index_name, change_pct, market_regime, sentiment_score FROM market_snapshot ORDER BY trade_date DESC LIMIT 50",
             "opportunity": """
-                SELECT o.id, o.trade_date, o.opportunity_type, o.opportunity_score, o.status, s.symbol, s.name
+                SELECT o.id, o.trade_date, o.opportunity_type, o.opportunity_score, o.status,
+                       o.phase, o.sector_name, o.trigger_reason, o.amount_ratio, s.symbol, s.name
                 FROM opportunity o LEFT JOIN stocks s ON s.id = o.stock_id
-                ORDER BY o.created_at DESC LIMIT 50
+                ORDER BY o.trade_date DESC NULLS LAST, o.opportunity_score DESC NULLS LAST
+                LIMIT 80
             """,
             "lesson": "SELECT id, title, content, sample_size, win_rate, avg_return, max_drawdown, status FROM lesson ORDER BY updated_at DESC LIMIT 50",
             "rule": "SELECT id, rule_code, name, category, description, status, win_rate FROM rule ORDER BY updated_at DESC LIMIT 50",

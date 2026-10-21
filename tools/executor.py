@@ -31,6 +31,9 @@ async def execute_tool(skill_id: str, tool_id: str, payload: Dict[str, Any] | No
     if skill_id == "paper-trade":
         return await _exec_paper_trade(tool_id, payload)
 
+    if skill_id == "futures-market":
+        return await _exec_futures_market(tool_id, payload)
+
     if skill_id == "kb-market" and tool_id == "today":
         from tools.kb_market_toolkit import kb_market_toolkit
         return kb_market_toolkit.build_today(payload.get("trade_date"))
@@ -155,6 +158,67 @@ async def _exec_paper_trade(tool_id: str, payload: Dict[str, Any]) -> Dict[str, 
     return {"ok": False, "error": f"未知工具: {tool_id}"}
 
 
+async def _exec_futures_market(tool_id: str, payload: Dict[str, Any]) -> Dict[str, Any]:
+    from tools.futures_market_toolkit import futures_market_toolkit as tk
+
+    if tool_id == "list-catalog":
+        return await tk.list_catalog()
+    if tool_id == "get-board":
+        ensure = payload.get("ensure")
+        if ensure is None:
+            ensure = True
+        return await tk.get_board(
+            category=payload.get("category"),
+            ensure=bool(ensure),
+            force=bool(payload.get("force") or False),
+        )
+    if tool_id == "get-quotes":
+        ensure = payload.get("ensure")
+        if ensure is None:
+            ensure = True
+        return await tk.get_quotes(
+            ts_codes=payload.get("ts_codes") or payload.get("ts_code"),
+            category=payload.get("category"),
+            ensure=bool(ensure),
+        )
+    if tool_id == "get-kline":
+        ts_code = payload.get("ts_code")
+        if not ts_code:
+            return {"ok": False, "error": "缺少参数 ts_code"}
+        ensure = payload.get("ensure")
+        if ensure is None:
+            ensure = True
+        return await tk.get_kline(
+            ts_code=str(ts_code),
+            freq=str(payload.get("freq") or "daily"),
+            start=payload.get("start"),
+            end=payload.get("end"),
+            limit=int(payload.get("limit") or 120),
+            ensure=bool(ensure),
+        )
+    if tool_id == "check-coverage":
+        return await tk.check_coverage(
+            ts_codes=payload.get("ts_codes") or payload.get("ts_code"),
+            category=payload.get("category"),
+            asof=payload.get("asof"),
+        )
+    if tool_id == "sync-quotes":
+        return await tk.sync_quotes(
+            ts_codes=payload.get("ts_codes") or payload.get("ts_code"),
+            category=payload.get("category"),
+            asof=payload.get("asof"),
+            lookback_days=int(payload.get("lookback_days") or 5),
+            force=bool(payload.get("force") or False),
+        )
+    if tool_id == "ensure-and-get":
+        return await tk.ensure_and_get(
+            ts_codes=payload.get("ts_codes") or payload.get("ts_code"),
+            category=payload.get("category"),
+            force=bool(payload.get("force") or False),
+        )
+    return {"ok": False, "error": f"未知工具: {tool_id}"}
+
+
 async def _exec_sql_toolkit(sql_toolkit, tool_id: str, payload: Dict[str, Any]) -> Dict[str, Any]:
     if tool_id == "list-tables":
         return await sql_toolkit.list_tables()
@@ -227,6 +291,37 @@ async def _exec_datahubco(toolkit, tool_id: str, payload: Dict[str, Any]) -> Dic
             auto_sync=bool(auto_sync),
             trade_date=payload.get("trade_date"),
             include_auction=bool(include_auction),
+        )
+
+    if tool_id == "fill-sector-gap":
+        trade_date = payload.get("trade_date") or ""
+        if not trade_date:
+            return {"ok": False, "error": "缺少参数 trade_date"}
+        return await toolkit.fill_sector_gap_async(
+            trade_date=str(trade_date),
+            level=str(payload.get("level") or "东财二级行业"),
+        )
+
+    if tool_id == "fill-sector-history":
+        ts_code = payload.get("ts_code") or ""
+        start_date = payload.get("start_date") or ""
+        end_date = payload.get("end_date") or ""
+        if not ts_code or not start_date or not end_date:
+            return {"ok": False, "error": "缺少 ts_code、start_date 或 end_date"}
+        return await toolkit.fill_sector_history_async(
+            ts_code=str(ts_code),
+            start_date=str(start_date),
+            end_date=str(end_date),
+        )
+
+    if tool_id == "fill-market-history":
+        start_date = payload.get("start_date") or ""
+        end_date = payload.get("end_date") or ""
+        if not start_date or not end_date:
+            return {"ok": False, "error": "缺少 start_date 或 end_date"}
+        return await toolkit.fill_market_history_async(
+            start_date=str(start_date),
+            end_date=str(end_date),
         )
 
     if tool_id == "get-mins":

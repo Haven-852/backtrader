@@ -1,0 +1,1233 @@
+[
+  {
+    "cat": "期货主档-SHFE",
+    "api": "fut_basic",
+    "params": {
+      "exchange": "SHFE",
+      "limit": 30
+    },
+    "ok": true,
+    "rows": 30,
+    "cols": [
+      "ts_code",
+      "symbol",
+      "exchange",
+      "name",
+      "fut_code",
+      "multiplier",
+      "trade_unit",
+      "per_unit",
+      "quote_unit",
+      "quote_unit_desc",
+      "d_mode_desc",
+      "list_date",
+      "delist_date",
+      "d_month"
+    ],
+    "sample": [
+      {
+        "ts_code": "AO2507.SHF"
+      },
+      {
+        "symbol": "AO2507"
+      },
+      {
+        "exchange": "SHFE"
+      },
+      {
+        "name": "氧化铝2507"
+      },
+      {
+        "fut_code": "AO"
+      },
+      {
+        "multiplier": null
+      },
+      {
+        "trade_unit": "吨"
+      },
+      {
+        "per_unit": 20
+      },
+      {
+        "quote_unit": "人民币元/吨"
+      },
+      {
+        "quote_unit_desc": "1人民币元/吨"
+      }
+    ],
+    "sec": 0.72
+  },
+  {
+    "cat": "期货主档-INE",
+    "api": "fut_basic",
+    "params": {
+      "exchange": "INE",
+      "limit": 30
+    },
+    "ok": true,
+    "rows": 30,
+    "cols": [
+      "ts_code",
+      "symbol",
+      "exchange",
+      "name",
+      "fut_code",
+      "multiplier",
+      "trade_unit",
+      "per_unit",
+      "quote_unit",
+      "quote_unit_desc",
+      "d_mode_desc",
+      "list_date",
+      "delist_date",
+      "d_month"
+    ],
+    "sample": [
+      {
+        "ts_code": "NR2408.INE"
+      },
+      {
+        "symbol": "NR2408"
+      },
+      {
+        "exchange": "INE"
+      },
+      {
+        "name": "20号胶2408"
+      },
+      {
+        "fut_code": "NR"
+      },
+      {
+        "multiplier": null
+      },
+      {
+        "trade_unit": "吨"
+      },
+      {
+        "per_unit": 10
+      },
+      {
+        "quote_unit": "人民币元/吨"
+      },
+      {
+        "quote_unit_desc": "5人民币元/吨"
+      }
+    ],
+    "sec": 0.71
+  },
+  {
+    "cat": "期货主档-DCE",
+    "api": "fut_basic",
+    "params": {
+      "exchange": "DCE",
+      "limit": 30
+    },
+    "ok": true,
+    "rows": 30,
+    "cols": [
+      "ts_code",
+      "symbol",
+      "exchange",
+      "name",
+      "fut_code",
+      "multiplier",
+      "trade_unit",
+      "per_unit",
+      "quote_unit",
+      "quote_unit_desc",
+      "d_mode_desc",
+      "list_date",
+      "delist_date",
+      "d_month"
+    ],
+    "sample": [
+      {
+        "ts_code": "JD1907.DCE"
+      },
+      {
+        "symbol": "JD1907"
+      },
+      {
+        "exchange": "DCE"
+      },
+      {
+        "name": "鸡蛋1907"
+      },
+      {
+        "fut_code": "JD"
+      },
+      {
+        "multiplier": null
+      },
+      {
+        "trade_unit": "吨"
+      },
+      {
+        "per_unit": 5
+      },
+      {
+        "quote_unit": "人民币元/500千克"
+      },
+      {
+        "quote_unit_desc": "1人民币元/500千克"
+      }
+    ],
+    "sec": 0.68
+  },
+  {
+    "cat": "期货主档-CZCE",
+    "api": "fut_basic",
+    "params": {
+      "exchange": "CZCE",
+      "limit": 30
+    },
+    "ok": true,
+    "rows": 30,
+    "cols": [
+      "ts_code",
+      "symbol",
+      "exchange",
+      "name",
+      "fut_code",
+      "multiplier",
+      "trade_unit",
+      "per_unit",
+      "quote_unit",
+      "quote_unit_desc",
+      "d_mode_desc",
+      "list_date",
+      "delist_date",
+      "d_month"
+    ],
+    "sample": [
+      {
+        "ts_code": "TA1001.ZCE"
+      },
+      {
+        "symbol": "TA001"
+      },
+      {
+        "exchange": "CZCE"
+      },
+      {
+        "name": "PTA1001"
+      },
+      {
+        "fut_code": "TA"
+      },
+      {
+        "multiplier": null
+      },
+      {
+        "trade_unit": "吨"
+      },
+      {
+        "per_unit": 5
+      },
+      {
+        "quote_unit": "人民币元/吨"
+      },
+      {
+        "quote_unit_desc": "2人民币元/吨"
+      }
+    ],
+    "sec": 0.72
+  },
+  {
+    "cat": "期货主档-CFFEX",
+    "api": "fut_basic",
+    "params": {
+      "exchange": "CFFEX",
+      "limit": 30
+    },
+    "ok": true,
+    "rows": 30,
+    "cols": [
+      "ts_code",
+      "symbol",
+      "exchange",
+      "name",
+      "fut_code",
+      "multiplier",
+      "trade_unit",
+      "per_unit",
+      "quote_unit",
+      "quote_unit_desc",
+      "d_mode_desc",
+      "list_date",
+      "delist_date",
+      "d_month"
+    ],
+    "sample": [
+      {
+        "ts_code": "T1906.CFX"
+      },
+      {
+        "symbol": "T1906"
+      },
+      {
+        "exchange": "CFFEX"
+      },
+      {
+        "name": "T1906"
+      },
+      {
+        "fut_code": "T"
+      },
+      {
+        "multiplier": 10000
+      },
+      {
+        "trade_unit": "张"
+      },
+      {
+        "per_unit": 1
+      },
+      {
+        "quote_unit": "人民币元"
+      },
+      {
+        "quote_unit_desc": "0.005人民币元"
+      }
+    ],
+    "sec": 0.69
+  },
+  {
+    "cat": "期货主档-GFEX",
+    "api": "fut_basic",
+    "params": {
+      "exchange": "GFEX",
+      "limit": 30
+    },
+    "ok": true,
+    "rows": 30,
+    "cols": [
+      "ts_code",
+      "symbol",
+      "exchange",
+      "name",
+      "fut_code",
+      "multiplier",
+      "trade_unit",
+      "per_unit",
+      "quote_unit",
+      "quote_unit_desc",
+      "d_mode_desc",
+      "list_date",
+      "delist_date",
+      "d_month"
+    ],
+    "sample": [
+      {
+        "ts_code": "LC2602.GFE"
+      },
+      {
+        "symbol": "LC2602"
+      },
+      {
+        "exchange": "GFEX"
+      },
+      {
+        "name": "碳酸锂2602"
+      },
+      {
+        "fut_code": "LC"
+      },
+      {
+        "multiplier": null
+      },
+      {
+        "trade_unit": "吨"
+      },
+      {
+        "per_unit": 1
+      },
+      {
+        "quote_unit": "人民币元/吨"
+      },
+      {
+        "quote_unit_desc": "20人民币元/吨"
+      }
+    ],
+    "sec": 0.68
+  },
+  {
+    "cat": "期货日线-黄金",
+    "api": "fut_daily",
+    "params": {
+      "ts_code": "AU2506.SHF",
+      "start_date": "20250901",
+      "end_date": "20251002",
+      "limit": 10
+    },
+    "ok": true,
+    "rows": 0,
+    "cols": [
+      "ts_code",
+      "trade_date",
+      "pre_close",
+      "pre_settle",
+      "open",
+      "high",
+      "low",
+      "close",
+      "settle",
+      "change1",
+      "change2",
+      "vol",
+      "amount",
+      "oi"
+    ],
+    "sample": [],
+    "sec": 0.69
+  },
+  {
+    "cat": "期货日线-白银",
+    "api": "fut_daily",
+    "params": {
+      "ts_code": "AG2506.SHF",
+      "start_date": "20250901",
+      "end_date": "20251002",
+      "limit": 10
+    },
+    "ok": true,
+    "rows": 0,
+    "cols": [
+      "ts_code",
+      "trade_date",
+      "pre_close",
+      "pre_settle",
+      "open",
+      "high",
+      "low",
+      "close",
+      "settle",
+      "change1",
+      "change2",
+      "vol",
+      "amount",
+      "oi"
+    ],
+    "sample": [],
+    "sec": 0.71
+  },
+  {
+    "cat": "期货日线-铜",
+    "api": "fut_daily",
+    "params": {
+      "ts_code": "CU2506.SHF",
+      "start_date": "20250901",
+      "end_date": "20251002",
+      "limit": 10
+    },
+    "ok": true,
+    "rows": 0,
+    "cols": [
+      "ts_code",
+      "trade_date",
+      "pre_close",
+      "pre_settle",
+      "open",
+      "high",
+      "low",
+      "close",
+      "settle",
+      "change1",
+      "change2",
+      "vol",
+      "amount",
+      "oi"
+    ],
+    "sample": [],
+    "sec": 1.69
+  },
+  {
+    "cat": "期货日线-原油INE",
+    "api": "fut_daily",
+    "params": {
+      "ts_code": "SC2506.INE",
+      "start_date": "20250901",
+      "end_date": "20251002",
+      "limit": 10
+    },
+    "ok": true,
+    "rows": 0,
+    "cols": [
+      "ts_code",
+      "trade_date",
+      "pre_close",
+      "pre_settle",
+      "open",
+      "high",
+      "low",
+      "close",
+      "settle",
+      "change1",
+      "change2",
+      "vol",
+      "amount",
+      "oi"
+    ],
+    "sample": [],
+    "sec": 0.78
+  },
+  {
+    "cat": "期货日线-燃油",
+    "api": "fut_daily",
+    "params": {
+      "ts_code": "FU2505.SHF",
+      "start_date": "20250901",
+      "end_date": "20251002",
+      "limit": 10
+    },
+    "ok": true,
+    "rows": 0,
+    "cols": [
+      "ts_code",
+      "trade_date",
+      "pre_close",
+      "pre_settle",
+      "open",
+      "high",
+      "low",
+      "close",
+      "settle",
+      "change1",
+      "change2",
+      "vol",
+      "amount",
+      "oi"
+    ],
+    "sample": [],
+    "sec": 0.75
+  },
+  {
+    "cat": "期货日线-低硫燃油",
+    "api": "fut_daily",
+    "params": {
+      "ts_code": "LU2506.INE",
+      "start_date": "20250901",
+      "end_date": "20251002",
+      "limit": 10
+    },
+    "ok": true,
+    "rows": 0,
+    "cols": [
+      "ts_code",
+      "trade_date",
+      "pre_close",
+      "pre_settle",
+      "open",
+      "high",
+      "low",
+      "close",
+      "settle",
+      "change1",
+      "change2",
+      "vol",
+      "amount",
+      "oi"
+    ],
+    "sample": [],
+    "sec": 0.73
+  },
+  {
+    "cat": "期货日线-国际铜",
+    "api": "fut_daily",
+    "params": {
+      "ts_code": "BC2506.INE",
+      "start_date": "20250901",
+      "end_date": "20251002",
+      "limit": 10
+    },
+    "ok": true,
+    "rows": 0,
+    "cols": [
+      "ts_code",
+      "trade_date",
+      "pre_close",
+      "pre_settle",
+      "open",
+      "high",
+      "low",
+      "close",
+      "settle",
+      "change1",
+      "change2",
+      "vol",
+      "amount",
+      "oi"
+    ],
+    "sample": [],
+    "sec": 0.75
+  },
+  {
+    "cat": "期货日线-SHFE某日",
+    "api": "fut_daily",
+    "params": {
+      "trade_date": "20250930",
+      "exchange": "SHFE",
+      "limit": 40
+    },
+    "ok": true,
+    "rows": 40,
+    "cols": [
+      "ts_code",
+      "trade_date",
+      "pre_close",
+      "pre_settle",
+      "open",
+      "high",
+      "low",
+      "close",
+      "settle",
+      "change1",
+      "change2",
+      "vol",
+      "amount",
+      "oi"
+    ],
+    "sample": [
+      {
+        "ts_code": "AD.SHF"
+      },
+      {
+        "trade_date": "20250930"
+      },
+      {
+        "pre_close": 20270
+      },
+      {
+        "pre_settle": 20280
+      },
+      {
+        "open": 20280.0
+      },
+      {
+        "high": 20370.0
+      },
+      {
+        "low": 20205.0
+      },
+      {
+        "close": 20210
+      },
+      {
+        "settle": 20290
+      },
+      {
+        "change1": -70
+      }
+    ],
+    "sec": 0.7
+  },
+  {
+    "cat": "期货日线-INE某日",
+    "api": "fut_daily",
+    "params": {
+      "trade_date": "20250930",
+      "exchange": "INE",
+      "limit": 40
+    },
+    "ok": true,
+    "rows": 40,
+    "cols": [
+      "ts_code",
+      "trade_date",
+      "pre_close",
+      "pre_settle",
+      "open",
+      "high",
+      "low",
+      "close",
+      "settle",
+      "change1",
+      "change2",
+      "vol",
+      "amount",
+      "oi"
+    ],
+    "sample": [
+      {
+        "ts_code": "BC.INE"
+      },
+      {
+        "trade_date": "20250930"
+      },
+      {
+        "pre_close": 73220.0
+      },
+      {
+        "pre_settle": 73040.0
+      },
+      {
+        "open": 73270.0
+      },
+      {
+        "high": 74610.0
+      },
+      {
+        "low": 73260.0
+      },
+      {
+        "close": 73870.0
+      },
+      {
+        "settle": 74070.0
+      },
+      {
+        "change1": 830.0
+      }
+    ],
+    "sec": 1.02
+  },
+  {
+    "cat": "期货扩展",
+    "api": "fut_holding",
+    "params": {
+      "trade_date": "20250930",
+      "exchange": "SHFE",
+      "limit": 10
+    },
+    "ok": true,
+    "rows": 10,
+    "cols": [
+      "trade_date",
+      "symbol",
+      "broker",
+      "vol",
+      "vol_chg",
+      "long_hld",
+      "long_chg",
+      "short_hld",
+      "short_chg"
+    ],
+    "sample": [
+      {
+        "trade_date": "20250930"
+      },
+      {
+        "symbol": "AD"
+      },
+      {
+        "broker": "期货公司会员/境外特殊经纪参与者"
+      },
+      {
+        "vol": 6012
+      },
+      {
+        "vol_chg": -5664
+      },
+      {
+        "long_hld": 20174
+      },
+      {
+        "long_chg": 293
+      },
+      {
+        "short_hld": 20174
+      },
+      {
+        "short_chg": 293
+      }
+    ],
+    "sec": 0.7
+  },
+  {
+    "cat": "期货扩展",
+    "api": "fut_settle",
+    "params": {
+      "trade_date": "20250930",
+      "exchange": "SHFE",
+      "limit": 10
+    },
+    "ok": true,
+    "rows": 10,
+    "cols": [
+      "ts_code",
+      "trade_date",
+      "settle",
+      "trading_fee_rate",
+      "trading_fee",
+      "delivery_fee",
+      "b_hedging_margin_rate",
+      "s_hedging_margin_rate",
+      "long_margin_rate",
+      "short_margin_rate"
+    ],
+    "sample": [
+      {
+        "ts_code": "CU2510.SHF"
+      },
+      {
+        "trade_date": "20250930"
+      },
+      {
+        "settle": 83220
+      },
+      {
+        "trading_fee_rate": 0.05
+      },
+      {
+        "trading_fee": 0
+      },
+      {
+        "delivery_fee": 0
+      },
+      {
+        "b_hedging_margin_rate": 0.15
+      },
+      {
+        "s_hedging_margin_rate": 0.15
+      },
+      {
+        "long_margin_rate": 0.15
+      },
+      {
+        "short_margin_rate": 0.15
+      }
+    ],
+    "sec": 1.06
+  },
+  {
+    "cat": "期货扩展",
+    "api": "fut_mapping",
+    "params": {
+      "ts_code": "AU.SHF",
+      "limit": 10
+    },
+    "ok": false,
+    "rows": 0,
+    "cols": [],
+    "error": "Datahubco fut_mapping HTTP 400: unknown api_name: fut_mapping",
+    "sec": 0.49
+  },
+  {
+    "cat": "期货扩展",
+    "api": "fut_wsr",
+    "params": {
+      "trade_date": "20250930",
+      "exchange": "SHFE",
+      "limit": 10
+    },
+    "ok": true,
+    "rows": 10,
+    "cols": [
+      "trade_date",
+      "symbol",
+      "fut_name",
+      "warehouse",
+      "pre_vol",
+      "vol",
+      "vol_chg",
+      "unit"
+    ],
+    "sample": [
+      {
+        "trade_date": "20250930"
+      },
+      {
+        "symbol": "AD"
+      },
+      {
+        "fut_name": "铸造铝合金"
+      },
+      {
+        "warehouse": "世天威外高桥"
+      },
+      {
+        "pre_vol": 507
+      },
+      {
+        "vol": 507
+      },
+      {
+        "vol_chg": 0
+      },
+      {
+        "unit": "吨"
+      }
+    ],
+    "sec": 0.78
+  },
+  {
+    "cat": "全球指数-纳斯达克",
+    "api": "index_global",
+    "params": {
+      "ts_code": "IXIC",
+      "start_date": "20250901",
+      "end_date": "20251002",
+      "limit": 10
+    },
+    "ok": false,
+    "rows": 0,
+    "cols": [],
+    "error": "Datahubco index_global HTTP 400: unknown api_name: index_global",
+    "sec": 0.43
+  },
+  {
+    "cat": "全球指数-标普500",
+    "api": "index_global",
+    "params": {
+      "ts_code": "SPX",
+      "start_date": "20250901",
+      "end_date": "20251002",
+      "limit": 10
+    },
+    "ok": false,
+    "rows": 0,
+    "cols": [],
+    "error": "Datahubco index_global HTTP 400: unknown api_name: index_global",
+    "sec": 1.41
+  },
+  {
+    "cat": "全球指数-道琼斯",
+    "api": "index_global",
+    "params": {
+      "ts_code": "DJI",
+      "start_date": "20250901",
+      "end_date": "20251002",
+      "limit": 10
+    },
+    "ok": false,
+    "rows": 0,
+    "cols": [],
+    "error": "Datahubco index_global HTTP 400: unknown api_name: index_global",
+    "sec": 0.4
+  },
+  {
+    "cat": "全球指数-恒生",
+    "api": "index_global",
+    "params": {
+      "ts_code": "HSI",
+      "start_date": "20250901",
+      "end_date": "20251002",
+      "limit": 10
+    },
+    "ok": false,
+    "rows": 0,
+    "cols": [],
+    "error": "Datahubco index_global HTTP 400: unknown api_name: index_global",
+    "sec": 0.39
+  },
+  {
+    "cat": "全球指数-日经225",
+    "api": "index_global",
+    "params": {
+      "ts_code": "N225",
+      "start_date": "20250901",
+      "end_date": "20251002",
+      "limit": 10
+    },
+    "ok": false,
+    "rows": 0,
+    "cols": [],
+    "error": "Datahubco index_global HTTP 400: unknown api_name: index_global",
+    "sec": 0.4
+  },
+  {
+    "cat": "全球指数-富时A50",
+    "api": "index_global",
+    "params": {
+      "ts_code": "XIN9",
+      "start_date": "20250901",
+      "end_date": "20251002",
+      "limit": 10
+    },
+    "ok": false,
+    "rows": 0,
+    "cols": [],
+    "error": "Datahubco index_global HTTP 400: unknown api_name: index_global",
+    "sec": 0.39
+  },
+  {
+    "cat": "美股主档",
+    "api": "us_basic",
+    "params": {
+      "limit": 20
+    },
+    "ok": false,
+    "rows": 0,
+    "cols": [],
+    "error": "Datahubco us_basic HTTP 400: unknown api_name: us_basic",
+    "sec": 0.41
+  },
+  {
+    "cat": "美股日线",
+    "api": "us_daily",
+    "params": {
+      "ts_code": "AAPL",
+      "start_date": "20250901",
+      "end_date": "20251002",
+      "limit": 10
+    },
+    "ok": false,
+    "rows": 0,
+    "cols": [],
+    "error": "Datahubco us_daily HTTP 400: unknown api_name: us_daily",
+    "sec": 0.39
+  },
+  {
+    "cat": "美股复权",
+    "api": "us_daily_adj",
+    "params": {
+      "ts_code": "AAPL",
+      "start_date": "20250901",
+      "end_date": "20251002",
+      "limit": 10
+    },
+    "ok": false,
+    "rows": 0,
+    "cols": [],
+    "error": "Datahubco us_daily_adj HTTP 400: unknown api_name: us_daily_adj",
+    "sec": 0.39
+  },
+  {
+    "cat": "美股日历",
+    "api": "us_tradecal",
+    "params": {
+      "start_date": "20250901",
+      "end_date": "20251002",
+      "limit": 20
+    },
+    "ok": false,
+    "rows": 0,
+    "cols": [],
+    "error": "Datahubco us_tradecal HTTP 400: unknown api_name: us_tradecal",
+    "sec": 0.39
+  },
+  {
+    "cat": "外汇",
+    "api": "fx_daily",
+    "params": {
+      "ts_code": "USDCNH.FXCM",
+      "start_date": "20250901",
+      "end_date": "20251002",
+      "limit": 10
+    },
+    "ok": true,
+    "rows": 10,
+    "cols": [
+      "ts_code",
+      "trade_date",
+      "bid_open",
+      "bid_close",
+      "bid_high",
+      "bid_low",
+      "ask_open",
+      "ask_close",
+      "ask_high",
+      "ask_low",
+      "tick_qty"
+    ],
+    "sample": [
+      {
+        "ts_code": "USDCNH.FXCM"
+      },
+      {
+        "trade_date": "20251002"
+      },
+      {
+        "bid_open": 7.12811
+      },
+      {
+        "bid_close": 7.13531
+      },
+      {
+        "bid_high": 7.13897
+      },
+      {
+        "bid_low": 7.12672
+      },
+      {
+        "ask_open": 7.13662
+      },
+      {
+        "ask_close": 7.13671
+      },
+      {
+        "ask_high": 7.14109
+      },
+      {
+        "ask_low": 7.13235
+      }
+    ],
+    "sec": 0.98
+  },
+  {
+    "cat": "外汇主档",
+    "api": "fx_obasic",
+    "params": {
+      "limit": 20
+    },
+    "ok": true,
+    "rows": 20,
+    "cols": [
+      "ts_code",
+      "name",
+      "classify",
+      "exchange",
+      "min_unit",
+      "max_unit",
+      "pip",
+      "pip_cost",
+      "traget_spread",
+      "min_stop_distance",
+      "trading_hours",
+      "break_time"
+    ],
+    "sample": [
+      {
+        "ts_code": "AUDCAD.FXCM"
+      },
+      {
+        "name": "澳元加元"
+      },
+      {
+        "classify": "FX"
+      },
+      {
+        "exchange": "FXCM"
+      },
+      {
+        "min_unit": 1
+      },
+      {
+        "max_unit": NaN
+      },
+      {
+        "pip": 1e-05
+      },
+      {
+        "pip_cost": NaN
+      },
+      {
+        "traget_spread": NaN
+      },
+      {
+        "min_stop_distance": NaN
+      }
+    ],
+    "sec": 0.69
+  },
+  {
+    "cat": "上金所主档",
+    "api": "sge_basic",
+    "params": {
+      "limit": 20
+    },
+    "ok": false,
+    "rows": 0,
+    "cols": [],
+    "error": "Datahubco sge_basic HTTP 400: unknown api_name: sge_basic",
+    "sec": 0.85
+  },
+  {
+    "cat": "上金所日线",
+    "api": "sge_daily",
+    "params": {
+      "ts_code": "Au99.99",
+      "start_date": "20250901",
+      "end_date": "20251002",
+      "limit": 10
+    },
+    "ok": false,
+    "rows": 0,
+    "cols": [],
+    "error": "Datahubco sge_daily HTTP 400: unknown api_name: sge_daily",
+    "sec": 1.24
+  },
+  {
+    "cat": "指数主档-CSI",
+    "api": "index_basic",
+    "params": {
+      "market": "CSI",
+      "limit": 10
+    },
+    "ok": true,
+    "rows": 10,
+    "cols": [
+      "ts_code",
+      "name",
+      "market",
+      "publisher",
+      "category",
+      "base_date",
+      "base_point",
+      "list_date"
+    ],
+    "sample": [
+      {
+        "ts_code": "000012CNY030.CSI"
+      },
+      {
+        "name": "国债指数(全)"
+      },
+      {
+        "market": "CSI"
+      },
+      {
+        "publisher": "中证指数有限公司、上海证券交易所"
+      },
+      {
+        "category": "债券指数"
+      },
+      {
+        "base_date": "20021231"
+      },
+      {
+        "base_point": 100.0
+      },
+      {
+        "list_date": "20260626"
+      }
+    ],
+    "sec": 0.7
+  },
+  {
+    "cat": "指数主档-MSCI",
+    "api": "index_basic",
+    "params": {
+      "market": "MSCI",
+      "limit": 10
+    },
+    "ok": true,
+    "rows": 0,
+    "cols": [
+      "ts_code",
+      "name",
+      "market",
+      "publisher",
+      "category",
+      "base_date",
+      "base_point",
+      "list_date"
+    ],
+    "sample": [],
+    "sec": 0.68
+  },
+  {
+    "cat": "指数主档-OTH",
+    "api": "index_basic",
+    "params": {
+      "market": "OTH",
+      "limit": 10
+    },
+    "ok": true,
+    "rows": 0,
+    "cols": [
+      "ts_code",
+      "name",
+      "market",
+      "publisher",
+      "category",
+      "base_date",
+      "base_point",
+      "list_date"
+    ],
+    "sample": [],
+    "sec": 0.94
+  }
+]

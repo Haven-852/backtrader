@@ -1,7 +1,7 @@
 """
 个股分时（1 分钟）：
-  - 当日/盘中：Redis 出图，同时写入 Timescale `stock_intraday_mins`
-  - 回看历史：只查 Timescale，缺失则拉源入库，不回填 Redis
+  - 当日/盘中：优先读 Redis；缺失再拉源，写 Redis，并同步 Timescale `stock_intraday_mins`
+  - 回看：先 Redis（TTL 内）→ Timescale → 远端补数入库；历史默认不强制回填 Redis
   - 当日日线：由分时聚合后 upsert 到已有 `stock_daily`
 """
 
@@ -951,6 +951,33 @@ class IntradayFetcher:
             "indicators": {},
         }
 
+    def redis_bars_count(self, ts_code: str, trade_date: date) -> int:
+        cached = self._redis_get(ts_code, trade_date)
+        if not cached or self._is_stale(cached, trade_date):
+            return 0
+        return len(cached.get("bars") or [])
+
+    def peek_redis(
+        self,
+        ts_code: str,
+        trade_date: date,
+        *,
+        allow_stale: bool = False,
+    ) -> Optional[Dict[str, Any]]:
+        """只读 Redis 分时缓存；不过期或 allow_stale 时返回。"""
+        cached = self._redis_get(ts_code, trade_date)
+        if not cached:
+            return None
+        if (not allow_stale) and self._is_stale(cached, trade_date):
+            return None
+        out = dict(cached)
+        out["source"] = "redis"
+        out["redis_written"] = False
+        out["pg_written"] = 0
+        out["daily_written"] = 0
+        out["ok"] = True
+        return out
+
     def get(
         self,
         ts_code: str,
@@ -971,24 +998,21 @@ class IntradayFetcher:
         session = (not history) and d == session_d
         after_close = phase == "after_close" and d == session_d
 
-        if session:
-            cached = self._redis_get(ts_code, d)
-            if cached and not self._is_stale(cached, d):
-                cached["source"] = "redis"
-                cached["session"] = True
-                cached["session_phase"] = phase
-                cached["live"] = phase == "live" and d == datetime.now(TZ_SH).date()
-                cached["redis_written"] = False
-                cached["pg_written"] = 0
-                cached["daily_written"] = 0
-                cached["ok"] = True
-                return cached
+        # 1) 任何日期都先查 Redis（盘中/当日主缓存；TTL 内历史也可命中）
+        cached = self.peek_redis(ts_code, d, allow_stale=False)
+        if cached:
+            cached["session"] = session
+            cached["session_phase"] = phase
+            cached["live"] = phase == "live" and d == datetime.now(TZ_SH).date() and session
+            return cached
 
+        # 2) 非当日会话：再查 Timescale
         if not session:
             pg_df = self.query_pg(ts_code, d)
             if pg_df is not None and len(pg_df) >= 60:
                 return self._pack(ts_code, d, pg_df, "timescale", False, 0, 0, False)
 
+        # 3) 本地都没有 → Datahubco / 东财腾讯补数
         df = self.fetch_remote(ts_code, d, live=session)
 
         if df is None or df.empty:

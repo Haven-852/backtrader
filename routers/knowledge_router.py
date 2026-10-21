@@ -37,6 +37,42 @@ async def kb_overview():
     return knowledge_review_service.overview()
 
 
+@router.get("/sector-brief")
+async def kb_sector_brief(name: str, days: int = 5):
+    from server.sector_brief_service import sector_brief_service
+    packed = await sector_brief_service.load(name, days)
+    if not packed.get("ok"):
+        raise HTTPException(status_code=404, detail=packed.get("error"))
+    return packed
+
+
+@router.get("/opportunities")
+async def kb_opportunities():
+    from server.opportunity_scan_service import opportunity_scan_service
+    return opportunity_scan_service.list_items()
+
+
+@router.post("/opportunities/scan")
+async def kb_opportunities_scan():
+    from server.opportunity_scan_service import opportunity_scan_service
+    backfill = await opportunity_scan_service.fill_missing_via_agent()
+    flow = await opportunity_scan_service.fill_missing_moneyflow()
+    packed = opportunity_scan_service.scan()
+    if not packed.get("ok"):
+        raise HTTPException(status_code=400, detail=packed.get("error"))
+    review = await opportunity_scan_service.review_picks(packed.get("items") or [])
+    packed["backfill"] = backfill
+    packed["flow_backfill"] = flow
+    packed["review"] = review
+    return packed
+
+
+@router.get("/ability")
+async def kb_ability():
+    from server.skill_profile_service import skill_profile_service
+    return skill_profile_service.profile()
+
+
 @router.get("/trades")
 async def kb_trades(failures: bool = False, view: str = "all"):
     from server.knowledge_review_service import knowledge_review_service
@@ -198,6 +234,212 @@ async def kb_lesson_delete(lesson_id: str):
     packed = knowledge_review_service.delete_lesson(lesson_id)
     if not packed.get("ok"):
         raise HTTPException(status_code=404, detail=packed.get("error"))
+    return packed
+
+
+@router.get("/rules/catalog")
+async def kb_rule_catalog():
+    from server.rule_service import rule_service
+    return rule_service.catalog()
+
+
+@router.get("/rules")
+async def kb_rules():
+    from server.rule_service import rule_service
+    return rule_service.list_rules()
+
+
+@router.post("/rules/observables")
+async def kb_rule_observable(body: dict):
+    from server.rule_service import rule_service
+    packed = rule_service.add_observable(body)
+    if not packed.get("ok"):
+        raise HTTPException(status_code=400, detail=packed.get("error"))
+    return packed
+
+
+@router.post("/rules/compose")
+async def kb_rule_compose(body: dict):
+    from server.rule_service import rule_service
+    packed = await rule_service.compose(body)
+    if not packed.get("ok"):
+        raise HTTPException(status_code=400, detail=packed.get("error"))
+    return packed
+
+
+@router.post("/rules")
+async def kb_rule_create(body: dict):
+    from server.rule_service import rule_service
+    packed = rule_service.create(body)
+    if not packed.get("ok"):
+        raise HTTPException(status_code=400, detail=packed.get("error"))
+    return packed
+
+
+@router.put("/rules/{rule_id}/content")
+async def kb_rule_content(rule_id: str, body: dict):
+    from server.rule_service import rule_service
+    packed = rule_service.revise(rule_id, body)
+    if not packed.get("ok"):
+        raise HTTPException(status_code=400, detail=packed.get("error"))
+    return packed
+
+
+@router.delete("/rules/{rule_id}")
+async def kb_rule_delete(rule_id: str):
+    from server.rule_service import rule_service
+    packed = rule_service.delete(rule_id)
+    if not packed.get("ok"):
+        raise HTTPException(status_code=400, detail=packed.get("error"))
+    return packed
+
+
+@router.put("/rules/{rule_id}")
+async def kb_rule_update(rule_id: str, body: dict):
+    from server.rule_service import rule_service
+    packed = rule_service.update(rule_id, body)
+    if not packed.get("ok"):
+        raise HTTPException(status_code=400, detail=packed.get("error"))
+    return packed
+
+
+@router.post("/rules/{rule_id}/pause")
+async def kb_rule_pause(rule_id: str):
+    from server.rule_service import rule_service
+    packed = rule_service.pause(rule_id)
+    if not packed.get("ok"):
+        raise HTTPException(status_code=400, detail=packed.get("error"))
+    return packed
+
+
+@router.post("/rules/{rule_id}/validate")
+async def kb_rule_validate(rule_id: str):
+    from server.rule_service import rule_service
+    packed = rule_service.validate(rule_id)
+    if not packed.get("ok"):
+        raise HTTPException(status_code=400, detail=packed.get("error"))
+    return packed
+
+
+@router.post("/rules/{rule_id}/promote")
+async def kb_rule_promote(rule_id: str):
+    from server.rule_service import rule_service
+    packed = rule_service.promote(rule_id)
+    if not packed.get("ok"):
+        raise HTTPException(status_code=400, detail=packed.get("error"))
+    return packed
+
+
+@router.get("/external/meta")
+async def kb_external_meta():
+    from server.external_knowledge_service import external_knowledge_service
+    return external_knowledge_service.meta()
+
+
+@router.get("/external")
+async def kb_external_list(source_type: str = "", knowledge_type: str = "", evidence_level: str = ""):
+    from server.external_knowledge_service import external_knowledge_service
+    return external_knowledge_service.list_items(source_type, knowledge_type, evidence_level)
+
+
+@router.get("/external/{knowledge_id}")
+async def kb_external_get(knowledge_id: str):
+    from server.external_knowledge_service import external_knowledge_service
+    packed = external_knowledge_service.get(knowledge_id)
+    if not packed.get("ok"):
+        raise HTTPException(status_code=404, detail=packed.get("error"))
+    return packed
+
+
+@router.post("/external/read")
+async def kb_external_read(body: dict):
+    from server.external_knowledge_service import external_knowledge_service
+    packed = await external_knowledge_service.read_and_save(body)
+    if not packed.get("ok"):
+        raise HTTPException(status_code=400, detail=packed.get("error"))
+    return packed
+
+
+@router.post("/external/{knowledge_id}/claims/{claim_id}/experiment")
+async def kb_external_experiment(knowledge_id: str, claim_id: str):
+    from server.external_knowledge_service import external_knowledge_service
+    packed = external_knowledge_service.to_experiment(knowledge_id, claim_id)
+    if not packed.get("ok"):
+        raise HTTPException(status_code=400, detail=packed.get("error"))
+    return packed
+
+
+@router.post("/external/{knowledge_id}/experiences")
+async def kb_external_link(knowledge_id: str, body: dict):
+    from server.external_knowledge_service import external_knowledge_service
+    packed = external_knowledge_service.link_experience(knowledge_id, body)
+    if not packed.get("ok"):
+        raise HTTPException(status_code=400, detail=packed.get("error"))
+    return packed
+
+
+@router.get("/experiments/meta")
+async def kb_experiment_meta():
+    from server.experiment_service import experiment_service
+    return experiment_service.meta()
+
+
+@router.get("/experiments")
+async def kb_experiments():
+    from server.experiment_service import experiment_service
+    return experiment_service.list_items()
+
+
+@router.post("/experiments/backtest")
+async def kb_experiment_backtest(body: dict):
+    from server.experiment_service import experiment_service
+    packed = await experiment_service.backtest_from(str(body.get("kind") or ""), str(body.get("id") or ""))
+    if not packed.get("ok"):
+        raise HTTPException(status_code=400, detail=packed.get("error"))
+    return packed
+
+
+@router.post("/experiments")
+async def kb_experiment_create(body: dict):
+    from server.experiment_service import experiment_service
+    packed = experiment_service.create(body)
+    if not packed.get("ok"):
+        raise HTTPException(status_code=400, detail=packed.get("error"))
+    return packed
+
+
+@router.put("/experiments/{experiment_id}")
+async def kb_experiment_update(experiment_id: str, body: dict):
+    from server.experiment_service import experiment_service
+    packed = experiment_service.update(experiment_id, body)
+    if not packed.get("ok"):
+        raise HTTPException(status_code=400, detail=packed.get("error"))
+    return packed
+
+
+@router.post("/experiments/{experiment_id}/run")
+async def kb_experiment_run(experiment_id: str, body: dict):
+    from server.experiment_service import experiment_service
+    phase = str(body.get("phase") or "")
+    current = experiment_service.get(experiment_id)
+    mode = ((current.get("item") or {}).get("parameters") or {}).get("mode")
+    if phase == "train" or mode == "full_market":
+        if mode == "full_market":
+            await experiment_service.fill_market(experiment_id)
+        elif phase == "train":
+            await experiment_service.fill_inputs(experiment_id)
+    packed = experiment_service.run(experiment_id, phase)
+    if not packed.get("ok"):
+        raise HTTPException(status_code=400, detail=packed.get("error"))
+    return packed
+
+
+@router.post("/experiments/{experiment_id}/candidate-rule")
+async def kb_experiment_rule(experiment_id: str):
+    from server.experiment_service import experiment_service
+    packed = experiment_service.to_candidate_rule(experiment_id)
+    if not packed.get("ok"):
+        raise HTTPException(status_code=400, detail=packed.get("error"))
     return packed
 
 

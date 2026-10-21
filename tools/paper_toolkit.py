@@ -222,7 +222,7 @@ PAPER_TRADE_SYSTEM_PROMPT = """你是「纸面交易 Agent」，负责在模拟�
 6. 不确定时先 `get_market_brief` 与 `get_account`/`list_positions`，再决定是否下单。
 7. 若用户只是询问账户或复盘，不要强行交易。
 8. 做 T 时：卖的是旧仓（sellable），买的是新仓（frozen）；不可假设当日买入可当日卖出。佣金为成交额万二且最低 5 元，卖出另计印花税万五。同一只股票每个交易日最多做 T 一次。单票市值不超过总资产 20%。13:00 若判断明天上涨概率不超过 60%，总仓位不超过 80%。
-9. **盘中盈亏必须用分时价**：`get_account`/`list_positions`/`mark`/`get_intraday_quotes` 返回的 `market_price` 来自 1 分钟分时末价。`pnl_ready=false` 或 `quote_source=missing` 表示没有对应分时，**禁止用日线收盘、昨收或成本价估算冒充盘中盈亏**，只能如实说「暂无分时，盈亏未计」。
+9. **账户净值优先分时、缺则收盘**：`get_account`/`list_positions`/`mark` 优先用 1 分钟分时末价；非交易日或无分时时会用上一交易日收盘价（`quote_source=daily_close`）计入市值，避免净值只剩现金。做 T / 盘中决策仍以分时为准，**禁止把日线收盘当作实时盘中价**；仅当 `quote_source=missing` 才说「暂无行情、盈亏未计」。
 
 ## 推荐工作流
 1. `get_account` / `list_positions` / `get_journal` / `get_stats` 了解账户状态与当日操作（日课还是股价唤醒、模型观察、唤醒次数）

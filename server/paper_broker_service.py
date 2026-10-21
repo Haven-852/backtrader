@@ -558,7 +558,9 @@ class PaperBrokerService:
                     "mark_source": marked.get("mark_source"),
                     "session_phase": marked.get("session_phase"),
                     "intraday_complete": marked.get("intraday_complete"),
+                    "valuation_complete": marked.get("valuation_complete"),
                     "missing_quotes": marked.get("missing_quotes") or [],
+                    "fallback_quotes": marked.get("fallback_quotes") or [],
                     "note": marked.get("note"),
                     "asof": marked.get("asof"),
                 }
@@ -609,10 +611,11 @@ class PaperBrokerService:
             d = dict(p)
             qty = _f(d.get("quantity"))
             avg = _f(d.get("avg_cost"))
-            quoted = str(d.get("quote_source") or "") == "intraday"
+            qsrc = str(d.get("quote_source") or "")
+            quoted = qsrc in ("intraday", "daily_close")
             raw_px = d.get("market_price")
             px = _f(raw_px) if quoted and raw_px is not None else (_f(raw_px) if quoted else 0.0)
-            if not quoted:
+            if not quoted or px is None or px <= 0:
                 d["name"] = d.get("name") or names.get(d.get("ts_code") or "", "") or ""
                 d["market_price"] = None
                 d["market_value"] = None
@@ -687,7 +690,9 @@ class PaperBrokerService:
             "mark_source": marked.get("mark_source"),
             "session_phase": marked.get("session_phase"),
             "intraday_complete": marked.get("intraday_complete"),
+            "valuation_complete": marked.get("valuation_complete"),
             "missing_quotes": marked.get("missing_quotes") or [],
+            "fallback_quotes": marked.get("fallback_quotes") or [],
             "note": marked.get("note"),
         }
 
@@ -1301,7 +1306,7 @@ class PaperBrokerService:
         asof: Optional[str] = None,
         write_equity: bool = True,
     ) -> Dict[str, Any]:
-        """用真实 1 分钟分时末价盯市。没有分时的持仓不计盘中盈亏，不用日线/成本价冒充。"""
+        """优先用 1 分钟分时末价盯市；无分时（如非交易日）回退上一交易日收盘价计入市值。"""
         self._ensure_tables()
         from server.paper_quote import last_intraday_quotes, session_context
 
@@ -1365,12 +1370,17 @@ class PaperBrokerService:
             market_value = 0.0
             out_positions: List[Dict[str, Any]] = []
             missing: List[str] = []
+            fallback: List[str] = []
             snap_date = asof_d or date.today()
+            bar_asof = asof_d or date.today()
 
             for p in positions:
                 qty = _f(p.quantity)
                 avg = _f(p.avg_cost)
-                q = quotes.get(str(p.ts_code).upper()) or {}
+                code_u = str(p.ts_code).upper()
+                q = quotes.get(code_u) or {}
+                q_clock = None
+                q_err = None
                 if q.get("ok") and q.get("price"):
                     px = float(q["price"])
                     mv = qty * px
@@ -1383,14 +1393,30 @@ class PaperBrokerService:
                     q_day = _to_date(q.get("trade_date")) or asof_d
                     if q_day:
                         snap_date = q_day
+                    q_clock = q.get("clock")
                 else:
-                    px = None
-                    mv = None
-                    upnl = None
-                    q_src = "missing"
-                    q_time = None
-                    q_day = asof_d
-                    missing.append(str(p.ts_code))
+                    # 非交易日或分时缺失：用上一交易日（<= asof）收盘价计入市值
+                    bar = self._get_bar(conn, str(p.ts_code), trade_date=bar_asof, mode="latest")
+                    close_px = _f(bar.get("close")) if bar else None
+                    if close_px and close_px > 0:
+                        px = close_px
+                        mv = qty * px
+                        upnl = (px - avg) * qty
+                        market_value += mv
+                        q_src = "daily_close"
+                        q_time = None
+                        q_day = _to_date(bar.get("trade_date")) or asof_d
+                        q_err = "无分时，已用上一交易日收盘价"
+                        fallback.append(str(p.ts_code))
+                    else:
+                        px = None
+                        mv = None
+                        upnl = None
+                        q_src = "missing"
+                        q_time = None
+                        q_day = asof_d
+                        q_err = (q.get("error") if q else None) or "无分时且无日线收盘价"
+                        missing.append(str(p.ts_code))
                 conn.execute(
                     sa_text(
                         """
@@ -1416,6 +1442,12 @@ class PaperBrokerService:
                         "qday": q_day,
                     },
                 )
+                pre_close = None
+                if q_src == "intraday" and q.get("ok"):
+                    try:
+                        pre_close = float(q["pre_close"]) if q.get("pre_close") is not None else None
+                    except (TypeError, ValueError):
+                        pre_close = None
                 out_positions.append(
                     {
                         "account_id": account_id,
@@ -1428,11 +1460,12 @@ class PaperBrokerService:
                         "market_price": px,
                         "market_value": None if mv is None else round(mv, 4),
                         "unrealized_pnl": None if upnl is None else round(upnl, 4),
+                        "pre_close": pre_close,
                         "quote_source": q_src,
                         "quote_time": q_time,
                         "quote_trade_date": q_day.isoformat() if isinstance(q_day, date) else q_day,
-                        "quote_clock": q.get("clock") if q.get("ok") else None,
-                        "quote_error": None if q.get("ok") else (q.get("error") or "无分时"),
+                        "quote_clock": q_clock,
+                        "quote_error": q_err,
                     }
                 )
 
@@ -1441,7 +1474,20 @@ class PaperBrokerService:
 
             cash = _f(acct.cash)
             equity = cash + market_value
-            complete = not missing
+            # 净值可写入：只要没有「既无分时也无日线」的持仓
+            valuation_complete = not missing
+            intraday_complete = not missing and not fallback
+            if fallback and not missing:
+                mark_source = "daily_close" if not any(
+                    (p.get("quote_source") == "intraday") for p in out_positions
+                ) else "mixed"
+            elif missing and not any(
+                (p.get("quote_source") in ("intraday", "daily_close")) for p in out_positions
+            ):
+                mark_source = "missing"
+            else:
+                mark_source = "intraday" if not fallback else "mixed"
+
             conn.execute(
                 sa_text(
                     """
@@ -1455,7 +1501,7 @@ class PaperBrokerService:
             )
 
             daily_return = None
-            if write_equity and complete:
+            if write_equity and valuation_complete:
                 prev = conn.execute(
                     sa_text(
                         """
@@ -1502,6 +1548,24 @@ class PaperBrokerService:
                 ).fetchone()
             )
 
+        if missing:
+            note = (
+                "以下持仓无分时且无日线收盘价，市值未计入："
+                + "、".join(missing)
+            )
+        elif fallback:
+            shown = fallback[:12]
+            more = f" 等共{len(fallback)}只" if len(fallback) > 12 else f"（共{len(fallback)}只）"
+            note = (
+                "以下持仓未匹配分时，由上一交易日收盘价计算"
+                + more
+                + "："
+                + "、".join(shown)
+                + ("…" if len(fallback) > 12 else "")
+            )
+        else:
+            note = None
+
         return {
             "ok": True,
             "account": acct_out,
@@ -1511,15 +1575,13 @@ class PaperBrokerService:
             "equity": round(equity, 4),
             "asof": snap_date.isoformat() if isinstance(snap_date, date) else str(snap_date),
             "daily_return": None if daily_return is None else round(daily_return, 6),
-            "mark_source": "intraday",
+            "mark_source": mark_source,
             "session_phase": ctx.get("phase"),
-            "intraday_complete": complete,
+            "intraday_complete": intraday_complete,
+            "valuation_complete": valuation_complete,
             "missing_quotes": missing,
-            "note": (
-                None
-                if complete
-                else "以下持仓没有对应分时，盘中盈亏未计算（未用日线估算）：" + "、".join(missing)
-            ),
+            "fallback_quotes": fallback,
+            "note": note,
         }
 
     # ------------------------------------------------------------------ #

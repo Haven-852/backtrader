@@ -66,16 +66,34 @@
 
       <MarketMemoryPanel v-else-if="section === 'market'" :query="q" />
 
+      <OpportunityPanel v-else-if="section === 'opportunity'" :query="q" />
+
+      <RulePanel v-else-if="section === 'rule'" :query="q" />
+
+      <ExternalKnowledgePanel v-else-if="section === 'external'" :query="q" />
+
+      <ExperimentPanel v-else-if="section === 'experiment'" :query="q" />
+
       <section v-else-if="section === 'ability'" class="p-6 max-w-3xl">
-        <h2 class="text-base font-medium mb-1">我的交易能力</h2>
-        <p class="text-xs text-zinc-500 mb-5">按已有交易记录汇总，分数暂时固定。</p>
+        <h2 class="text-base font-medium mb-1">交易能力</h2>
+        <p class="text-xs text-zinc-500 mb-4">{{ ability.note || '按计划、实际执行和结果计算，不按盈亏。' }}</p>
+        <p v-if="ability.early" class="text-xs text-amber-300/90 mb-4">样本量：{{ ability.sample_size }}笔。能力数据仍处于早期积累阶段，不会因为少数交易给出很高的分数。</p>
+        <p v-else class="text-xs text-zinc-400 mb-4">样本量：{{ ability.sample_size }}笔</p>
         <div class="border border-zinc-800 rounded-xl px-4 py-3 font-mono text-sm space-y-2">
-          <div v-for="row in abilities" :key="row.label" class="flex items-center gap-3">
+          <div v-for="row in ability.skills" :key="row.key" class="flex items-center gap-3">
             <span class="w-16 shrink-0 text-zinc-300">{{ row.label }}</span>
-            <span class="tracking-tight text-sky-300">{{ bar(row.score) }}</span>
-            <span class="w-8 text-right text-zinc-100">{{ row.score }}</span>
+            <span v-if="row.score != null" class="tracking-tight text-sky-300">{{ bar(row.score) }}</span>
+            <span v-else class="text-zinc-600">待计算</span>
+            <span class="w-8 text-right text-zinc-100">{{ row.score == null ? '—' : row.score }}</span>
+            <span class="text-[11px] text-zinc-500">样本 {{ row.sample_size }}</span>
           </div>
         </div>
+        <div class="mt-4 text-sm text-zinc-300 space-y-1">
+          <div>最强能力：{{ ability.strongest || '还没有拉开差距' }}</div>
+          <div>主要短板：{{ ability.weakness || '—' }}</div>
+          <div>次要短板：{{ ability.second_weakness || '—' }}</div>
+        </div>
+        <p v-if="abilityMissing" class="mt-4 text-xs text-zinc-500">显示为 — 的项目，是这笔记录里还没有对应证据。到「我的交易」补上市场方向、指数涨跌、板块判断、板块涨跌、卖出理由或实际止损后再计算。</p>
       </section>
 
       <TradeBook v-else-if="section === 'trades' || section === 'failures'" :mode="section" :query="q" />
@@ -127,6 +145,10 @@
 import { computed, onMounted, ref } from 'vue'
 import axios from 'axios'
 import MarketMemoryPanel from './MarketMemoryPanel.vue'
+import OpportunityPanel from './OpportunityPanel.vue'
+import RulePanel from './RulePanel.vue'
+import ExternalKnowledgePanel from './ExternalKnowledgePanel.vue'
+import ExperimentPanel from './ExperimentPanel.vue'
 import TradeBook from './TradeBook.vue'
 
 type AnyRec = Record<string, any>
@@ -143,17 +165,6 @@ const nav = [
   { id: 'experiment', label: '实验室', icon: 'fa-flask' },
 ]
 
-const abilities = [
-  { label: '方向判断', score: 90 },
-  { label: '板块判断', score: 80 },
-  { label: '个股选择', score: 70 },
-  { label: '买点', score: 50 },
-  { label: '卖点', score: 40 },
-  { label: '仓位', score: 60 },
-  { label: '止损', score: 50 },
-  { label: '执行', score: 70 },
-]
-
 const regimes = [
   { key: 'RECOVERY', label: '修复' },
   { key: 'RANGE', label: '震荡' },
@@ -166,6 +177,7 @@ const q = ref('')
 const error = ref('')
 const overview = ref<AnyRec>({})
 const items = ref<AnyRec[]>([])
+const ability = ref<AnyRec>({ skills: [], sample_size: 0, early: true, note: '' })
 const addingLesson = ref(false)
 const lessonSaving = ref(false)
 const lessonForm = ref({ title: '', content: '' })
@@ -174,7 +186,7 @@ const filteredOpps = computed(() => {
   const rows = overview.value.opportunities || []
   const key = q.value.trim().toLowerCase()
   if (!key) return rows
-  return rows.filter((o: AnyRec) => `${o.name || ''} ${o.symbol || ''} ${o.opportunity_type || ''}`.toLowerCase().includes(key))
+  return rows.filter((o: AnyRec) => `${o.sector_name || ''} ${o.name || ''} ${o.symbol || ''} ${o.phase || ''} ${o.opportunity_type || ''}`.toLowerCase().includes(key))
 })
 
 const filteredItems = computed(() => {
@@ -204,6 +216,8 @@ const statsText = computed(() => {
 
 const sectionTitle = computed(() => nav.find((n) => n.id === section.value)?.label || '')
 
+const abilityMissing = computed(() => (ability.value.skills || []).some((row: AnyRec) => row.score == null))
+
 function mapRegime(raw: string | undefined) {
   const v = (raw || '').toUpperCase()
   if (['RECOVERY', '修复'].includes(v)) return 'RECOVERY'
@@ -231,7 +245,7 @@ function fmtRate(v: unknown) {
 }
 
 function bar(score: number) {
-  const n = Math.max(0, Math.min(10, Math.round(score / 10)))
+  const n = Math.max(0, Math.min(10, Math.round((score || 0) / 10)))
   return '█'.repeat(n) + '░'.repeat(10 - n)
 }
 
@@ -247,8 +261,8 @@ function stars(score: unknown) {
 }
 
 function oppLabel(opp: AnyRec) {
-  const name = opp.name || opp.symbol || 'XXX'
-  const kind = opp.opportunity_type || '机会'
+  const name = opp.sector_name || opp.name || opp.symbol || '机会'
+  const kind = opp.phase ? `${opp.phase} · ${opp.opportunity_type || '机会'}` : (opp.opportunity_type || '机会')
   return `${name}  ${kind}`
 }
 
@@ -297,6 +311,11 @@ async function removeLesson(item: AnyRec) {
   }
 }
 
+async function loadAbility() {
+  const res = await axios.get('/kb/ability')
+  ability.value = res.data || { skills: [], sample_size: 0, early: true }
+}
+
 async function openSection(id: string) {
   section.value = id
   error.value = ''
@@ -308,7 +327,11 @@ async function openSection(id: string) {
     await loadLessons()
     return
   }
-  if (id === 'trades' || id === 'failures' || id === 'ability' || id === 'market') return
+  if (id === 'ability') {
+    await loadAbility()
+    return
+  }
+  if (id === 'trades' || id === 'failures' || id === 'market' || id === 'opportunity' || id === 'rule' || id === 'external' || id === 'experiment') return
   const res = await axios.get(`/kb/section/${id}`)
   items.value = res.data?.items || []
 }

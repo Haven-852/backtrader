@@ -81,17 +81,32 @@ class KbMarketToolkit:
             return {"ok": False, "error": f"Datahubco 未就绪: {e}"}
 
         requested = _parse_day(trade_date) or datetime.now(_SH).date()
-        opens = self._open_days(client, requested)
-        used = requested if requested in opens or not opens else opens[-1]
-        if opens and requested not in opens:
-            used = opens[-1]
-        notes: List[str] = []
-        if used != requested:
-            notes.append(f"{requested.isoformat()} 不是交易日，草稿用最近交易日 {used.isoformat()}。")
+        used, notes = self._resolve_trade_day(client, requested)
 
         indexes = self._indexes(client, used)
         if not any(row.get("change_pct") is not None for row in indexes):
-            return {"ok": False, "error": f"Datahubco 没有 {used.isoformat()} 的指数行情"}
+            # 再兜底：若指定日 PG 无数据，回退到库内最近有指数的交易日重试一次
+            fallback = self._pg_latest_index_day(before=used)
+            if fallback and fallback != used:
+                notes.append(
+                    f"{used.isoformat()} 指数行情不足，改用库内最近交易日 {fallback.isoformat()}。"
+                )
+                used = fallback
+                indexes = self._indexes(client, used)
+        if not any(row.get("change_pct") is not None for row in indexes):
+            return {
+                "ok": False,
+                "error": (
+                    f"本地 index_daily / Datahubco 均没有 {used.isoformat()} 的指数行情。"
+                    "请先用 datahubco_data__get_bars(index_daily) 确认入库。"
+                ),
+            }
+
+        # 供板块连板/资金/假设的日历：含本地有指数的日期 + 开市日（不越过上海今日）
+        opens = sorted(set(self._open_days(client, used)) | set(self._pg_index_days(used)))
+        if used not in opens:
+            opens.append(used)
+            opens = sorted(set(opens))
 
         daily = self._daily(client, used)
         limits = self._limits(client, used)
@@ -176,13 +191,16 @@ class KbMarketToolkit:
         }
 
     def _open_days(self, client, day: date) -> List[date]:
+        """交易日历开市日。只保留 <= 上海今日，避免远端日历把未来交易日当成 used。"""
+        today = datetime.now(_SH).date()
         start = day - timedelta(days=40)
+        end = min(day + timedelta(days=20), today)
         try:
             df = client.query(
                 "trade_cal",
                 exchange="SSE",
                 start_date=_ymd(start),
-                end_date=_ymd(day + timedelta(days=20)),
+                end_date=_ymd(end),
             )
         except Exception as e:
             logger.warning("trade_cal 失败: %s", e)
@@ -193,12 +211,126 @@ class KbMarketToolkit:
         out = []
         for _, row in df.iterrows():
             flag = str(row.get("is_open"))
-            if flag not in ("1", "1.0"):
+            if flag not in ("1", "1.0", "true", "True"):
                 continue
             d = _parse_day(str(row.get("cal_date")))
-            if d:
+            if d and d <= today:
                 out.append(d)
         return sorted(set(out))
+
+    def _pg_index_days(self, around: date, lookback: int = 40) -> List[date]:
+        """以本地 index_daily 为准：列出有行情的交易日。"""
+        try:
+            from sqlalchemy import text as sa_text
+            from data_layer.db_manager import storage_manager
+
+            eng = storage_manager.get_postgres_engine()
+            if not eng:
+                return []
+            codes = [c for c, _ in _INDEXES]
+            with eng.connect() as conn:
+                rows = conn.execute(
+                    sa_text(
+                        """
+                        SELECT DISTINCT trade_date
+                        FROM index_daily
+                        WHERE ts_code = ANY(:codes)
+                          AND trade_date >= :s
+                          AND trade_date <= :e
+                        ORDER BY trade_date
+                        """
+                    ),
+                    {
+                        "codes": codes,
+                        "s": around - timedelta(days=lookback),
+                        "e": around + timedelta(days=2),
+                    },
+                ).fetchall()
+            out = []
+            for r in rows:
+                d = r[0]
+                if isinstance(d, datetime):
+                    d = d.date()
+                elif not isinstance(d, date):
+                    d = _parse_day(str(d))
+                if d:
+                    out.append(d)
+            return out
+        except Exception as e:
+            logger.warning("pg index_daily days 失败: %s", e)
+            return []
+
+    def _pg_latest_index_day(self, before: Optional[date] = None) -> Optional[date]:
+        try:
+            from sqlalchemy import text as sa_text
+            from data_layer.db_manager import storage_manager
+
+            eng = storage_manager.get_postgres_engine()
+            if not eng:
+                return None
+            codes = [c for c, _ in _INDEXES]
+            sql = """
+                SELECT MAX(trade_date) AS d
+                FROM index_daily
+                WHERE ts_code = ANY(:codes)
+            """
+            params: Dict[str, Any] = {"codes": codes}
+            if before is not None:
+                sql += " AND trade_date <= :e"
+                params["e"] = before
+            with eng.connect() as conn:
+                row = conn.execute(sa_text(sql), params).fetchone()
+            if not row or row[0] is None:
+                return None
+            d = row[0]
+            if isinstance(d, datetime):
+                return d.date()
+            if isinstance(d, date):
+                return d
+            return _parse_day(str(d))
+        except Exception as e:
+            logger.warning("pg latest index day 失败: %s", e)
+            return None
+
+    def _resolve_trade_day(self, client, requested: date) -> tuple:
+        """
+        解析实际使用的交易日：
+        1) 本地 index_daily 已有该日 → 直接用（与 get_bars 口径一致）
+        2) 否则取 <= requested 的最近开市日 / 最近有指数日
+        禁止回退到未来日历日。
+        """
+        notes: List[str] = []
+        today = datetime.now(_SH).date()
+        req = min(requested, today)
+        pg_days = self._pg_index_days(req)
+        if req in pg_days:
+            return req, notes
+
+        opens = self._open_days(client, req)
+        past_opens = [d for d in opens if d <= req]
+        past_pg = [d for d in pg_days if d <= req]
+
+        candidates = sorted(set(past_opens) | set(past_pg))
+        if req in opens and not past_pg:
+            # 日历说开市但库里还没有：仍先用 req，让 _indexes 再尝试远端/回退
+            return req, notes
+        if candidates:
+            used = candidates[-1]
+            if used != requested:
+                notes.append(
+                    f"{requested.isoformat()} 不是可用交易日或库内无指数，"
+                    f"草稿用最近交易日 {used.isoformat()}。"
+                )
+            return used, notes
+
+        latest = self._pg_latest_index_day(before=req)
+        if latest:
+            if latest != requested:
+                notes.append(
+                    f"交易日历不可用，改用本地 index_daily 最近日 {latest.isoformat()}。"
+                )
+            return latest, notes
+        return req, notes
 
     def _query(self, client, api: str, **params):
         try:
@@ -212,16 +344,89 @@ class KbMarketToolkit:
         df.columns = [str(c).lower() for c in df.columns]
         return df
 
+    def _index_frame(self, client, code: str, day: date) -> pd.DataFrame:
+        """
+        指数日线：优先本地 PG index_daily（与 datahubco_data__get_bars 同口径），
+        不足再回退 Datahubco 远端。
+        """
+        start_d = day - timedelta(days=30)
+        # 1) PG
+        try:
+            from sqlalchemy import text as sa_text
+            from data_layer.db_manager import storage_manager
+
+            eng = storage_manager.get_postgres_engine()
+            if eng:
+                df = pd.read_sql(
+                    sa_text(
+                        """
+                        SELECT *
+                        FROM index_daily
+                        WHERE ts_code = :c
+                          AND trade_date >= :s
+                          AND trade_date <= :e
+                        ORDER BY trade_date
+                        """
+                    ),
+                    eng,
+                    params={"c": code, "s": start_d, "e": day},
+                )
+                if df is not None and not df.empty:
+                    df = df.copy()
+                    df.columns = [str(c).lower() for c in df.columns]
+                    if "trade_date" in df.columns:
+                        df["trade_date"] = df["trade_date"].map(
+                            lambda v: v.date() if isinstance(v, datetime) else (
+                                v if isinstance(v, date) else _parse_day(str(v))
+                            )
+                        )
+                        if (df["trade_date"] == day).any():
+                            return df
+        except Exception as e:
+            logger.info("index_daily PG 读取失败 %s: %s", code, e)
+
+        # 2) toolkit get_bars(auto) —— 与覆盖率/get_bars 工具一致
+        try:
+            from tools.datahubco_toolkit import datahubco_toolkit
+
+            packed = datahubco_toolkit.get_bars(
+                ts_code=code,
+                dataset="index_daily",
+                start_date=start_d.isoformat(),
+                end_date=day.isoformat(),
+                limit=80,
+                source="auto",
+                write_back=True,
+            )
+            bars = packed.get("data") or packed.get("bars") or packed.get("items") or []
+            if bars:
+                df = pd.DataFrame(bars)
+                df.columns = [str(c).lower() for c in df.columns]
+                if "trade_date" in df.columns:
+                    df["trade_date"] = df["trade_date"].map(lambda v: _parse_day(str(v)))
+                return df
+        except Exception as e:
+            logger.info("index_daily get_bars 失败 %s: %s", code, e)
+
+        # 3) 远端直查
+        df = self._query(
+            client,
+            "index_daily",
+            ts_code=code,
+            start_date=_ymd(start_d),
+            end_date=_ymd(day),
+        )
+        if not df.empty and "trade_date" in df.columns:
+            df["trade_date"] = df["trade_date"].map(lambda v: _parse_day(str(v)))
+        return df
+
     def _indexes(self, client, day: date) -> List[Dict[str, Any]]:
-        start = _ymd(day - timedelta(days=30))
-        end = _ymd(day)
         rows = []
         for code, name in _INDEXES:
-            df = self._query(client, "index_daily", ts_code=code, start_date=start, end_date=end)
+            df = self._index_frame(client, code, day)
             if df.empty or "trade_date" not in df.columns:
                 rows.append({"name": name, "ts_code": code})
                 continue
-            df["trade_date"] = df["trade_date"].map(lambda v: _parse_day(str(v)))
             df = df.dropna(subset=["trade_date"]).sort_values("trade_date")
             today = df[df["trade_date"] == day]
             prev = df[df["trade_date"] < day]

@@ -642,6 +642,347 @@ POSTGRES_DDL_LIST = [
     )
     """,
 
+    # 19b. 主营构成
+    """
+    CREATE TABLE IF NOT EXISTS fin_mainbz (
+        ts_code     VARCHAR(16)   NOT NULL,
+        end_date    DATE          NOT NULL,
+        bz_item     VARCHAR(200)  NOT NULL DEFAULT '',
+        bz_code     VARCHAR(16),
+        bz_sales    NUMERIC(24,4),
+        bz_profit   NUMERIC(24,4),
+        bz_cost     NUMERIC(24,4),
+        curr_type   VARCHAR(16),
+        updated_at  TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        PRIMARY KEY (ts_code, end_date, bz_item)
+    )
+    """,
+
+    # 19c. 审计意见
+    """
+    CREATE TABLE IF NOT EXISTS fin_audit (
+        ts_code       VARCHAR(16)   NOT NULL,
+        ann_date      DATE,
+        end_date      DATE          NOT NULL,
+        audit_result  TEXT,
+        audit_fees    NUMERIC(20,4),
+        audit_agency  VARCHAR(200)  NOT NULL DEFAULT '',
+        audit_sign    VARCHAR(200),
+        updated_at    TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        PRIMARY KEY (ts_code, end_date, audit_agency)
+    )
+    """,
+
+    # 19d. 财报披露日程
+    """
+    CREATE TABLE IF NOT EXISTS fin_disclosure_date (
+        ts_code      VARCHAR(16)  NOT NULL,
+        ann_date     DATE,
+        end_date     DATE         NOT NULL,
+        pre_date     DATE,
+        actual_date  DATE,
+        updated_at   TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        PRIMARY KEY (ts_code, end_date)
+    )
+    """,
+
+    # 19e. 指数周/月线、每日估值、行业分类、基金分红/持仓/复权
+    """
+    CREATE TABLE IF NOT EXISTS index_weekly (
+        ts_code     VARCHAR(16)  NOT NULL,
+        trade_date  DATE         NOT NULL,
+        open        NUMERIC(12,4),
+        high        NUMERIC(12,4),
+        low         NUMERIC(12,4),
+        close       NUMERIC(12,4),
+        pre_close   NUMERIC(12,4),
+        change      NUMERIC(12,4),
+        pct_chg     NUMERIC(12,4),
+        vol         BIGINT,
+        amount      NUMERIC(20,4),
+        PRIMARY KEY (ts_code, trade_date)
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS index_monthly (
+        ts_code     VARCHAR(16)  NOT NULL,
+        trade_date  DATE         NOT NULL,
+        open        NUMERIC(12,4),
+        high        NUMERIC(12,4),
+        low         NUMERIC(12,4),
+        close       NUMERIC(12,4),
+        pre_close   NUMERIC(12,4),
+        change      NUMERIC(12,4),
+        pct_chg     NUMERIC(12,4),
+        vol         BIGINT,
+        amount      NUMERIC(20,4),
+        PRIMARY KEY (ts_code, trade_date)
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS index_daily_basic (
+        ts_code          VARCHAR(16)  NOT NULL,
+        trade_date       DATE         NOT NULL,
+        total_mv         NUMERIC(24,4),
+        float_mv         NUMERIC(24,4),
+        total_share      NUMERIC(24,4),
+        float_share      NUMERIC(24,4),
+        free_share       NUMERIC(24,4),
+        turnover_rate    NUMERIC(12,4),
+        turnover_rate_f  NUMERIC(12,4),
+        pe               NUMERIC(16,4),
+        pe_ttm           NUMERIC(16,4),
+        pb               NUMERIC(16,4),
+        PRIMARY KEY (ts_code, trade_date)
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS ref_index_classify (
+        index_code     VARCHAR(16)   NOT NULL,
+        industry_name  VARCHAR(100),
+        level          VARCHAR(8),
+        industry_code  VARCHAR(16),
+        is_pub         VARCHAR(4),
+        parent_code    VARCHAR(16),
+        src            VARCHAR(32)   NOT NULL DEFAULT 'SW2021',
+        updated_at     TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        PRIMARY KEY (index_code, src)
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS fund_div (
+        ts_code       VARCHAR(16)  NOT NULL,
+        ann_date      DATE         NOT NULL,
+        ex_date       DATE         NOT NULL DEFAULT '1970-01-01',
+        imp_anndate   DATE,
+        base_date     DATE,
+        div_proc      VARCHAR(30),
+        record_date   DATE,
+        pay_date      DATE,
+        earpay_date   DATE,
+        net_ex_date   DATE,
+        div_cash      NUMERIC(16,6),
+        base_unit     NUMERIC(16,6),
+        ear_distr     NUMERIC(20,4),
+        ear_amount    NUMERIC(20,4),
+        account_date  DATE,
+        updated_at    TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        PRIMARY KEY (ts_code, ann_date, ex_date)
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS fund_portfolio (
+        ts_code          VARCHAR(16)  NOT NULL,
+        end_date         DATE         NOT NULL,
+        symbol           VARCHAR(16)  NOT NULL,
+        ann_date         DATE,
+        mkv              NUMERIC(24,4),
+        amount           NUMERIC(24,4),
+        stk_mkv_ratio    NUMERIC(12,6),
+        stk_float_ratio  NUMERIC(12,6),
+        updated_at       TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        PRIMARY KEY (ts_code, end_date, symbol)
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS fund_adj (
+        ts_code     VARCHAR(16)  NOT NULL,
+        trade_date  DATE         NOT NULL,
+        adj_factor  NUMERIC(16,8),
+        PRIMARY KEY (ts_code, trade_date)
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS stock_share_float (
+        ts_code      VARCHAR(16)   NOT NULL,
+        ann_date     DATE,
+        float_date   DATE          NOT NULL,
+        float_share  NUMERIC(24,4),
+        float_ratio  NUMERIC(12,6),
+        holder_name  VARCHAR(200)  NOT NULL DEFAULT '',
+        share_type   VARCHAR(64),
+        updated_at   TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        PRIMARY KEY (ts_code, float_date, holder_name)
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS stock_pledge_stat (
+        ts_code         VARCHAR(16)  NOT NULL,
+        end_date        DATE         NOT NULL,
+        pledge_count    NUMERIC(12,4),
+        unrest_pledge   NUMERIC(20,4),
+        rest_pledge     NUMERIC(20,4),
+        total_share     NUMERIC(20,4),
+        pledge_ratio    NUMERIC(12,6),
+        updated_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        PRIMARY KEY (ts_code, end_date)
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS stock_holdertrade (
+        ts_code       VARCHAR(16)   NOT NULL,
+        ann_date      DATE          NOT NULL,
+        holder_name   VARCHAR(200)  NOT NULL DEFAULT '',
+        holder_type   VARCHAR(16),
+        in_de         VARCHAR(8)    NOT NULL DEFAULT '',
+        change_vol    NUMERIC(24,4),
+        change_ratio  NUMERIC(12,6),
+        after_share   NUMERIC(24,4),
+        after_ratio   NUMERIC(12,6),
+        avg_price     NUMERIC(16,4),
+        total_share   NUMERIC(24,4),
+        updated_at    TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        PRIMARY KEY (ts_code, ann_date, holder_name, in_de)
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS stock_cyq_perf (
+        ts_code      VARCHAR(16)  NOT NULL,
+        trade_date   DATE         NOT NULL,
+        his_low      NUMERIC(16,4),
+        his_high     NUMERIC(16,4),
+        cost_5pct    NUMERIC(16,4),
+        cost_15pct   NUMERIC(16,4),
+        cost_50pct   NUMERIC(16,4),
+        cost_85pct   NUMERIC(16,4),
+        cost_95pct   NUMERIC(16,4),
+        weight_avg   NUMERIC(16,4),
+        winner_rate  NUMERIC(12,4),
+        PRIMARY KEY (ts_code, trade_date)
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS stock_cyq_chips (
+        ts_code     VARCHAR(16)  NOT NULL,
+        trade_date  DATE         NOT NULL,
+        price       NUMERIC(16,4) NOT NULL,
+        percent     NUMERIC(12,6),
+        PRIMARY KEY (ts_code, trade_date, price)
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS stock_report_rc (
+        ts_code       VARCHAR(16)   NOT NULL,
+        report_date   DATE          NOT NULL,
+        org_name      VARCHAR(100)  NOT NULL DEFAULT '',
+        report_title  VARCHAR(300)  NOT NULL DEFAULT '',
+        name          VARCHAR(64),
+        report_type   VARCHAR(32),
+        classify      VARCHAR(64),
+        author_name   VARCHAR(200),
+        quarter       VARCHAR(16),
+        op_rt         NUMERIC(20,4),
+        op_pr         NUMERIC(20,4),
+        tp            NUMERIC(20,4),
+        np            NUMERIC(20,4),
+        eps           NUMERIC(16,4),
+        pe            NUMERIC(16,4),
+        rd            NUMERIC(16,4),
+        roe           NUMERIC(16,4),
+        ev_ebitda     NUMERIC(16,4),
+        rating        VARCHAR(32),
+        max_price     NUMERIC(16,4),
+        min_price     NUMERIC(16,4),
+        updated_at    TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        PRIMARY KEY (ts_code, report_date, org_name, report_title)
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS ths_member (
+        ts_code    VARCHAR(16)  NOT NULL,
+        con_code   VARCHAR(16)  NOT NULL,
+        con_name   VARCHAR(64),
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        PRIMARY KEY (ts_code, con_code)
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS cb_basic (
+        ts_code           VARCHAR(16)  PRIMARY KEY,
+        bond_full_name    VARCHAR(200),
+        bond_short_name   VARCHAR(64),
+        cb_type           VARCHAR(16),
+        cb_code           VARCHAR(16),
+        stk_code          VARCHAR(16),
+        stk_short_name    VARCHAR(64),
+        maturity          NUMERIC(8,2),
+        par               NUMERIC(12,4),
+        issue_price       NUMERIC(12,4),
+        issue_size        NUMERIC(24,4),
+        remain_size       NUMERIC(24,4),
+        value_date        DATE,
+        maturity_date     DATE,
+        coupon_rate       NUMERIC(12,4),
+        add_rate          NUMERIC(12,4),
+        pay_per_year      NUMERIC(8,2),
+        list_date         DATE,
+        delist_date       DATE,
+        exchange          VARCHAR(8),
+        conv_start_date   DATE,
+        conv_end_date     DATE,
+        conv_stop_date    DATE,
+        first_conv_price  NUMERIC(16,4),
+        conv_price        NUMERIC(16,4),
+        rate_clause       TEXT
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS cb_daily (
+        ts_code     VARCHAR(16)  NOT NULL,
+        trade_date  DATE         NOT NULL,
+        pre_close   NUMERIC(12,4),
+        open        NUMERIC(12,4),
+        high        NUMERIC(12,4),
+        low         NUMERIC(12,4),
+        close       NUMERIC(12,4),
+        change      NUMERIC(12,4),
+        pct_chg     NUMERIC(12,4),
+        vol         NUMERIC(20,4),
+        amount      NUMERIC(20,4),
+        PRIMARY KEY (ts_code, trade_date)
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS fut_basic (
+        ts_code           VARCHAR(24)  PRIMARY KEY,
+        symbol            VARCHAR(32),
+        exchange          VARCHAR(16),
+        name              VARCHAR(64),
+        fut_code          VARCHAR(16),
+        multiplier        NUMERIC(16,4),
+        trade_unit        VARCHAR(32),
+        per_unit          NUMERIC(16,4),
+        quote_unit        VARCHAR(64),
+        quote_unit_desc   VARCHAR(64),
+        d_mode_desc       VARCHAR(64),
+        list_date         DATE,
+        delist_date       DATE,
+        d_month           VARCHAR(16),
+        last_ddate        DATE
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS fut_daily (
+        ts_code      VARCHAR(24)   NOT NULL,
+        trade_date   DATE          NOT NULL,
+        pre_close    NUMERIC(16,4),
+        pre_settle   NUMERIC(16,4),
+        open         NUMERIC(16,4),
+        high         NUMERIC(16,4),
+        low          NUMERIC(16,4),
+        close        NUMERIC(16,4),
+        settle       NUMERIC(16,4),
+        change1      NUMERIC(16,4),
+        change2      NUMERIC(16,4),
+        vol          NUMERIC(20,4),
+        amount       NUMERIC(24,4),
+        oi           NUMERIC(20,4),
+        oi_chg       NUMERIC(20,4),
+        updated_at   TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        PRIMARY KEY (ts_code, trade_date)
+    )
+    """,
+
     # 21. 策略选股运行
     """
     CREATE TABLE IF NOT EXISTS strategy_screener_run (
@@ -1072,6 +1413,16 @@ POSTGRES_DDL_LIST = [
     )
     """,
     """
+    CREATE TABLE IF NOT EXISTS rule_observable (
+        id          VARCHAR(40) PRIMARY KEY,
+        label       VARCHAR(120) NOT NULL,
+        ops         JSONB NOT NULL,
+        hint        TEXT,
+        basis       VARCHAR(40) NOT NULL DEFAULT 'note',
+        created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    )
+    """,
+    """
     CREATE TABLE IF NOT EXISTS external_knowledge (
         id                 UUID PRIMARY KEY DEFAULT gen_random_uuid(),
         title              VARCHAR(500),
@@ -1173,6 +1524,169 @@ POSTGRES_DDL_LIST = [
     """,
     """
     ALTER TABLE trade_thesis ADD COLUMN IF NOT EXISTS skill_inputs JSONB
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS trade_skill_evaluation (
+        thesis_id UUID PRIMARY KEY REFERENCES trade_thesis(id) ON DELETE CASCADE,
+        direction_score SMALLINT,
+        sector_score SMALLINT,
+        stock_score SMALLINT,
+        entry_score SMALLINT,
+        exit_score SMALLINT,
+        position_score SMALLINT,
+        stop_score SMALLINT,
+        execution_score SMALLINT,
+        reasons JSONB,
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    )
+    """,
+    """
+    ALTER TABLE opportunity ADD COLUMN IF NOT EXISTS sector_code VARCHAR(16)
+    """,
+    """
+    ALTER TABLE opportunity ADD COLUMN IF NOT EXISTS sector_name VARCHAR(64)
+    """,
+    """
+    ALTER TABLE opportunity ADD COLUMN IF NOT EXISTS sector_level VARCHAR(32)
+    """,
+    """
+    ALTER TABLE opportunity ADD COLUMN IF NOT EXISTS phase VARCHAR(20)
+    """,
+    """
+    ALTER TABLE opportunity ADD COLUMN IF NOT EXISTS matched_types JSONB
+    """,
+    """
+    ALTER TABLE opportunity ADD COLUMN IF NOT EXISTS amount_ratio NUMERIC(10,4)
+    """,
+    """
+    ALTER TABLE opportunity ADD COLUMN IF NOT EXISTS main_net NUMERIC(24,4)
+    """,
+    """
+    ALTER TABLE rule ADD COLUMN IF NOT EXISTS version INTEGER NOT NULL DEFAULT 1
+    """,
+    """
+    ALTER TABLE rule ADD COLUMN IF NOT EXISTS rule_type VARCHAR(30)
+    """,
+    """
+    ALTER TABLE rule ADD COLUMN IF NOT EXISTS scope VARCHAR(30)
+    """,
+    """
+    ALTER TABLE rule ADD COLUMN IF NOT EXISTS check_verdict VARCHAR(30)
+    """,
+    """
+    ALTER TABLE rule ADD COLUMN IF NOT EXISTS check_items JSONB
+    """,
+    """
+    ALTER TABLE rule ADD COLUMN IF NOT EXISTS forward_result JSONB
+    """,
+    """
+    ALTER TABLE rule ADD COLUMN IF NOT EXISTS recent_result JSONB
+    """,
+    """
+    ALTER TABLE rule ADD COLUMN IF NOT EXISTS source_lesson_ids JSONB
+    """,
+    """
+    ALTER TABLE external_knowledge ADD COLUMN IF NOT EXISTS account_id UUID
+    """,
+    """
+    ALTER TABLE external_knowledge ADD COLUMN IF NOT EXISTS knowledge_type VARCHAR(40)
+    """,
+    """
+    ALTER TABLE external_knowledge ADD COLUMN IF NOT EXISTS key_findings JSONB
+    """,
+    """
+    ALTER TABLE external_knowledge ADD COLUMN IF NOT EXISTS methodology JSONB
+    """,
+    """
+    ALTER TABLE external_knowledge ADD COLUMN IF NOT EXISTS conditions JSONB
+    """,
+    """
+    ALTER TABLE external_knowledge ADD COLUMN IF NOT EXISTS risks JSONB
+    """,
+    """
+    ALTER TABLE external_knowledge ADD COLUMN IF NOT EXISTS limitations JSONB
+    """,
+    """
+    ALTER TABLE external_knowledge ADD COLUMN IF NOT EXISTS market VARCHAR(40)
+    """,
+    """
+    ALTER TABLE external_knowledge ADD COLUMN IF NOT EXISTS symbols JSONB
+    """,
+    """
+    ALTER TABLE external_knowledge ADD COLUMN IF NOT EXISTS topics JSONB
+    """,
+    """
+    ALTER TABLE external_knowledge ADD COLUMN IF NOT EXISTS credibility_score NUMERIC(5,4)
+    """,
+    """
+    ALTER TABLE external_knowledge ADD COLUMN IF NOT EXISTS relevance_score NUMERIC(5,4)
+    """,
+    """
+    ALTER TABLE external_knowledge ADD COLUMN IF NOT EXISTS applicability JSONB
+    """,
+    """
+    ALTER TABLE external_knowledge ADD COLUMN IF NOT EXISTS hypotheses JSONB
+    """,
+    """
+    ALTER TABLE external_knowledge ADD COLUMN IF NOT EXISTS status VARCHAR(30) NOT NULL DEFAULT 'CANDIDATE'
+    """,
+    """
+    ALTER TABLE external_knowledge ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    """,
+    """
+    ALTER TABLE experiment ADD COLUMN IF NOT EXISTS claim_id VARCHAR(40)
+    """,
+    """
+    ALTER TABLE experiment ADD COLUMN IF NOT EXISTS experiment_code VARCHAR(32)
+    """,
+    """
+    ALTER TABLE experiment ADD COLUMN IF NOT EXISTS source_experience_id UUID
+    """,
+    """
+    ALTER TABLE experiment ADD COLUMN IF NOT EXISTS universe VARCHAR(64)
+    """,
+    """
+    ALTER TABLE experiment ADD COLUMN IF NOT EXISTS benchmark VARCHAR(32)
+    """,
+    """
+    ALTER TABLE experiment ADD COLUMN IF NOT EXISTS version VARCHAR(16) NOT NULL DEFAULT '1.0'
+    """,
+    """
+    ALTER TABLE experiment ADD COLUMN IF NOT EXISTS conclusion TEXT
+    """,
+    """
+    ALTER TABLE experiment ADD COLUMN IF NOT EXISTS failure_reason VARCHAR(40)
+    """,
+    """
+    ALTER TABLE experiment ADD COLUMN IF NOT EXISTS test_unlocked BOOLEAN NOT NULL DEFAULT FALSE
+    """,
+    """
+    ALTER TABLE experiment ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS experiment_run (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        experiment_id UUID NOT NULL REFERENCES experiment(id) ON DELETE CASCADE,
+        version VARCHAR(16) NOT NULL,
+        phase VARCHAR(20) NOT NULL,
+        run_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        parameters JSONB,
+        data_snapshot JSONB,
+        result JSONB,
+        warnings JSONB
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS external_knowledge_experience (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        external_knowledge_id UUID NOT NULL REFERENCES external_knowledge(id) ON DELETE CASCADE,
+        experience_id UUID NOT NULL REFERENCES lesson(id) ON DELETE CASCADE,
+        claim_id VARCHAR(40),
+        relationship VARCHAR(30) NOT NULL,
+        confidence NUMERIC(5,4),
+        note TEXT,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    )
     """,
     """
     ALTER TABLE trade_outcome ADD COLUMN IF NOT EXISTS buy_price NUMERIC(18,4)
@@ -1856,6 +2370,26 @@ POSTGRES_INDEX_DDL_LIST = [
     "CREATE INDEX IF NOT EXISTS idx_express_code ON fin_express (ts_code, ann_date DESC)",
     # 财务-分红
     "CREATE INDEX IF NOT EXISTS idx_dividend_code ON fin_dividend (ts_code, end_date DESC)",
+    "CREATE INDEX IF NOT EXISTS idx_mainbz_code ON fin_mainbz (ts_code, end_date DESC)",
+    "CREATE INDEX IF NOT EXISTS idx_audit_code ON fin_audit (ts_code, end_date DESC)",
+    "CREATE INDEX IF NOT EXISTS idx_disclosure_end ON fin_disclosure_date (end_date, ts_code)",
+    "CREATE INDEX IF NOT EXISTS idx_disclosure_code ON fin_disclosure_date (ts_code, end_date DESC)",
+    "CREATE INDEX IF NOT EXISTS idx_index_weekly_code ON index_weekly (ts_code, trade_date DESC)",
+    "CREATE INDEX IF NOT EXISTS idx_index_monthly_code ON index_monthly (ts_code, trade_date DESC)",
+    "CREATE INDEX IF NOT EXISTS idx_index_daily_basic_code ON index_daily_basic (ts_code, trade_date DESC)",
+    "CREATE INDEX IF NOT EXISTS idx_index_classify_src ON ref_index_classify (src, level)",
+    "CREATE INDEX IF NOT EXISTS idx_fund_div_code ON fund_div (ts_code, ex_date DESC)",
+    "CREATE INDEX IF NOT EXISTS idx_fund_portfolio_code ON fund_portfolio (ts_code, end_date DESC)",
+    "CREATE INDEX IF NOT EXISTS idx_fund_adj_code ON fund_adj (ts_code, trade_date DESC)",
+    "CREATE INDEX IF NOT EXISTS idx_share_float_code ON stock_share_float (ts_code, float_date DESC)",
+    "CREATE INDEX IF NOT EXISTS idx_pledge_stat_code ON stock_pledge_stat (ts_code, end_date DESC)",
+    "CREATE INDEX IF NOT EXISTS idx_holdertrade_code ON stock_holdertrade (ts_code, ann_date DESC)",
+    "CREATE INDEX IF NOT EXISTS idx_cyq_perf_code ON stock_cyq_perf (ts_code, trade_date DESC)",
+    "CREATE INDEX IF NOT EXISTS idx_cyq_chips_code ON stock_cyq_chips (ts_code, trade_date)",
+    "CREATE INDEX IF NOT EXISTS idx_report_rc_code ON stock_report_rc (ts_code, report_date DESC)",
+    "CREATE INDEX IF NOT EXISTS idx_ths_member_con ON ths_member (con_code)",
+    "CREATE INDEX IF NOT EXISTS idx_cb_daily_code ON cb_daily (ts_code, trade_date DESC)",
+    "CREATE INDEX IF NOT EXISTS idx_fut_basic_ex ON fut_basic (exchange)",
     # 东财行业板块
     "CREATE INDEX IF NOT EXISTS idx_sector_dc_index_date ON sector_dc_index_daily (trade_date)",
     "CREATE INDEX IF NOT EXISTS idx_sector_dc_index_level ON sector_dc_index_daily (trade_date, industry_level)",

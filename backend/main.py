@@ -18,8 +18,13 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from dotenv import load_dotenv
+from pathlib import Path
 
-load_dotenv()
+# 显式加载项目根与 backend/.env，避免工作目录变化读不到 PUSHPLUS_TOKEN 等
+_ROOT = Path(__file__).resolve().parent.parent
+_BACKEND = Path(__file__).resolve().parent
+load_dotenv(_ROOT / ".env", override=True)
+load_dotenv(_BACKEND / ".env", override=True)
 
 # 配置日志
 logging.basicConfig(
