@@ -590,7 +590,23 @@ COLUMN_LABELS: Dict[str, str] = {
     "withdra_oth_ersu": "提取任意盈余公积",
     "withdra_rese_fund": "提取储备基金",
     "workers_welfare": "职工奖金福利",
-    "working_capital": "营运资金"
+    "working_capital": "营运资金",
+    "account_id": "账户ID",
+    "asof": "业务日期",
+    "run_id": "运行批次",
+    "step": "步骤",
+    "quote_source": "报价来源",
+    "quote_time": "分时时刻",
+    "quote_trade_date": "分时交易日",
+    "sellable_qty": "可卖数量",
+    "frozen_qty": "冻结数量",
+    "lookback_guard": "次日开盘成交",
+    "unrealized_pnl": "浮动盈亏",
+    "market_price": "市价",
+    "market_value": "市值",
+    "avg_cost": "成本价",
+    "initial_cash": "初始资金",
+    "equity": "净值",
 }
 
 TABLE_COLUMN_OVERRIDES: Dict[str, Dict[str, str]] = {

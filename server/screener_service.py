@@ -1,7 +1,7 @@
 """
-策略选股：用最近 15 日日线判断前一交易日状态。
-A 类：沿下降 MA5 下滑 3–12 日后止跌（阳线/锤子/十字/缩量小阴），观察随后 1–2 周反弹；下跌越短，预期上涨越短。两日阴跌不算。
-B 类：升势回踩 MA5（反转候选）。
+策略选股：用日线判断 asof 当日状态。
+A 类（观察池）：大跌后缩量筑底、靠近 20 日低点、MA5 走平 —— 只观察，不直接买入。
+B 类：升势回踩 MA5（反转候选，可推荐）。
 放量下跌直接抛弃。缺数则从 Datahubco 拉取日线写入 stock_daily。
 """
 
@@ -29,11 +29,27 @@ logger = logging.getLogger(__name__)
 
 BATCH_CODES = 20
 SLEEP = 0.16
-LOOKBACK_BARS = 15
-FILL_BARS = 20
+# B 仍用近 15 日；A 观察池需要约 40 根算 20 日回撤/量能
+LOOKBACK_BARS = 40
+LOOKBACK_B = 15
+FILL_BARS = 45
 MA_PERIOD = 5
 SCORE_A_MIN = 55.0
 SCORE_B_MIN = 60.0
+
+# ── A 观察池固定阈值 ──
+A_DROP_20_MAX = -0.05          # 近 20 日跌幅 ≤ -5%
+A_DRAWDOWN_60_MIN = 0.10       # 或相对窗口高点回撤 ≥ 10%
+A_AMP_RATIO_MAX = 0.85         # 近5日振幅均值 / 近20日 ≤ 0.85
+A_NEAR_LOW_MAX = 0.10          # 收盘距近20日最低 ≤ 10%
+A_MA5_SLOPE_MIN = -0.015       # MA5 相对5日前斜率
+A_MA5_SLOPE_MAX = 0.02
+A_BELOW_MA5_MAX = 0.04         # 收盘在 MA5 下不超过 4%
+A_ABOVE_MA5_MAX = 0.025        # 或刚上穿不超过 2.5%
+A_VOL_RATIO_MAX = 1.0          # 近5日均量 / 近20日均量 ≤ 1.0（不放量）
+A_CRASH_PCT = -0.05            # 放量暴跌剔除：跌幅
+A_CRASH_VOL = 1.8              # 放量暴跌剔除：量比
+A_WATCH_DAYS = 20              # 建议观察窗口（交易日）
 
 
 class ScreenerService:
@@ -532,16 +548,17 @@ class ScreenerService:
         )
 
     def _classify_one(self, g: pd.DataFrame, asof: date) -> Optional[Dict[str, Any]]:
-        """判断单只股票 D0=asof 属于 A 底部观察、B 升势回踩，或抛弃。"""
+        """判断单只股票 D0=asof 属于 A 观察池、B 升势回踩，或抛弃。"""
         g = g.sort_values("trade_date").copy()
         for col in ("open", "high", "low", "close", "vol"):
             g[col] = pd.to_numeric(g[col], errors="coerce")
-        if len(g) < LOOKBACK_BARS:
+        if len(g) < LOOKBACK_B:
             return None
         g["ma5"] = g["close"].rolling(MA_PERIOD, min_periods=MA_PERIOD).mean()
         g["vol_ma5"] = g["vol"].rolling(MA_PERIOD, min_periods=MA_PERIOD).mean()
-        g15 = g.tail(LOOKBACK_BARS)
-        last = g15.iloc[-1]
+        g["vol_ma20"] = g["vol"].rolling(20, min_periods=10).mean()
+
+        last = g.iloc[-1]
         try:
             last_day = pd.Timestamp(last["trade_date"]).date()
         except Exception:
@@ -553,6 +570,8 @@ class ScreenerService:
         ):
             return None
 
+        # ── B：仍用近 15 日 ──
+        g15 = g.tail(LOOKBACK_B)
         o = g15["open"].to_numpy(dtype="float64")
         h = g15["high"].to_numpy(dtype="float64")
         low = g15["low"].to_numpy(dtype="float64")
@@ -618,75 +637,146 @@ class ScreenerService:
                         "pct_chg": round(float(pct0 * 100), 3),
                     }
 
-        # A：沿下降 MA5 下滑止跌，捕获随后 1–2 周反弹的起点。下跌越短，预期上涨越短。
-        n_down = self._recent_slide(c)
-        if n_down >= 3 and n_down <= 12 and c[-1] < ma[-1]:
-            start_idx = -2 - n_down
-            if start_idx >= -len(c) and float(c[start_idx]) > 0:
-                drop = float(c[start_idx]) / float(c[-2]) - 1.0
-                first_down = -1 - n_down
-                ma_start = ma[first_down] if self._finite(ma[first_down]) else ma[-4]
-                ma_falling = self._finite(ma_start) and ma[-1] <= ma_start
-                swing_low = float(min(low[first_down:]))
-                near_low = low[-1] <= swing_low * 1.02 or c[-1] <= swing_low * 1.04
-                yang = self._is_up_yang(
-                    float(o[-1]), float(h[-1]), float(low[-1]), float(c[-1]), float(c[-2])
-                )
-                doji = self._is_bottom_doji(
-                    float(o[-1]), float(h[-1]), float(low[-1]), float(c[-1]), float(v[-1]), float(vma[-1])
-                )
-                hammer = self._is_hammer(float(o[-1]), float(h[-1]), float(low[-1]), float(c[-1]))
-                prev_ranges = [
-                    float(max(h[i] - low[i], abs(c[i]) * 0.01))
-                    for i in range(max(0, len(c) - 4), len(c) - 1)
-                    if self._finite(h[i], low[i], c[i])
-                ]
-                exhaust = self._is_exhaustion(
-                    float(o[-1]), float(h[-1]), float(low[-1]), float(c[-1]),
-                    float(v[-1]), float(vma[-1]), prev_ranges,
-                )
-                ok_shape = yang or doji or hammer or exhaust
-                drop_ok = 0.035 <= drop <= 0.28
-                vol_ok_a = v[-1] <= (1.4 * vma[-1] if yang else 1.2 * vma[-1])
-                if ok_shape and drop_ok and near_low and ma_falling and vol_ok_a:
-                    expect = self._expect_up_days(n_down)
-                    timing = 1.0 if n_down in (3, 4, 6, 7) else 0.85
-                    drop_score = self._clip((drop - 0.035) / 0.12)
-                    rng = max(float(h[-1] - low[-1]), abs(float(c[-1])) * 0.01)
-                    if yang:
-                        rev_q = self._clip((c[-1] - low[-1]) / rng)
-                        kind = "上涨"
-                    elif hammer:
-                        rev_q = self._clip(
-                            (min(float(o[-1]), float(c[-1])) - float(low[-1])) / rng / 0.55
-                        )
-                        kind = "锤子止跌"
-                    elif doji:
-                        rev_q = self._clip(
-                            (min(float(o[-1]), float(c[-1])) - float(low[-1])) / rng / 0.55
-                        )
-                        kind = "十字止跌"
-                    else:
-                        avg_rng = sum(prev_ranges) / max(len(prev_ranges), 1)
-                        rev_q = self._clip(1.0 - rng / max(avg_rng, rng))
-                        kind = "缩量止跌"
-                    vol_s = self._clip((1.3 - v[-1] / vma[-1]) / 0.8)
-                    score = 20 * timing + 20 * drop_score + 30 * rev_q + 15 * vol_s + 15
-                    if score >= SCORE_A_MIN:
-                        reason = f"沿MA5下滑连跌{n_down}日{kind}，预期反弹{expect}日"
-                        return {
-                            "setup_type": "A",
-                            "score": round(float(score), 2),
-                            "label": "底部观察",
-                            "reason": reason,
-                            "close": float(c[-1]),
-                            "ma5": float(ma[-1]),
-                            "below_pct": round(float(below * 100), 3),
-                            "pct_chg": round(float(pct0 * 100), 3),
-                            "decline_days": int(n_down),
-                            "expect_up_days": int(expect),
-                        }
-        return None
+        # ── A：观察池（转弯/筑底，非买入）──
+        return self._classify_observe_pool(g, pct0=float(pct0), below=float(below))
+
+    def _classify_observe_pool(
+        self,
+        g: pd.DataFrame,
+        *,
+        pct0: float,
+        below: float,
+    ) -> Optional[Dict[str, Any]]:
+        """
+        A 观察池固定规则：
+        大跌后缩量、靠近 20 日低点、MA5 走平、未放量暴跌。
+        """
+        if len(g) < 20:
+            return None
+        use = g.tail(LOOKBACK_BARS).copy()
+        if len(use) < 20:
+            return None
+
+        c = use["close"].to_numpy(dtype="float64")
+        h = use["high"].to_numpy(dtype="float64")
+        low = use["low"].to_numpy(dtype="float64")
+        v = use["vol"].to_numpy(dtype="float64")
+        ma5 = use["ma5"].to_numpy(dtype="float64")
+        vma5 = use["vol_ma5"].to_numpy(dtype="float64")
+        vma20 = use["vol_ma20"].to_numpy(dtype="float64")
+
+        if not self._finite(c[-1], c[-2], ma5[-1], v[-1], vma5[-1]):
+            return None
+        if len(c) >= 6 and not self._finite(c[-6], ma5[-6]):
+            return None
+        if c[-1] <= 0 or ma5[-1] <= 0:
+            return None
+
+        # 放量暴跌剔除
+        vol_ratio_day = float(v[-1] / vma5[-1]) if vma5[-1] > 0 else 99.0
+        if pct0 <= A_CRASH_PCT and vol_ratio_day >= A_CRASH_VOL:
+            return None
+
+        # 近 20 日跌幅 / 窗口回撤（历史不足时用可得窗口）
+        look_n = min(20, len(c) - 1)
+        if look_n < 10:
+            return None
+        c_ref = c[-(look_n + 1)]
+        if c_ref <= 0:
+            return None
+        ret_20 = float(c[-1] / c_ref - 1.0)
+        win_high = float(max(h[-look_n:]))
+        drawdown = float((win_high - c[-1]) / win_high) if win_high > 0 else 0.0
+        had_drop = ret_20 <= A_DROP_20_MAX or drawdown >= A_DRAWDOWN_60_MIN
+        if not had_drop:
+            return None
+
+        # 波动收缩
+        def _amps(n: int) -> float:
+            n = min(n, len(c))
+            seg_h, seg_l, seg_c = h[-n:], low[-n:], c[-n:]
+            vals = []
+            for i in range(len(seg_c)):
+                if seg_c[i] > 0 and self._finite(seg_h[i], seg_l[i], seg_c[i]):
+                    vals.append(float((seg_h[i] - seg_l[i]) / seg_c[i]))
+            return sum(vals) / len(vals) if vals else 1.0
+
+        amp5 = _amps(5)
+        amp20 = _amps(min(20, look_n))
+        if amp20 <= 0:
+            return None
+        amp_ratio = amp5 / amp20
+        if amp_ratio > A_AMP_RATIO_MAX:
+            return None
+
+        # 靠近近低点
+        low20 = float(min(low[-look_n:]))
+        if low20 <= 0:
+            return None
+        near_low = float((c[-1] - low20) / low20)
+        if near_low > A_NEAR_LOW_MAX:
+            return None
+
+        # MA5 走平
+        if len(ma5) < 6 or not self._finite(ma5[-6]):
+            return None
+        ma5_slope = float(ma5[-1] / ma5[-6] - 1.0)
+        if not (A_MA5_SLOPE_MIN <= ma5_slope <= A_MA5_SLOPE_MAX):
+            return None
+
+        # 价格相对 MA5：下方 ≤阈值 或刚上穿
+        if below > A_BELOW_MA5_MAX:
+            return None
+        if below < 0 and abs(below) > A_ABOVE_MA5_MAX:
+            return None
+
+        # 量能不放大
+        vol5 = float(sum(v[-5:]) / 5.0)
+        if self._finite(vma20[-1]) and vma20[-1] > 0:
+            base_vol = float(vma20[-1])
+        else:
+            base_n = min(20, len(v))
+            base_vol = float(sum(v[-base_n:]) / base_n)
+        if base_vol <= 0:
+            return None
+        vol_ratio = vol5 / base_vol
+        if vol_ratio > A_VOL_RATIO_MAX:
+            return None
+
+        # 颈线：近 10～15 日反弹高点（供后续起飞突破用）
+        neck_n = min(15, max(3, len(h) - 1))
+        neckline = float(max(h[-neck_n - 1 : -1])) if len(h) > neck_n else float(max(h[:-1]))
+        watch_low = low20
+
+        # 打分：跌得深、缩得紧、贴得近、量更静、均线更平
+        drop_s = self._clip(max(-ret_20, drawdown) / 0.25)
+        contr_s = self._clip((A_AMP_RATIO_MAX - amp_ratio) / max(A_AMP_RATIO_MAX, 1e-6))
+        near_s = self._clip(1.0 - near_low / max(A_NEAR_LOW_MAX, 1e-6))
+        vol_s = self._clip((A_VOL_RATIO_MAX - vol_ratio) / max(A_VOL_RATIO_MAX, 1e-6))
+        flat_s = self._clip(1.0 - abs(ma5_slope) / max(A_MA5_SLOPE_MAX, 0.01))
+        score = 25 * drop_s + 20 * contr_s + 25 * near_s + 20 * vol_s + 10 * flat_s
+        if score < SCORE_A_MIN:
+            return None
+
+        pos = "贴MA5下方" if below >= 0 else "刚站上MA5"
+        reason = (
+            f"观察池·{pos}·{look_n}日跌{ret_20*100:.1f}%/回撤{drawdown*100:.1f}%·"
+            f"缩波{amp_ratio:.2f}·量比{vol_ratio:.2f}·"
+            f"低点{watch_low:.2f}·颈线{neckline:.2f}·基准量{base_vol:.0f}·"
+            f"建议观察≤{A_WATCH_DAYS}日等起飞"
+        )
+        return {
+            "setup_type": "A",
+            "score": round(float(score), 2),
+            "label": "观察池",
+            "reason": reason,
+            "close": float(c[-1]),
+            "ma5": float(ma5[-1]),
+            "below_pct": round(float(below * 100), 3),
+            "pct_chg": round(float(pct0 * 100), 3),
+            "decline_days": int(round(max(-ret_20, 0) * 100)),
+            "expect_up_days": int(A_WATCH_DAYS),
+        }
 
     def _screen_setups(
         self,
@@ -842,7 +932,7 @@ class ScreenerService:
         if not self.engine:
             return {"ok": False, "error": "PostgreSQL 未连接"}
         if not include_a and not include_b:
-            return {"ok": False, "error": "请至少选择 A 类底部观察或 B 类升势回踩"}
+            return {"ok": False, "error": "请至少选择 A 类观察池或 B 类升势回踩"}
         self._ensure_tables()
         self.selective.ensure_trade_cal()
         ctx = self.selective.session_context()
@@ -913,13 +1003,16 @@ class ScreenerService:
         hits_b = [x for x in records if x["setup_type"] == "B"]
         hits_a = [x for x in records if x["setup_type"] == "A"]
         fill_errors = fill_report.get("errors") or []
-        note = "B 升势回踩可推荐；A 观察沿MA5下滑止跌后的反弹起点，下跌越短预期上涨越短（约4–10个交易日）。两日阴跌不算底部。"
+        note = (
+            "A=观察池（大跌后缩量筑底、贴MA5、靠近20日低点，只观察不买入）；"
+            "B=升势回踩可推荐。观察池 reason 含低点/颈线/基准量，供后续盯起飞。"
+        )
         if fill:
             fetched_n = len(fill_report.get("days_fetched") or [])
             if fetched_n:
                 note += f" 已从 Datahubco 补齐 {fetched_n} 个交易日、写入 {filled} 行。"
             elif fill_report.get("days_skipped"):
-                note += " 15 日窗口日线已齐，无需补拉。"
+                note += f" 近 {FILL_BARS} 日窗口日线已齐，无需补拉。"
             if fill_errors:
                 note += " 部分交易日补数失败，请看 fill_report.errors。"
             if fill_report.get("asof_enough") is False:

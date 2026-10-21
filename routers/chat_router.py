@@ -145,7 +145,7 @@ async def send_message(request: MessageRequest):
                 import logging
                 logging.getLogger(__name__).warning("对话落库失败: %s", pe)
 
-        # 纸面交易模式：写入决策审计
+        # 纸面交易模式：写入决策审计 + 当日活动日志
         if request.agent_mode == "paper_trade" and ctx.get("account_id") is not None:
             try:
                 from server.paper_broker_service import paper_broker_service
@@ -165,6 +165,44 @@ async def send_message(request: MessageRequest):
             except Exception as de:
                 import logging
                 logging.getLogger(__name__).warning("决策日志写入失败: %s", de)
+            try:
+                from server.paper_activity_service import paper_activity_service, trigger_scope
+
+                tools_used = []
+                ts_hit = None
+                for step in tool_trace or []:
+                    if not isinstance(step, dict):
+                        continue
+                    tid = step.get("tool_id") or step.get("function") or ""
+                    if tid:
+                        tools_used.append(str(tid))
+                    args = step.get("arguments") or {}
+                    if isinstance(args, dict) and args.get("ts_code") and not ts_hit:
+                        ts_hit = str(args.get("ts_code"))
+                with trigger_scope("chat_agent"):
+                    paper_activity_service.log_llm_wake(
+                        int(ctx["account_id"]),
+                        ts_code=ts_hit,
+                        observation={
+                            "user_query": (request.query or "")[:500],
+                            "tool_rounds": len(tool_trace or []),
+                            "tools": tools_used[:12],
+                            "order_ids": [int(x) for x in (order_ids or []) if x is not None],
+                            "model": response.model,
+                            "session_id": session_id,
+                        },
+                        llm_raw=(response.content or "")[:4000],
+                        llm_model=response.model,
+                        order_id=(int(order_ids[0]) if order_ids else None),
+                        detail=(
+                            f"对话唤醒 · 工具 {len(tool_trace or [])} 轮"
+                            + (f" · 订单 {order_ids}" if order_ids else "")
+                        ),
+                        trigger_source="chat_agent",
+                    )
+            except Exception as ae:
+                import logging
+                logging.getLogger(__name__).warning("活动日志写入失败: %s", ae)
 
         return MessageResponse(
             content=response.content,

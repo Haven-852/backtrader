@@ -131,10 +131,10 @@
             ]"
           >
             <div class="flex items-center justify-between mb-0.5">
-              <span class="text-xs font-medium text-zinc-200">底部观察 / 升势回踩</span>
+              <span class="text-xs font-medium text-zinc-200">观察池 / 升势回踩</span>
               <span class="text-[9px] px-1.5 py-0.5 rounded bg-zinc-800 text-zinc-500">选股</span>
             </div>
-            <p class="text-[10px] text-zinc-500 leading-relaxed">A 沿MA5下滑止跌后观察 1–2 周反弹 / B 升势回踩；缺数自动走 Datahubco 补日线</p>
+            <p class="text-[10px] text-zinc-500 leading-relaxed">A 观察池（缩量筑底转弯）/ B 升势回踩；缺数自动走 Datahubco 补日线</p>
           </div>
         </div>
         <div v-if="catalogError" class="px-3 py-2 text-[10px] text-red-400 border-b border-zinc-800">
@@ -184,23 +184,41 @@
             <div class="bg-zinc-900 rounded-2xl border border-zinc-800 p-4 space-y-3">
               <div class="flex items-center justify-between gap-2">
                 <h4 class="text-xs font-semibold text-zinc-300 flex items-center gap-2">
-                  <i class="fa-solid fa-filter text-emerald-400"></i> 底部观察 / 升势回踩
-                  <span class="text-[10px] text-zinc-500 font-normal">A：沿下降 MA5 下滑止跌，观察随后 1–2 周反弹；下跌越短预期涨得越短。缺数自动从 Datahubco 补齐</span>
+                  <i class="fa-solid fa-filter text-emerald-400"></i> 观察池 / 升势回踩
+                  <span class="text-[10px] text-zinc-500 font-normal">A：观察池=大跌后缩量、贴MA5、靠近20日低点（只观察）；B：升势回踩。缺数自动从 Datahubco 补齐</span>
                 </h4>
-                <button
-                  type="button"
-                  @click="runScreener"
-                  :disabled="screenerLoading"
-                  class="px-3 py-1.5 rounded-lg text-[11px] bg-emerald-600/20 text-emerald-300 border border-emerald-500/30 hover:bg-emerald-600/30 disabled:opacity-50"
-                >
-                  <i class="fa-solid fa-magnifying-glass mr-1" :class="{ 'fa-spinner animate-spin': screenerLoading }"></i>
-                  {{ screenerLoading ? '搜索并入库中…' : '开始搜索' }}
-                </button>
+                <div class="flex items-center gap-1.5 flex-shrink-0">
+                  <button
+                    type="button"
+                    @click="runPipeline"
+                    :disabled="pipelineLoading || screenerLoading"
+                    class="px-3 py-1.5 rounded-lg text-[11px] bg-rose-600/20 text-rose-300 border border-rose-500/30 hover:bg-rose-600/30 disabled:opacity-50"
+                    title="A≥70→自选50→起飞推荐→衰竭出池"
+                  >
+                    <i class="fa-solid fa-rocket mr-1" :class="{ 'fa-spinner animate-spin': pipelineLoading }"></i>
+                    {{ pipelineLoading ? '流水线…' : '跑推荐流水线' }}
+                  </button>
+                  <button
+                    type="button"
+                    @click="runScreener"
+                    :disabled="screenerLoading"
+                    class="px-3 py-1.5 rounded-lg text-[11px] bg-emerald-600/20 text-emerald-300 border border-emerald-500/30 hover:bg-emerald-600/30 disabled:opacity-50"
+                  >
+                    <i class="fa-solid fa-magnifying-glass mr-1" :class="{ 'fa-spinner animate-spin': screenerLoading }"></i>
+                    {{ screenerLoading ? '搜索并入库中…' : '开始搜索' }}
+                  </button>
+                </div>
               </div>
               <div class="grid grid-cols-2 lg:grid-cols-4 gap-2">
                 <div>
                   <label class="text-[10px] text-zinc-500 block mb-1">交易日</label>
-                  <input v-model="screener.asof" type="date" class="w-full bg-zinc-800 border border-zinc-700 rounded-lg px-2.5 py-1.5 text-xs outline-none" />
+                  <input
+                    v-model="screener.asof"
+                    type="date"
+                    class="w-full bg-zinc-800 border border-zinc-700 rounded-lg px-2.5 py-1.5 text-xs outline-none"
+                    title="默认跟随当天已收盘交易日；需要历史回看时再点此修改"
+                    @change="screenerAsofPinned = true"
+                  />
                 </div>
                 <div>
                   <label class="text-[10px] text-zinc-500 block mb-1">最多返回</label>
@@ -209,7 +227,7 @@
               </div>
               <div class="flex flex-wrap gap-1.5">
                 <label class="flex items-center gap-1 px-2 py-1 rounded-md bg-amber-950/40 text-[10px] text-amber-300 cursor-pointer border border-amber-900/40">
-                  <input v-model="screener.includeA" type="checkbox" class="rounded border-zinc-600" /> A 底部观察
+                  <input v-model="screener.includeA" type="checkbox" class="rounded border-zinc-600" /> A 观察池
                 </label>
                 <label class="flex items-center gap-1 px-2 py-1 rounded-md bg-emerald-950/40 text-[10px] text-emerald-300 cursor-pointer border border-emerald-900/40">
                   <input v-model="screener.includeB" type="checkbox" class="rounded border-zinc-600" /> B 升势回踩
@@ -230,7 +248,29 @@
                   <input v-model="screener.includeSt" type="checkbox" class="rounded border-zinc-600" /> 包含 ST
                 </label>
               </div>
-              <p class="text-[10px] text-zinc-600">B 类按得分推荐；A 类只观察沿 MA5 下滑止跌后的反弹起点，不是买入清单。下跌越短，预期反弹越短（约 4–10 个交易日）。15 日窗口缺数会先走 Datahubco 拉全日线。点击一行到行情看板看 K 线。</p>
+              <p class="text-[10px] text-zinc-600">B 类按得分推荐；A 类=观察池（大跌后缩量、贴MA5、靠近20日低点），只观察不买入，reason 含低点/颈线/基准量供盯起飞。窗口约 40 日，缺数会先走 Datahubco 补全日线。点击一行到行情看板看 K 线。「跑推荐流水线」= A≥70 入观察/自选(≤50) → 起飞(放量×1.3+站上MA+破颈≥1%+板块/龙虎榜) → 推荐池 → 动能衰竭出池。</p>
+              <p v-if="pipelineError" class="text-xs text-red-400 bg-red-500/10 border border-red-500/20 rounded-lg px-3 py-2">{{ pipelineError }}</p>
+              <div v-if="pipelineResult" class="text-[10px] text-rose-300/90 bg-rose-950/20 border border-rose-900/40 rounded-lg px-3 py-2 space-y-0.5">
+                <div>
+                  流水线 {{ pipelineResult.asof }}
+                  · 观察 {{ pipelineResult.observe?.count ?? 0 }}
+                  · 起飞入池 {{ pipelineResult.takeoff?.promoted_count ?? 0 }}
+                  · 衰竭出池 {{ pipelineResult.exhaustion?.exhausted_count ?? 0 }}
+                  · 推荐池活跃 {{ pipelineResult.recommend_active ?? 0 }}
+                </div>
+                <div v-if="pipelineResult.observe?.note" class="text-amber-300/90">
+                  {{ pipelineResult.observe.note }}
+                  <span v-if="pipelineResult.observe?.score_top5?.length" class="text-zinc-500">
+                    · Top分 {{ pipelineResult.observe.score_top5.join(' / ') }}
+                  </span>
+                </div>
+                <div v-if="(pipelineResult.takeoff?.promoted || []).length" class="text-zinc-400 truncate">
+                  新晋：{{ (pipelineResult.takeoff.promoted || []).slice(0, 5).map((x: any) => x.name || x.ts_code).join('、') }}
+                </div>
+                <div v-if="(pipelineResult.exhaustion?.exhausted || []).length" class="text-zinc-500 truncate">
+                  出池：{{ (pipelineResult.exhaustion.exhausted || []).slice(0, 5).map((x: any) => x.name || x.ts_code).join('、') }}
+                </div>
+              </div>
               <p v-if="screenerError" class="text-xs text-red-400 bg-red-500/10 border border-red-500/20 rounded-lg px-3 py-2">{{ screenerError }}</p>
               <div v-if="screenerResult" class="text-[10px] text-zinc-400 space-y-0.5">
                 <div>
@@ -249,7 +289,7 @@
                 <div v-if="screenerResult.note" class="text-zinc-600">{{ screenerResult.note }}</div>
               </div>
               <div v-if="screenerLoading" class="text-xs text-zinc-500 py-4 text-center">
-                <i class="fa-solid fa-spinner animate-spin mr-1"></i>正在检查 15 日日线，缺口从 Datahubco 自动补齐后分类 A / B…
+                <i class="fa-solid fa-spinner animate-spin mr-1"></i>正在检查日线窗口，缺口从 Datahubco 自动补齐后分类 A 观察池 / B…
               </div>
               <div v-if="hitsB.length" class="space-y-1.5">
                 <div class="flex items-center gap-2 text-[11px] text-emerald-300">
@@ -303,8 +343,8 @@
               </div>
               <div v-if="hitsA.length" class="space-y-1.5">
                 <div class="flex items-center gap-2 text-[11px] text-amber-300">
-                  <span class="px-1.5 py-0.5 rounded bg-amber-500/15 border border-amber-500/20">A 底部观察</span>
-                  <span class="text-zinc-500">沿MA5下滑止跌 · {{ hitsA.length }} 只 · 不是买入清单</span>
+                  <span class="px-1.5 py-0.5 rounded bg-amber-500/15 border border-amber-500/20">A 观察池</span>
+                  <span class="text-zinc-500">缩量筑底转弯 · {{ hitsA.length }} 只 · 只观察不买入</span>
                 </div>
                 <div class="border border-amber-900/40 rounded-xl overflow-hidden">
                   <table class="w-full text-[11px]">
@@ -317,8 +357,8 @@
                         <th class="text-right px-2 py-1.5 font-medium">MA5</th>
                         <th class="text-right px-2 py-1.5 font-medium">低于%</th>
                         <th class="text-right px-2 py-1.5 font-medium">涨跌%</th>
-                        <th class="text-right px-2 py-1.5 font-medium">连跌</th>
-                        <th class="text-right px-2 py-1.5 font-medium">预期反弹</th>
+                        <th class="text-right px-2 py-1.5 font-medium">跌幅%</th>
+                        <th class="text-right px-2 py-1.5 font-medium">观察期</th>
                         <th class="text-right px-2 py-1.5 font-medium">得分</th>
                         <th class="text-left px-2 py-1.5 font-medium">原因</th>
                         <th class="px-2 py-1.5"></th>
@@ -755,6 +795,11 @@ const screenerLoading = ref(false)
 const screenerError = ref('')
 const screenerResult = ref<any>(null)
 const screenerActiveCode = ref('')
+const pipelineLoading = ref(false)
+const pipelineError = ref('')
+const pipelineResult = ref<any>(null)
+/** 用户手动改过日期后不再自动覆盖；刷新页面仍默认跟随当天 */
+const screenerAsofPinned = ref(false)
 const SCREENER_CACHE_KEY = 'strategy_screener_cache_v2'
 const screener = reactive({
   asof: '',
@@ -795,8 +840,11 @@ const paramValues = reactive<Record<string, number>>({})
 
 function persistScreenerCache() {
   try {
+    const form = { ...screener }
+    // 交易日默认跟随当天，不把 asof 钉进缓存
+    delete (form as any).asof
     sessionStorage.setItem(SCREENER_CACHE_KEY, JSON.stringify({
-      form: { ...screener },
+      form,
       result: screenerResult.value,
       active: screenerActiveCode.value,
     }))
@@ -808,7 +856,10 @@ function restoreScreenerCache() {
     const raw = sessionStorage.getItem(SCREENER_CACHE_KEY)
     if (!raw) return false
     const data = JSON.parse(raw)
-    if (data.form) Object.assign(screener, data.form)
+    if (data.form) {
+      const { asof: _ignored, ...rest } = data.form
+      Object.assign(screener, rest)
+    }
     if (data.result) screenerResult.value = data.result
     if (data.active) screenerActiveCode.value = data.active
     return !!data.result
@@ -827,7 +878,7 @@ function selectStrategy(s: any) {
 function openScreener() {
   toolboxMode.value = 'screener'
   mainTab.value = 'screener'
-  if (!screener.asof) loadScreenerAsof()
+  if (!screenerAsofPinned.value) loadScreenerAsof()
 }
 
 async function loadScreenerAsof() {
@@ -879,6 +930,43 @@ async function runScreener() {
     pushLog(`[选股] 异常: ${screenerError.value}`, 'error')
   } finally {
     screenerLoading.value = false
+  }
+}
+
+async function runPipeline() {
+  pipelineLoading.value = true
+  pipelineError.value = ''
+  pipelineResult.value = null
+  try {
+    const res = await fetch('/strategy/pipeline/cycle', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        asof: screener.asof || null,
+        min_score: 70,
+        max_n: 50,
+        fill: true,
+        require_flow_signal: true,
+      }),
+    })
+    const data = await res.json().catch(() => ({}))
+    if (!res.ok) {
+      const detail = data.detail
+      pipelineError.value = typeof detail === 'string' ? detail : (detail?.error || `HTTP ${res.status}`)
+      pushLog(`[流水线] 失败: ${pipelineError.value}`, 'error')
+      return
+    }
+    pipelineResult.value = data
+    if (data.asof) screener.asof = String(data.asof).slice(0, 10)
+    pushLog(
+      `[流水线] 观察${data.observe?.count ?? 0} 起飞${data.takeoff?.promoted_count ?? 0} 衰竭${data.exhaustion?.exhausted_count ?? 0} 推荐池${data.recommend_active ?? 0}`,
+      'ok',
+    )
+  } catch (e: any) {
+    pipelineError.value = e?.message || String(e)
+    pushLog(`[流水线] 异常: ${pipelineError.value}`, 'error')
+  } finally {
+    pipelineLoading.value = false
   }
 }
 
@@ -1466,7 +1554,9 @@ onMounted(async () => {
     toolboxMode.value = 'screener'
     mainTab.value = 'screener'
   }
-  await Promise.all([loadCatalog(), loadOptions(), hadCache ? Promise.resolve() : loadScreenerAsof()])
+  // 交易日始终跟随当天会话 asof；用户点日期选择器后才会钉住
+  screenerAsofPinned.value = false
+  await Promise.all([loadCatalog(), loadOptions(), loadScreenerAsof()])
   if (!hadCache) loadPerceive()
 })
 

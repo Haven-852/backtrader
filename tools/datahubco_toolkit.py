@@ -7,6 +7,7 @@ Datahubco 数据工具箱（给大模型 Agent）
   - source=datahubco：直接读 Datahubco；可选 write_back 入库
 
 主要入口：get_bars / get_mins / get_sector_members / filter_st_suspend /
+         get_fund_data / get_stock_sector_moneyflow /
          coverage / remote_query / list_datasets
 """
 
@@ -134,6 +135,7 @@ class DatahubcoToolkit:
         self._client = None
         self._sector = None
         self._intraday = None
+        self._fund = None
 
     @property
     def fetcher(self):
@@ -167,6 +169,14 @@ class DatahubcoToolkit:
             self._intraday = intraday_fetcher
         return self._intraday
 
+    @property
+    def fund(self):
+        if self._fund is None:
+            from data_layer.collectors.datahubco.fundamentals import fund_data_fetcher
+
+            self._fund = fund_data_fetcher
+        return self._fund
+
     # ─── 对外工具 ─────────────────────────────────────
 
     def list_datasets(self) -> Dict[str, Any]:
@@ -179,14 +189,22 @@ class DatahubcoToolkit:
                 "desc": meta["desc"],
                 "kind": meta["kind"],
             })
+        fund_items = []
+        try:
+            fund_items = self.fund.list_datasets()
+        except Exception as e:
+            logger.debug("list fund datasets: %s", e)
         return {
             "ok": True,
             "datasets": items,
+            "fund_datasets": fund_items,
             "sources": ["auto", "pg", "datahubco"],
             "note": (
                 "auto=库内有则直接返回；不足则 Datahubco 拉取并入库后返回。"
                 "datahubco=强制远端；write_back 控制是否写入 PG。"
                 "板块成分用 get_sector_members；剔除 ST/停牌用 filter_st_suspend。"
+                "龙虎榜/大宗/两融/北向/资金流/现金流/业绩预告/十大股东用 get_fund_data；"
+                "个股二级/三级板块资金用 get_stock_sector_moneyflow。"
             ),
         }
 
@@ -1388,6 +1406,65 @@ class DatahubcoToolkit:
             logger.exception("filter_st_suspend failed")
             return {"ok": False, "error": str(e), "kept": [], "removed": []}
 
+    # ─── 资金 / 基本面 / 板块资金 ───────────────────────
+
+    def get_fund_data(
+        self,
+        dataset: str,
+        ts_code: Optional[str] = None,
+        start_date: Optional[str] = None,
+        end_date: Optional[str] = None,
+        trade_date: Optional[str] = None,
+        period: Optional[str] = None,
+        source: str = "auto",
+        write_back: bool = True,
+        limit: int = 500,
+        content_type: str = "行业",
+    ) -> Dict[str, Any]:
+        """
+        获取并可选写入：龙虎榜 / 大宗 / 两融 / 北向持股 / 资金流 /
+        现金流量表 / 业绩预告 / 十大股东 / 板块资金。
+        """
+        try:
+            return self.fund.get(
+                dataset=dataset,
+                ts_code=ts_code,
+                start_date=start_date,
+                end_date=end_date,
+                trade_date=trade_date,
+                period=period,
+                source=source,
+                write_back=write_back,
+                limit=limit,
+                content_type=content_type,
+            )
+        except Exception as e:
+            logger.exception("get_fund_data failed")
+            return {"ok": False, "error": str(e), "dataset": dataset, "ts_code": ts_code}
+
+    def get_stock_sector_moneyflow(
+        self,
+        ts_code: str,
+        trade_date: Optional[str] = None,
+        levels: Optional[List[str]] = None,
+        source: str = "auto",
+        write_back: bool = True,
+        limit: int = 50,
+    ) -> Dict[str, Any]:
+        """个股所属二级/三级东财行业板块的资金走向。"""
+        try:
+            return self.fund.get_stock_sector_moneyflow(
+                ts_code=ts_code,
+                trade_date=trade_date,
+                levels=levels,
+                source=source,
+                write_back=write_back,
+                limit=limit,
+            )
+        except Exception as e:
+            logger.exception("get_stock_sector_moneyflow failed")
+            return {"ok": False, "error": str(e), "ts_code": ts_code}
+
     def _ok_bars(
         self,
         code: str,
@@ -1440,6 +1517,12 @@ class DatahubcoToolkit:
 
     async def filter_st_suspend_async(self, **kwargs) -> Dict[str, Any]:
         return await asyncio.to_thread(self.filter_st_suspend, **kwargs)
+
+    async def get_fund_data_async(self, **kwargs) -> Dict[str, Any]:
+        return await asyncio.to_thread(self.get_fund_data, **kwargs)
+
+    async def get_stock_sector_moneyflow_async(self, **kwargs) -> Dict[str, Any]:
+        return await asyncio.to_thread(self.get_stock_sector_moneyflow, **kwargs)
 
 
 datahubco_toolkit = DatahubcoToolkit()

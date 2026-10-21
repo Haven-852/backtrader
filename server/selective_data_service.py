@@ -108,14 +108,40 @@ selective_data_service = SelectiveDataService()
 
 
 async def watchlist_continuous_loop(interval_sec: int = 300, first_delay: int = 15):
-    """后台持续同步自选股日线；名单以 PostgreSQL dash_watchlist 为准。"""
+    """后台持续同步自选股日线；仅交易时段（09:15–15:00）运行。"""
     await asyncio.sleep(first_delay)
+    last_skip_reason: Optional[str] = None
     while True:
         try:
+            def _session_ctx():
+                fetcher = selective_data_service.fetcher
+                fetcher.ensure_trade_cal()
+                return fetcher.session_context()
+
+            ctx = await asyncio.to_thread(_session_ctx)
+            if not ctx.get("in_trading_session"):
+                reason = str(ctx.get("reason") or "not_in_session")
+                if reason != last_skip_reason:
+                    logger.info(
+                        "非交易时段，暂停自选持续同步（%s · asof=%s）",
+                        reason,
+                        ctx.get("asof"),
+                    )
+                    last_skip_reason = reason
+                await asyncio.sleep(interval_sec)
+                continue
+            last_skip_reason = None
             result = await selective_data_service.sync_watchlist_continuous()
-            n = len(result.get("synced") or [])
-            if n:
-                logger.info("自选持续同步完成 %d 只", n)
+            if result.get("skipped"):
+                logger.info(
+                    "非交易时段，跳过自选持续同步（%s · asof=%s）",
+                    result.get("reason"),
+                    result.get("asof"),
+                )
+            else:
+                n = len(result.get("synced") or [])
+                if n:
+                    logger.info("自选持续同步完成 %d 只", n)
         except asyncio.CancelledError:
             raise
         except Exception:

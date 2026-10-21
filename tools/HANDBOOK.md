@@ -9,8 +9,10 @@
 2. **有专用技能就直接调**，不要先 `list-tables` 探路。  
    - 测试某日高低能不能被 A/B/C/D **及其组合**打中 → 先 `t0_intraday__load_day`，再 `t0_intraday__hit_test`。结论看 `combo_ranking`。不要用 SQL 自己算高低来代替第二步。  
    - 盘中做T卖点 / 四法状态 → `method-*` 或 `combo-run`。  
+   - 纸面账户盘中盈亏 → `paper_trade__get_intraday_quotes` 或 `get_account`/`mark`（1 分钟分时末价）。没有分时就报缺，不要用日线收盘/成本价估算。  
    - 需要个股/指数/ETF/板块行情或分钟分时且可能缺库 → **datahubco-data**（`get-bars` / `get-mins`，默认 PG 优先，缺则补数入库）。  
    - 东财行业板块成分 / 剔除 ST·停牌 → `datahubco_data__get_sector_members` → `datahubco_data__filter_st_suspend`。  
+   - **今日市场记忆草稿** → `kb_market__today`（技能名：知识库-市场记忆-今日）。只生成草稿，不要声称已写入知识库。  
    - **A 股收盘复盘** → `skill-market-daily-review`（先 `load-skill` / `build-prompt`）。  
    - **A 股个股尽调档案** → `ill-a-share-stock-dossier`。  
    - **期货 DeepView 研判** → `skill-futures-deepview-analyst`。  
@@ -59,6 +61,8 @@
 | `get-mins` | 获取分钟分时 | **1 分钟主入口**：库优先，缺则 Datahubco/实时源→入库 | `ts_code`，可选 `trade_date`/`limit`/`source`/`write_back` |
 | `get-sector-members` | 板块成分股 | 东财行业板块成分（dc_member）；标注 ST/停牌 | `ts_code`（如 BK1035.DC），可选 `trade_date`/`source` |
 | `filter-st-suspend` | 剔除ST与停牌 | 从板块或股票列表剔除 ST/*ST 与停牌 | `ts_code` 或 `ts_codes`/`members` |
+| `get-fund-data` | 资金与基本面 | 龙虎榜/大宗/两融/北向/资金流/现金流/业绩预告/十大股东/板块资金 → 写入 PG | `dataset`，可选 `ts_code`/`trade_date`/`period` |
+| `get-stock-sector-moneyflow` | 个股板块资金 | 个股所属二级/三级行业板块的资金走向 | `ts_code`，可选 `trade_date`/`levels` |
 | `ensure-and-get` | 确保并获取 | 快捷 auto 补数（日线或 `dataset=stock_mins`） | `ts_code`，可选 `dataset`/`limit`/`trade_date` |
 | `remote-query` | 直接调 API | 任意 Datahubco OpenAPI；分钟可用 `stk_mins`；成分 `dc_member` | `api`，可选 `params`/`write_dataset` |
 
@@ -73,7 +77,10 @@
 **板块成分流程**：`get-sector-members` → `filter-st-suspend`（或直接对 `filter-st-suspend` 传板块代码）。  
 ST 按简称含 ST 判断；停牌优先 `ref_suspend_d`（类型 S），当日无有效日线则推断停牌。
 
-函数名：`datahubco_data__get_bars`、`datahubco_data__get_mins`、`datahubco_data__get_sector_members`、`datahubco_data__filter_st_suspend` 等。
+**资金/基本面 dataset**：`top_list`、`block_trade`、`margin`、`margin_detail`、`moneyflow`、`hk_hold`、`cashflow`、`forecast`、`top10_holders`、`sector_moneyflow`。  
+个股二级/三级板块资金用 `get-stock-sector-moneyflow`（依赖 `sector_dc_member` + `sector_moneyflow_daily`）。
+
+函数名：`datahubco_data__get_bars`、`datahubco_data__get_mins`、`datahubco_data__get_fund_data`、`datahubco_data__get_stock_sector_moneyflow` 等。
 
 ---
 
@@ -101,6 +108,21 @@ hit-test 默认测全部组合。结论看 `combo_ranking`；写死到分时图�
 成交纪律（combo-run）：信号分钟收盘价成交；14:55 强制清完。
 
 函数名：`t0_intraday__method_a` 等。
+
+---
+
+## 技能：paper-trade（纸面模拟账户）
+
+**何时用**：模拟账户持仓、下单、盘中盈亏。盘中盈亏只认 1 分钟分时末价。
+
+| 工具 ID | 用途 |
+|---------|------|
+| `get-account` / `list-positions` / `mark` | 用分时末价盯市；`pnl_ready=false` 表示无分时，盈亏未计 |
+| `get-intraday-quotes` | 指定标的或账户持仓的分时末价 |
+| `get-market-brief` | 日线感知（不是盘中价） |
+
+没有分时就报缺，不要用日线收盘、昨收或成本价估算冒充盘中盈亏。  
+函数名：`paper_trade__get_intraday_quotes`、`paper_trade__get_account`、`paper_trade__mark`。
 
 ---
 

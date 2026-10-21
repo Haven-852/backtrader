@@ -57,6 +57,10 @@ export default defineConfig({
         target: 'http://127.0.0.1:8010',
         changeOrigin: true,
       },
+      '/kb': {
+        target: 'http://127.0.0.1:8010',
+        changeOrigin: true,
+      },
       '/data': {
         target: 'http://127.0.0.1:8010',
         changeOrigin: true,

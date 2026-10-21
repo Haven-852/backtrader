@@ -70,31 +70,84 @@ class SectorService:
         except Exception:
             return None
 
+    def _count_on_date(self, table: str, trade_date: date) -> int:
+        if not self.engine:
+            return 0
+        try:
+            with self.engine.connect() as conn:
+                row = conn.execute(
+                    sa_text(f"SELECT COUNT(*) FROM {table} WHERE trade_date = :d"),
+                    {"d": trade_date},
+                ).fetchone()
+            return int(row[0] or 0) if row else 0
+        except Exception:
+            return 0
+
+    def _amount_filled(self, trade_date: date) -> int:
+        if not self.engine:
+            return 0
+        try:
+            with self.engine.connect() as conn:
+                row = conn.execute(
+                    sa_text(
+                        "SELECT COUNT(*) FROM sector_dc_daily "
+                        "WHERE trade_date = :d AND amount IS NOT NULL AND amount > 0"
+                    ),
+                    {"d": trade_date},
+                ).fetchone()
+            return int(row[0] or 0) if row else 0
+        except Exception:
+            return 0
+
+    def _needs_amount_refresh(self, trade_date: date) -> bool:
+        index_n = self._count_on_date("sector_dc_index_daily", trade_date)
+        if index_n <= 0:
+            return True
+        amount_n = self._amount_filled(trade_date)
+        return amount_n < max(10, int(index_n * 0.3))
+
     def ensure_data(self, trade_date: Optional[str] = None) -> Dict[str, Any]:
-        """库内无 asof 日数据则触发同步。"""
+        """缺 asof 日指数或成交额覆盖不足时补齐到上一交易日。"""
         from data_layer.collectors.datahubco.sectors import sector_fetcher
 
         sector_fetcher.ensure_tables()
         meta = sector_fetcher.resolve_asof(trade_date)
         asof: date = meta["asof_date"]
         latest = self._latest_trade_date()
-        if latest is not None and latest >= asof:
+        need = latest is None or latest < asof or self._needs_amount_refresh(asof)
+        if not need:
             return {
                 "synced": False,
                 "asof": asof.isoformat(),
-                "latest": latest.isoformat(),
+                "latest": latest.isoformat() if latest else None,
                 "session": meta,
             }
-        result = sector_fetcher.sync_day(
-            trade_date=asof.strftime("%Y%m%d"),
-            member_limit=31,
-            member_levels=("东财一级行业",),
-        )
+
+        try:
+            result = sector_fetcher.sync_day(
+                trade_date=asof.strftime("%Y%m%d"),
+                member_limit=0,
+            )
+            days = [
+                {
+                    "date": (result.get("session") or {}).get("asof") or asof.isoformat(),
+                    "ok": result.get("ok"),
+                    "source": result.get("source"),
+                    "counts": result.get("counts"),
+                    "errors": result.get("errors"),
+                }
+            ]
+        except Exception as e:
+            logger.warning("sector sync_day %s: %s", asof, e)
+            days = [{"date": asof.isoformat(), "ok": False, "error": str(e)}]
+
+        new_latest = self._latest_trade_date()
         return {
             "synced": True,
             "asof": asof.isoformat(),
+            "latest": new_latest.isoformat() if new_latest else None,
             "session": meta,
-            "result": result,
+            "days": days,
         }
 
     def get_board(
@@ -125,11 +178,16 @@ class SectorService:
 
         meta = sector_fetcher.resolve_asof(trade_date)
         asof: date = meta["asof_date"]
-        # 若库内最新日更旧，用库内最新
         latest = self._latest_trade_date()
         use_date = asof
-        if latest and latest < asof:
+        asof_n = self._count_on_date("sector_dc_index_daily", asof)
+        if asof_n == 0 and latest:
             use_date = latest
+            logger.warning(
+                "板块 asof=%s 暂无指数数据，回退到库内 %s",
+                asof.isoformat(),
+                latest.isoformat(),
+            )
 
         hierarchy_info: Dict[str, Any] = {}
         if parent_code:
@@ -262,6 +320,15 @@ class SectorService:
                 item["parent_name"] = row.get("parent_name")
                 item["hierarchy_score"] = _ser(row.get("hierarchy_score"))
             sectors.append(item)
+
+        amt_ok = sum(1 for s in sectors if (s.get("amount") or 0) > 0)
+        if sectors and amt_ok < max(1, int(len(sectors) * 0.5)):
+            logger.warning(
+                "板块成交额覆盖不足 %d/%d · %s",
+                amt_ok,
+                len(sectors),
+                use_date.isoformat() if hasattr(use_date, "isoformat") else use_date,
+            )
 
         ups = sum(1 for s in sectors if (s.get("pct_change") or 0) > 0)
         downs = sum(1 for s in sectors if (s.get("pct_change") or 0) < 0)

@@ -29,8 +29,10 @@ PG_TABLES_INFO: Dict[str, Dict[str, str]] = {
     "ref_stk_limit_daily": {"name":"涨跌停价","category":"参照数据","desc":"每日涨跌停限制价格","source":"Tushare stk_limit"},
     "ref_suspend_d": {"name":"停复牌信息","category":"参照数据","desc":"停牌/复牌记录","source":"Tushare suspend_d"},
     "dash_watchlist": {"name":"看板自选股","category":"参照数据","desc":"行情看板自选及持续日更名单","source":"用户自选"},
-    "strategy_screener_run": {"name":"选股运行","category":"策略分析","desc":"A底部观察/B升势回踩选股任务记录","source":"策略选股器"},
+    "strategy_screener_run": {"name":"选股运行","category":"策略分析","desc":"A观察池/B升势回踩选股任务记录","source":"策略选股器"},
     "strategy_screener_hit": {"name":"选股命中","category":"策略分析","desc":"选股命中标的、类型与得分","source":"策略选股器"},
+    "strategy_observe_pool": {"name":"策略观察池","category":"策略分析","desc":"策略A分数≥70写入，上限50，同步看板自选","source":"推荐池流水线"},
+    "strategy_recommend_pool": {"name":"策略推荐池","category":"策略分析","desc":"起飞入池；动能衰竭后移出","source":"推荐池流水线"},
     "news_article": {"name":"新闻资讯","category":"新闻资讯","desc":"财经新闻与资讯","source":"Tushare news"},
     "news_ann": {"name":"公司公告","category":"新闻资讯","desc":"上市公司公告披露","source":"Tushare anns"},
     "board_secretary_interact": {"name":"董秘互动","category":"互动与研究","desc":"投资者与董秘问答","source":"Tushare"},
@@ -63,6 +65,40 @@ PG_TABLES_INFO: Dict[str, Dict[str, str]] = {
     "sector_dc_daily": {"name":"东财行业板块日K","category":"板块行情","desc":"板块OHLC/成交额","source":"Datahubco dc_daily"},
     "sector_moneyflow_daily": {"name":"东财板块资金流","category":"板块行情","desc":"主力净流入等","source":"Datahubco moneyflow_ind_dc"},
     "sector_dc_member": {"name":"东财板块成分","category":"板块行情","desc":"板块成分股列表","source":"Datahubco dc_member"},
+    "sector_dc_hierarchy": {"name":"东财板块层级","category":"板块行情","desc":"东财行业板块父子层级","source":"Datahubco"},
+    "stock_intraday_mins": {"name":"个股分钟分时","category":"行情K线","desc":"1分钟分时OHLC/成交量，盘中盈亏用此价","source":"Datahubco / 东财腾讯"},
+    "stock_hk_hold": {"name":"北向持股","category":"特色指标","desc":"沪深股通持股数量与占比","source":"Datahubco hk_hold"},
+    "stock_top10_holders": {"name":"十大股东","category":"财务数据","desc":"上市公司十大股东明细","source":"Datahubco top10_holders"},
+    "paper_account": {"name":"模拟账户","category":"模拟交易","desc":"纸面账户现金、净值与开户设置","source":"模拟交易"},
+    "paper_position": {"name":"模拟持仓","category":"模拟交易","desc":"持仓数量、成本、分时市价与浮动盈亏","source":"模拟交易"},
+    "paper_order": {"name":"模拟委托","category":"模拟交易","desc":"买卖委托与成交模式（次日开盘/当日收盘/分时）","source":"模拟交易"},
+    "paper_fill": {"name":"模拟成交","category":"模拟交易","desc":"成交记录、佣金与印花税","source":"模拟交易"},
+    "paper_equity_daily": {"name":"模拟净值曲线","category":"模拟交易","desc":"每日现金、市值、净值与日收益","source":"模拟交易"},
+    "paper_decision_log": {"name":"模拟决策日志","category":"模拟交易","desc":"Agent 感知-决策-下单审计","source":"模拟交易"},
+    "paper_activity_log": {"name":"模拟当日操作","category":"模拟交易","desc":"日课、分时扫描、模型唤醒等当日流水","source":"模拟交易"},
+    "paper_cycle_config": {"name":"模拟循环配置","category":"模拟交易","desc":"一键日课、仓位上限、调度开关等键值配置","source":"模拟交易"},
+    "paper_cycle_run": {"name":"模拟循环批次","category":"模拟交易","desc":"晚间选股、日课、分时做T等各步骤运行记录","source":"模拟交易"},
+    "paper_cycle_action": {"name":"模拟循环动作","category":"模拟交易","desc":"循环中每笔买卖/观察动作与理由","source":"模拟交易"},
+    "trade_watchlist": {"name":"盯盘名单","category":"模拟交易","desc":"日课与分时做T使用的观察股票池","source":"模拟交易"},
+    "trade_scan_event": {"name":"盯盘扫描事件","category":"模拟交易","desc":"规则巡检触发的价格/形态事件","source":"模拟交易"},
+    "users": {"name":"知识库·用户","category":"知识库","desc":"用户","source":"知识库"},
+    "trading_accounts": {"name":"知识库·交易账户","category":"知识库","desc":"实盘/模拟/测试账户","source":"知识库"},
+    "stocks": {"name":"知识库·股票主表","category":"知识库","desc":"股票主数据","source":"知识库"},
+    "strategy": {"name":"知识库·策略","category":"知识库","desc":"规则与实验的父对象","source":"知识库"},
+    "market_snapshot": {"name":"知识库·市场快照","category":"知识库","desc":"当日市场事实：涨跌、成交、涨停跌停，不含状态判断","source":"知识库"},
+    "market_memory": {"name":"知识库·市场记忆","category":"知识库","desc":"一个交易日的完整市场记忆","source":"知识库"},
+    "market_regime": {"name":"知识库·市场状态","category":"知识库","desc":"对事实的状态判断与依据","source":"知识库"},
+    "market_event": {"name":"知识库·市场事件","category":"知识库","desc":"当天盘中事件","source":"知识库"},
+    "market_hypothesis": {"name":"知识库·待验证判断","category":"知识库","desc":"尚未当成经验的市场假设","source":"知识库"},
+    "opportunity": {"name":"知识库·机会","category":"知识库","desc":"发现但未必成交的机会","source":"知识库"},
+    "trade_thesis": {"name":"知识库·交易假设","category":"知识库","desc":"当时为什么值得做","source":"知识库"},
+    "trade_execution": {"name":"知识库·执行","category":"知识库","desc":"实际成交","source":"知识库"},
+    "trade_outcome": {"name":"知识库·结果","category":"知识库","desc":"盈亏与逻辑是否正确分开","source":"知识库"},
+    "attribution": {"name":"知识库·归因","category":"知识库","desc":"这笔结果的主因","source":"知识库"},
+    "lesson": {"name":"知识库·经验","category":"知识库","desc":"从交易里抽出的经验","source":"知识库"},
+    "rule": {"name":"知识库·规则","category":"知识库","desc":"可执行的个人交易规则","source":"知识库"},
+    "external_knowledge": {"name":"知识库·外部方法","category":"知识库","desc":"别人的方法，不直接当规则","source":"知识库"},
+    "experiment": {"name":"知识库·实验","category":"知识库","desc":"新想法先进入实验","source":"知识库"},
 }
 
 
@@ -131,6 +167,17 @@ class StorageService:
             else:
                 health = influx.health()
                 ok = getattr(health, "status", None) == "pass" or str(getattr(health, "status", "")).lower() in ("pass", "ok")
+                # health 偶发超时：再用 org/bucket 探测兜底
+                if not ok:
+                    try:
+                        orgs = list(influx.organizations_api().find_organizations(org=storage_manager._connections.get("influx_org") or "quant") or [])
+                        ok = True
+                    except Exception:
+                        try:
+                            buckets = influx.buckets_api().find_buckets()
+                            ok = buckets is not None
+                        except Exception:
+                            ok = False
                 services["influxdb"] = {
                     "name": "InfluxDB",
                     "status": "online" if ok else "error",

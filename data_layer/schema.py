@@ -765,6 +765,7 @@ POSTGRES_DDL_LIST = [
         price           NUMERIC(16,4) NOT NULL,
         amount          NUMERIC(20,4) NOT NULL,
         commission      NUMERIC(16,4) DEFAULT 0,
+        stamp_tax       NUMERIC(16,4) DEFAULT 0,
         trade_date      DATE          NOT NULL,
         created_at      TIMESTAMPTZ   DEFAULT NOW()
     )
@@ -827,6 +828,417 @@ POSTGRES_DDL_LIST = [
         price           NUMERIC(16,4),
         detail          JSONB,
         created_at      TIMESTAMPTZ   DEFAULT NOW()
+    )
+    """,
+
+    # ─── 交易知识库（机会 ≠ 成交）────────────────────────
+    """
+    CREATE TABLE IF NOT EXISTS users (
+        id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        username    VARCHAR(100) NOT NULL,
+        created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        updated_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS trading_accounts (
+        id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        user_id     UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        name        VARCHAR(100) NOT NULL,
+        kind        VARCHAR(20) NOT NULL DEFAULT 'paper',
+        created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        updated_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS stocks (
+        id            BIGSERIAL PRIMARY KEY,
+        symbol        VARCHAR(20) NOT NULL UNIQUE,
+        exchange      VARCHAR(20),
+        name          VARCHAR(100),
+        industry      VARCHAR(100),
+        sector        VARCHAR(100),
+        listing_date  DATE,
+        status        VARCHAR(20) NOT NULL DEFAULT 'active',
+        metadata      JSONB,
+        created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        updated_at    TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS strategy (
+        id            UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        account_id    UUID REFERENCES trading_accounts(id) ON DELETE CASCADE,
+        name          VARCHAR(255) NOT NULL,
+        description   TEXT,
+        strategy_type VARCHAR(50),
+        timeframe     VARCHAR(30),
+        market        VARCHAR(50),
+        entry_logic   JSONB,
+        exit_logic    JSONB,
+        risk_logic    JSONB,
+        status        VARCHAR(30) NOT NULL DEFAULT 'DRAFT',
+        created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        updated_at    TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS market_snapshot (
+        id                    BIGSERIAL PRIMARY KEY,
+        trade_date            DATE NOT NULL,
+        snapshot_time         TIMESTAMPTZ,
+        index_code            VARCHAR(20),
+        index_name            VARCHAR(50),
+        close_price           NUMERIC(18,4),
+        change_pct            NUMERIC(10,4),
+        volume                NUMERIC(24,4),
+        turnover              NUMERIC(24,4),
+        advancers             INTEGER,
+        decliners             INTEGER,
+        limit_up_count        INTEGER,
+        limit_down_count      INTEGER,
+        max_limit_up_streak   INTEGER,
+        market_breadth        NUMERIC(10,4),
+        volatility            NUMERIC(10,4),
+        sentiment_score       NUMERIC(10,4),
+        northbound_flow       NUMERIC(24,4),
+        main_fund_flow        NUMERIC(24,4),
+        hot_sectors           JSONB,
+        sector_strength       JSONB,
+        market_regime         VARCHAR(30),
+        regime_confidence     NUMERIC(5,4),
+        raw_data              JSONB,
+        created_at            TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS opportunity (
+        id                  UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        account_id          UUID REFERENCES trading_accounts(id) ON DELETE CASCADE,
+        stock_id            BIGINT REFERENCES stocks(id),
+        discovered_at       TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        trade_date          DATE,
+        opportunity_type    VARCHAR(50),
+        trigger_reason      TEXT,
+        market_regime       VARCHAR(30),
+        sector_strength     NUMERIC(10,4),
+        technical_score     NUMERIC(10,4),
+        fundamental_score   NUMERIC(10,4),
+        sentiment_score     NUMERIC(10,4),
+        opportunity_score   NUMERIC(10,4),
+        confidence          NUMERIC(5,4),
+        status              VARCHAR(30) NOT NULL DEFAULT 'NEW',
+        evidence            JSONB,
+        source              VARCHAR(50),
+        embedding           vector(1024),
+        created_at          TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS trade_thesis (
+        id                       UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        account_id               UUID REFERENCES trading_accounts(id) ON DELETE CASCADE,
+        opportunity_id           UUID REFERENCES opportunity(id),
+        stock_id                 BIGINT REFERENCES stocks(id),
+        created_at               TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        direction                VARCHAR(10),
+        thesis_title             VARCHAR(255),
+        thesis_text              TEXT,
+        market_context           TEXT,
+        sector_context           TEXT,
+        entry_reason             TEXT,
+        entry_conditions         JSONB,
+        exit_conditions          JSONB,
+        invalidation_conditions  JSONB,
+        target_price             NUMERIC(18,4),
+        stop_price               NUMERIC(18,4),
+        planned_position_pct     NUMERIC(10,4),
+        planned_holding_days     INTEGER,
+        confidence               NUMERIC(5,4),
+        expected_return          NUMERIC(10,4),
+        expected_risk            NUMERIC(10,4),
+        strategy_id              UUID REFERENCES strategy(id),
+        rule_ids                 JSONB,
+        evidence                 JSONB,
+        embedding                vector(1024),
+        status                   VARCHAR(30) NOT NULL DEFAULT 'DRAFT'
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS trade_execution (
+        id                    UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        thesis_id             UUID REFERENCES trade_thesis(id) ON DELETE CASCADE,
+        account_id            UUID REFERENCES trading_accounts(id) ON DELETE CASCADE,
+        stock_id              BIGINT REFERENCES stocks(id),
+        side                  VARCHAR(10),
+        order_type            VARCHAR(20),
+        planned_price         NUMERIC(18,4),
+        executed_price        NUMERIC(18,4),
+        planned_quantity      NUMERIC(20,4),
+        executed_quantity     NUMERIC(20,4),
+        planned_position_pct  NUMERIC(10,4),
+        actual_position_pct   NUMERIC(10,4),
+        fee                   NUMERIC(18,4),
+        slippage              NUMERIC(18,6),
+        executed_at           TIMESTAMPTZ,
+        execution_deviation   JSONB,
+        broker                VARCHAR(100),
+        order_id              VARCHAR(100),
+        notes                 TEXT
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS trade_outcome (
+        id                        UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        thesis_id                 UUID REFERENCES trade_thesis(id) ON DELETE CASCADE,
+        realized_pnl              NUMERIC(20,4),
+        return_pct                NUMERIC(10,4),
+        benchmark_return_pct      NUMERIC(10,4),
+        alpha_pct                 NUMERIC(10,4),
+        max_favorable_excursion   NUMERIC(10,4),
+        max_adverse_excursion     NUMERIC(10,4),
+        holding_days              NUMERIC(10,2),
+        exit_reason               VARCHAR(50),
+        outcome_type              VARCHAR(30),
+        logic_result              VARCHAR(30),
+        market_change             TEXT,
+        actual_vs_expected        TEXT,
+        completed_at              TIMESTAMPTZ
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS attribution (
+        id                  UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        outcome_id          UUID REFERENCES trade_outcome(id) ON DELETE CASCADE,
+        primary_category    VARCHAR(30),
+        secondary_category  VARCHAR(50),
+        severity            VARCHAR(20),
+        confidence          NUMERIC(5,4),
+        evidence            JSONB,
+        ai_analysis         TEXT,
+        human_verdict       TEXT,
+        confirmed           BOOLEAN NOT NULL DEFAULT FALSE,
+        created_at          TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS lesson (
+        id                     UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        account_id             UUID REFERENCES trading_accounts(id) ON DELETE CASCADE,
+        source_type            VARCHAR(30),
+        source_id              UUID,
+        title                  VARCHAR(255),
+        content                TEXT,
+        evidence_summary       TEXT,
+        applicable_conditions  JSONB,
+        excluded_conditions    JSONB,
+        sample_size            INTEGER,
+        win_rate               NUMERIC(10,4),
+        expectancy             NUMERIC(10,4),
+        avg_return             NUMERIC(10,4),
+        max_drawdown           NUMERIC(10,4),
+        confidence             NUMERIC(5,4),
+        status                 VARCHAR(30) NOT NULL DEFAULT 'DRAFT',
+        embedding              vector(1024),
+        created_at             TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        updated_at             TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS rule (
+        id                  UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        account_id          UUID REFERENCES trading_accounts(id) ON DELETE CASCADE,
+        lesson_id           UUID REFERENCES lesson(id),
+        strategy_id         UUID REFERENCES strategy(id),
+        rule_code           VARCHAR(50) UNIQUE,
+        name                VARCHAR(255),
+        category            VARCHAR(30),
+        description         TEXT,
+        conditions          JSONB,
+        action              JSONB,
+        exceptions          JSONB,
+        evidence            JSONB,
+        sample_size         INTEGER,
+        win_rate            NUMERIC(10,4),
+        expectancy          NUMERIC(10,4),
+        profit_factor       NUMERIC(10,4),
+        max_drawdown        NUMERIC(10,4),
+        in_sample_result    JSONB,
+        out_sample_result   JSONB,
+        status              VARCHAR(30) NOT NULL DEFAULT 'DRAFT',
+        confidence          NUMERIC(5,4),
+        created_at          TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        updated_at          TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS external_knowledge (
+        id                 UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        title              VARCHAR(500),
+        source_type        VARCHAR(30),
+        author             VARCHAR(255),
+        source_url         TEXT,
+        published_at       TIMESTAMPTZ,
+        content            TEXT,
+        summary            TEXT,
+        claims             JSONB,
+        strategies         JSONB,
+        market_scope       JSONB,
+        evidence_level     VARCHAR(30),
+        credibility_notes  TEXT,
+        embedding          vector(1024),
+        created_at         TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS experiment (
+        id                   UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        account_id           UUID REFERENCES trading_accounts(id) ON DELETE CASCADE,
+        strategy_name        VARCHAR(255),
+        hypothesis           TEXT,
+        hypothesis_source    VARCHAR(30),
+        source_knowledge_id  UUID REFERENCES external_knowledge(id),
+        market               VARCHAR(50),
+        timeframe            VARCHAR(30),
+        start_date           DATE,
+        end_date             DATE,
+        train_start          DATE,
+        train_end            DATE,
+        validation_start     DATE,
+        validation_end       DATE,
+        test_start           DATE,
+        test_end             DATE,
+        parameters           JSONB,
+        entry_rules          JSONB,
+        exit_rules           JSONB,
+        risk_rules           JSONB,
+        transaction_cost     NUMERIC(10,6),
+        slippage             NUMERIC(10,6),
+        sample_size          INTEGER,
+        win_rate             NUMERIC(10,4),
+        expectancy           NUMERIC(10,4),
+        profit_factor        NUMERIC(10,4),
+        sharpe               NUMERIC(10,4),
+        max_drawdown         NUMERIC(10,4),
+        result               JSONB,
+        overfit_check        JSONB,
+        status               VARCHAR(30) NOT NULL DEFAULT 'IDEA',
+        created_at           TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    )
+    """,
+    """
+    ALTER TABLE market_snapshot ADD COLUMN IF NOT EXISTS limit_break_count INTEGER
+    """,
+    """
+    ALTER TABLE market_snapshot ADD COLUMN IF NOT EXISTS volume_ratio NUMERIC(10,4)
+    """,
+    """
+    ALTER TABLE market_snapshot ADD COLUMN IF NOT EXISTS turnover_rate NUMERIC(10,4)
+    """,
+    """
+    ALTER TABLE market_snapshot ADD COLUMN IF NOT EXISTS amplitude NUMERIC(10,4)
+    """,
+    """
+    ALTER TABLE market_snapshot ADD COLUMN IF NOT EXISTS turnover_change_pct NUMERIC(10,4)
+    """,
+    """
+    ALTER TABLE market_snapshot ADD COLUMN IF NOT EXISTS up_down_ratio NUMERIC(10,4)
+    """,
+    """
+    ALTER TABLE market_snapshot ADD COLUMN IF NOT EXISTS turnover_trillion NUMERIC(10,4)
+    """,
+    """
+    ALTER TABLE market_snapshot ADD COLUMN IF NOT EXISTS index_board JSONB
+    """,
+    """
+    ALTER TABLE market_snapshot ADD COLUMN IF NOT EXISTS flow_board JSONB
+    """,
+    """
+    ALTER TABLE market_snapshot ADD COLUMN IF NOT EXISTS source VARCHAR(30)
+    """,
+    """
+    ALTER TABLE trade_thesis ADD COLUMN IF NOT EXISTS trade_date DATE
+    """,
+    """
+    ALTER TABLE trade_thesis ADD COLUMN IF NOT EXISTS symbol VARCHAR(32)
+    """,
+    """
+    ALTER TABLE trade_thesis ADD COLUMN IF NOT EXISTS stock_name VARCHAR(100)
+    """,
+    """
+    ALTER TABLE trade_thesis ADD COLUMN IF NOT EXISTS strategy_name VARCHAR(100)
+    """,
+    """
+    ALTER TABLE trade_thesis ADD COLUMN IF NOT EXISTS planned_entry_price NUMERIC(18,4)
+    """,
+    """
+    ALTER TABLE trade_thesis ADD COLUMN IF NOT EXISTS skill_inputs JSONB
+    """,
+    """
+    ALTER TABLE trade_outcome ADD COLUMN IF NOT EXISTS buy_price NUMERIC(18,4)
+    """,
+    """
+    ALTER TABLE trade_outcome ADD COLUMN IF NOT EXISTS sell_price NUMERIC(18,4)
+    """,
+    """
+    ALTER TABLE attribution ADD COLUMN IF NOT EXISTS redo_choice VARCHAR(40)
+    """,
+    """
+    ALTER TABLE attribution ADD COLUMN IF NOT EXISTS mistake_note TEXT
+    """,
+    """
+    ALTER TABLE attribution ADD COLUMN IF NOT EXISTS dimensions JSONB
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS market_memory (
+        id                   UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        trade_date           DATE NOT NULL UNIQUE,
+        snapshot_id          BIGINT REFERENCES market_snapshot(id) ON DELETE SET NULL,
+        ai_summary           TEXT,
+        summary_evidence     JSONB,
+        summary_confidence   NUMERIC(5,4),
+        narrative            TEXT,
+        structure            JSONB,
+        created_at           TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        updated_at           TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS market_regime (
+        id             UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        memory_id      UUID REFERENCES market_memory(id) ON DELETE CASCADE,
+        trade_date     DATE NOT NULL,
+        regime_label   VARCHAR(50) NOT NULL,
+        confidence     NUMERIC(5,4),
+        evidence       JSONB,
+        created_at     TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS market_event (
+        id           UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        memory_id    UUID REFERENCES market_memory(id) ON DELETE CASCADE,
+        trade_date   DATE NOT NULL,
+        event_time   VARCHAR(8),
+        title        TEXT NOT NULL,
+        detail       TEXT,
+        severity     VARCHAR(20),
+        created_at   TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS market_hypothesis (
+        id                  UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        memory_id           UUID REFERENCES market_memory(id) ON DELETE CASCADE,
+        trade_date          DATE NOT NULL,
+        hypothesis_code     VARCHAR(40),
+        statement           TEXT NOT NULL,
+        basis               JSONB,
+        conditions          JSONB,
+        verify_on           DATE,
+        status              VARCHAR(20) NOT NULL DEFAULT 'PENDING',
+        validation_result   JSONB,
+        created_at          TIMESTAMPTZ NOT NULL DEFAULT NOW()
     )
     """,
 ]
@@ -1065,7 +1477,7 @@ TIMESCALEDB_DDL_LIST = [
             amount          NUMERIC(20,4),
             buyer           VARCHAR(200),
             seller          VARCHAR(200),
-            PRIMARY KEY (ts_code, trade_date)
+            PRIMARY KEY (ts_code, trade_date, price, vol, buyer, seller)
         )
         """,
         "trade_date"
@@ -1344,6 +1756,45 @@ TIMESCALEDB_DDL_LIST = [
         """,
         "bar_time"
     ),
+
+    # 26. 北向/港股通持股
+    (
+        """
+        CREATE TABLE IF NOT EXISTS stock_hk_hold (
+            ts_code     VARCHAR(16)  NOT NULL,
+            trade_date  DATE         NOT NULL,
+            code        VARCHAR(16),
+            name        VARCHAR(64),
+            vol         NUMERIC(24,4),
+            ratio       NUMERIC(12,6),
+            exchange    VARCHAR(8),
+            updated_at  TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY (ts_code, trade_date)
+        )
+        """,
+        "trade_date"
+    ),
+
+    # 27. 十大股东（流通/全部）
+    (
+        """
+        CREATE TABLE IF NOT EXISTS stock_top10_holders (
+            ts_code            VARCHAR(16)  NOT NULL,
+            ann_date           DATE,
+            end_date           DATE         NOT NULL,
+            holder_name        VARCHAR(200) NOT NULL,
+            hold_amount        NUMERIC(24,4),
+            hold_ratio         NUMERIC(12,6),
+            hold_float_ratio   NUMERIC(12,6),
+            hold_change        NUMERIC(24,4),
+            holder_type        VARCHAR(64),
+            holder_kind        VARCHAR(32)  DEFAULT 'float',
+            updated_at         TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY (ts_code, end_date, holder_name)
+        )
+        """,
+        "end_date"
+    ),
 ]
 
 # ─────────────────────────────────────────────────────────────────────
@@ -1468,6 +1919,24 @@ TIMESCALEDB_INDEX_DDL_LIST = [
     "CREATE INDEX IF NOT EXISTS idx_suspend_code ON ref_suspend_d (ts_code, trade_date DESC)",
     # stock_intraday_mins
     "CREATE INDEX IF NOT EXISTS idx_intraday_mins_code_date ON stock_intraday_mins (ts_code, trade_date, bar_time)",
+    "CREATE INDEX IF NOT EXISTS idx_trading_accounts_user ON trading_accounts (user_id)",
+    "CREATE INDEX IF NOT EXISTS idx_market_snapshot_date ON market_snapshot (trade_date)",
+    "CREATE INDEX IF NOT EXISTS idx_market_snapshot_index_date ON market_snapshot (index_code, trade_date)",
+    "CREATE INDEX IF NOT EXISTS idx_market_snapshot_regime_date ON market_snapshot (market_regime, trade_date)",
+    "CREATE INDEX IF NOT EXISTS idx_market_snapshot_sentiment_date ON market_snapshot (sentiment_score, trade_date)",
+    "CREATE INDEX IF NOT EXISTS idx_opportunity_account_date ON opportunity (account_id, trade_date)",
+    "CREATE INDEX IF NOT EXISTS idx_opportunity_stock ON opportunity (stock_id)",
+    "CREATE INDEX IF NOT EXISTS idx_trade_thesis_account ON trade_thesis (account_id, created_at DESC)",
+    "CREATE INDEX IF NOT EXISTS idx_trade_execution_thesis ON trade_execution (thesis_id)",
+    "CREATE INDEX IF NOT EXISTS idx_trade_outcome_thesis ON trade_outcome (thesis_id)",
+    "CREATE INDEX IF NOT EXISTS idx_attribution_outcome ON attribution (outcome_id)",
+    "CREATE INDEX IF NOT EXISTS idx_lesson_account ON lesson (account_id)",
+    "CREATE INDEX IF NOT EXISTS idx_rule_account ON rule (account_id)",
+    "CREATE INDEX IF NOT EXISTS idx_experiment_account ON experiment (account_id)",
+    "CREATE INDEX IF NOT EXISTS idx_market_memory_date ON market_memory (trade_date DESC)",
+    "CREATE INDEX IF NOT EXISTS idx_market_regime_date ON market_regime (trade_date DESC)",
+    "CREATE INDEX IF NOT EXISTS idx_market_event_memory ON market_event (memory_id, event_time)",
+    "CREATE INDEX IF NOT EXISTS idx_market_hypothesis_status ON market_hypothesis (status, verify_on)",
 ]
 
 

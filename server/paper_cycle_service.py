@@ -2,15 +2,19 @@
 Paper Cycle Service - 纸面交易日/周循环
 
 流程：
-1. evening_screen  前一晚：策略 A/B 各取得分 TopN → watchlist
-2. open_decide     开市：做 T hit_test 判近高/近低 → LLM 决策买卖并记理由
+1. evening_screen  晚间：按当天已收盘日线跑 A观察池 / B升势回踩 TopN → watchlist
+2. open_decide     兼容入口：转一次当前分时做T（不再用昨日日线高低）
 3. risk_check      持仓回撤 ≥ 阈值 → 无条件清可卖仓
-4. daily_t0        对持仓做 T / 判断能否续涨，否则抛弃可卖仓
+4. intraday_t      每 5 分钟：watchlist 的当日分钟线 + 做T四法 / 5日均线
 5. weekly_review   对比上周净值，复盘买卖，调整 A/B 分数阈值
 
-说明：
-- 卖出受 T+1 约束（仅 sellable_qty）
-- LLM 只做结构化裁决与理由记录；下单由本服务执行
+做T约束：
+- 交易日用 Asia/Shanghai 当天，拉当日分钟线；不用库里最新日线的全天高低
+- 信号只用截至当前分钟的因果特征；成交价 = 当前分钟收盘价
+- 每只股票每个交易日最多成交一次做T，下一交易日可以再做
+- 近 5 日里有 3 天振幅 < 3% 则跳过做T
+- 卖出仍受 T+1（只卖 sellable_qty）
+- LLM 记录所用算法，并写可优化点
 """
 
 from __future__ import annotations
@@ -20,6 +24,7 @@ import logging
 import re
 from datetime import date, datetime, timedelta
 from typing import Any, Dict, List, Optional, Tuple
+from zoneinfo import ZoneInfo
 
 from sqlalchemy import text as sa_text
 
@@ -28,6 +33,12 @@ from server.paper_broker_service import paper_broker_service, _f, _to_date, _row
 from server.trade_watch_service import trade_watch_service
 
 logger = logging.getLogger(__name__)
+
+SH = ZoneInfo("Asia/Shanghai")
+# 至少走出 15 根连续竞价分钟，才把「截至目前的高低」当成可交易信号
+MIN_SESSION_BARS = 15
+DULL_AMP = 0.03
+DULL_DAYS = 3
 
 CYCLE_DDL = [
     """
@@ -90,6 +101,13 @@ DEFAULT_CONFIG = {
     "scheduler_last_evening": None,
     "scheduler_last_open": None,
     "scheduler_last_weekly": None,
+    "scheduler_last_intraday": None,
+    "scheduler_last_exposure": None,
+    "t_scan_minutes": 5,
+    "max_single_weight": 0.20,
+    "exposure_cap": 0.80,
+    "exposure_asof": None,
+    "exposure_prob": None,
 }
 
 
@@ -248,20 +266,34 @@ class PaperCycleService:
     # ------------------------------------------------------------------ #
     # 1) 晚间选股
     # ------------------------------------------------------------------ #
+    def _session_asof_date(self) -> date:
+        """
+        选股用的「当天」：最近已收盘交易日。
+        交易日收盘后 = 今天；开盘前/盘中/非交易日 = 上一交易日。
+        不用 stock_daily 的 MAX(trade_date)，避免库未补齐时落到更早一天。
+        """
+        try:
+            from data_layer.collectors.datahubco.selective import selective_fetcher
+
+            selective_fetcher.ensure_trade_cal()
+            return selective_fetcher.session_context()["asof_date"]
+        except Exception:
+            return self._latest_trade_date()
+
     def evening_screen(
         self,
         asof: Optional[str] = None,
         *,
-        fill: bool = False,
+        fill: bool = True,
         limit: int = 200,
     ) -> Dict[str, Any]:
-        """前一晚：跑 screener A/B，各取 TopN 写入 watchlist。"""
+        """晚间选股：按「当天已收盘」日线跑策略 A/B，各取 TopN 写入 watchlist。"""
         self._ensure()
         trade_watch_service._ensure()
         from server.screener_service import screener_service
 
         cfg = self._cfg()
-        asof_d = _to_date(asof) or self._latest_trade_date()
+        asof_d = _to_date(asof) or self._session_asof_date()
         top_a = int(cfg.get("top_n_a") or 5)
         top_b = int(cfg.get("top_n_b") or 5)
         min_a = float(cfg.get("min_score_a") or 55)
@@ -399,6 +431,22 @@ class PaperCycleService:
                 conn, step="evening_screen", asof=asof_d, account_id=None, summary=summary
             )
 
+        # 晚间继续跑：观察池50 → 起飞推荐 → 动能衰竭出池
+        pipeline: Dict[str, Any] = {}
+        try:
+            from server.recommend_pool_service import recommend_pool_service
+
+            pipeline = recommend_pool_service.run_cycle(
+                asof_d.isoformat(),
+                min_score=max(70.0, min_a),
+                max_n=50,
+                fill=fill,
+                require_flow_signal=True,
+            )
+        except Exception as e:
+            logger.warning("晚间推荐池流水线失败: %s", e)
+            pipeline = {"ok": False, "error": str(e)}
+
         return {
             "ok": True,
             "step": "evening_screen",
@@ -409,6 +457,7 @@ class PaperCycleService:
             "selected_a": hits_a,
             "selected_b": hits_b,
             "config": {"min_score_a": min_a, "min_score_b": min_b, "top_n_a": top_a, "top_n_b": top_b},
+            "pipeline": pipeline,
         }
 
     # ------------------------------------------------------------------ #
@@ -501,7 +550,8 @@ class PaperCycleService:
             system_prompt=(
                 "你是A股纸面交易裁决员。只输出一个 JSON 对象，不要 Markdown。"
                 "字段: action(buy|sell|hold|clear|abandon), quantity(number), "
-                "reason(string), market_position(string), confidence(0-1)。"
+                "reason(string), market_position(string), confidence(0-1), "
+                "algorithm(string，可空), optimize_note(string，可空)。"
             ),
         )
         try:
@@ -539,7 +589,7 @@ class PaperCycleService:
         }
 
     # ------------------------------------------------------------------ #
-    # 2) 开市决策
+    # 2) 开市 / 盘中做T（当日分钟线，不用最新日线高低）
     # ------------------------------------------------------------------ #
     async def open_decide(
         self,
@@ -548,187 +598,97 @@ class PaperCycleService:
         *,
         use_llm: bool = True,
         roll_t1: bool = True,
+        trigger_source: Optional[str] = None,
     ) -> Dict[str, Any]:
-        self._ensure()
-        cfg = self._cfg()
-        asof_d = _to_date(asof) or self._latest_trade_date()
-        buy_qty = float(cfg.get("default_buy_qty") or 500)
-        guard = bool(cfg.get("lookback_guard_open"))
-        model = str(cfg.get("model") or "deepseek-chat")
-
+        """兼容旧按钮：日切后做一次当前分时巡检。"""
+        src = trigger_source or "manual_price_scan"
         if roll_t1:
+            asof_d = _to_date(asof) or datetime.now(SH).date()
             paper_broker_service.roll_t1(account_id=account_id, asof=asof_d.isoformat(), force=False)
+        return await self.intraday_t(account_id, asof, use_llm=use_llm, trigger_source=src)
 
-        wl = trade_watch_service.list_watchlist(asof=asof_d.isoformat(), active_only=True)
-        items = wl.get("watchlist") or []
-        # 若当日无名单，尝试最近一次
-        if not items:
-            wl = trade_watch_service.list_watchlist(active_only=True)
-            items = wl.get("watchlist") or []
+    async def intraday_t(
+        self,
+        account_id: int,
+        asof: Optional[str] = None,
+        *,
+        use_llm: bool = True,
+        trigger_source: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        from server.paper_activity_service import (
+            TRIGGER_TITLE,
+            activity_trigger,
+            paper_activity_service,
+            trigger_scope,
+        )
+        from server.paper_intraday_t import run_intraday_t
 
-        acct = paper_broker_service.get_account(account_id, mark=True)
-        positions = {p["ts_code"]: p for p in (acct.get("positions") or [])}
-
-        actions_out: List[Dict[str, Any]] = []
-        with self.engine.begin() as conn:
-            run_id = self._create_run(
-                conn,
-                step="open_decide",
-                asof=asof_d,
-                account_id=account_id,
-                summary={"watchlist_count": len(items)},
+        nested = bool(activity_trigger.get())
+        src = trigger_source or activity_trigger.get() or "manual_price_scan"
+        asof_d = _to_date(asof) or datetime.now(SH).date()
+        with trigger_scope(src):
+            etype = "cycle_step" if nested else "session_start"
+            paper_activity_service.log_event(
+                account_id,
+                event_type=etype,
+                trigger_source=src,
+                title=TRIGGER_TITLE.get(src, "分时做T"),
+                detail="扫描 watchlist 当日分钟线，命中高低才唤醒模型",
+                observation={"asof": asof_d.isoformat(), "use_llm": use_llm, "step": "intraday_t"},
+                trade_date=asof_d,
             )
-
-        for item in items:
-            code = item["ts_code"]
-            setup = "B" if "b" in str(item.get("source") or "").lower() else "A"
-            # 辅池 A 仓位减半
-            qty_plan = buy_qty if setup == "B" else max(100.0, (buy_qty // 2) // 100 * 100)
-
-            t0 = self._t0_brief(code, asof_d)
-            pos = positions.get(code) or {}
-            sellable = _f(pos.get("sellable_qty"))
-            frozen = _f(pos.get("frozen_qty"))
-            held = _f(pos.get("quantity"))
-
-            context = {
-                "ts_code": code,
-                "name": item.get("name"),
-                "setup_type": setup,
-                "pool": "main_B" if setup == "B" else "aux_A",
-                "watch_score": item.get("score"),
-                "watch_reason": item.get("reason"),
-                "position": {"quantity": held, "sellable_qty": sellable, "frozen_qty": frozen},
-                "t0": t0,
-                "account_cash": (acct.get("account") or {}).get("cash"),
-            }
-
-            decision: Dict[str, Any] = {}
-            llm_raw = ""
-            if use_llm:
-                prompt = (
-                    f"交易日 {asof_d.isoformat()} 开市决策。\n"
-                    f"上下文 JSON:\n{json.dumps(context, ensure_ascii=False, default=str)}\n\n"
-                    "规则：\n"
-                    "- 近高(sell_high)且 sellable_qty>=100 可卖旧仓；\n"
-                    "- 近低(buy_low)可买，A 池仓位应更小；\n"
-                    "- 当日买入不可卖(T+1)；\n"
-                    "- 输出 JSON：action/quantity/reason/market_position/confidence。\n"
-                )
-                decision, llm_raw = await self._llm_decide(prompt, model)
-
-            if not decision.get("action"):
-                decision = self._fallback_decide(t0.get("bias") or "watch", sellable, qty_plan)
-
-            action = str(decision.get("action") or "hold").lower()
-            qty = _f(decision.get("quantity"), qty_plan)
-            reason = str(decision.get("reason") or "")
-            market_pos = str(
-                decision.get("market_position")
-                or t0.get("market_position")
-                or ""
-            )
-
-            exec_result = None
-            order_id = None
-            px = None
-
-            if action == "sell" and sellable >= 100:
-                qty = min(qty if qty >= 100 else sellable, sellable)
-                qty = (qty // 100) * 100
-                if qty >= 100:
-                    exec_result = paper_broker_service.place_order(
-                        account_id,
-                        code,
-                        "sell",
-                        qty,
-                        lookback_guard=guard,
-                        signal_date=asof_d.isoformat(),
-                        reason=f"[open_decide] {reason}",
-                    )
-            elif action == "buy":
-                qty = max(100.0, (qty // 100) * 100)
-                if setup == "A":
-                    qty = min(qty, qty_plan)
-                exec_result = paper_broker_service.place_order(
-                    account_id,
-                    code,
-                    "buy",
-                    qty,
-                    lookback_guard=guard,
-                    signal_date=asof_d.isoformat(),
-                    reason=f"[open_decide/{setup}] {reason}",
-                )
-            else:
-                action = "hold"
-                qty = 0
-
-            if exec_result and exec_result.get("ok"):
-                order_id = (exec_result.get("order") or {}).get("id")
-                px = (exec_result.get("fill") or {}).get("price")
-            elif exec_result and not exec_result.get("ok"):
-                reason = f"{reason} | 执行失败: {exec_result.get('error')}"
-                action = f"{action}_failed"
-
-            row_out = {
-                "ts_code": code,
-                "setup_type": setup,
-                "action": action,
-                "quantity": qty,
-                "reason": reason,
-                "market_position": market_pos,
-                "t0_bias": t0.get("bias"),
-                "order_id": order_id,
-                "exec": exec_result,
-            }
-            actions_out.append(row_out)
-
-            with self.engine.begin() as conn:
-                self._log_action(
-                    conn,
-                    run_id=run_id,
-                    account_id=account_id,
-                    asof=asof_d,
-                    step="open_decide",
-                    ts_code=code,
-                    setup_type=setup,
-                    action=action,
-                    quantity=qty,
-                    price=px,
-                    reason=f"{reason} | 位置: {market_pos}",
-                    market_context=context,
-                    t0_summary=t0,
-                    order_id=order_id,
-                    llm_raw=llm_raw,
-                )
-
-        # 更新 run summary
-        with self.engine.begin() as conn:
-            conn.execute(
-                sa_text(
-                    """
-                    UPDATE paper_cycle_run SET summary = CAST(:s AS jsonb)
-                    WHERE id = :id
-                    """
-                ),
-                {
-                    "id": run_id,
-                    "s": json.dumps(
-                        {"actions": actions_out, "watchlist_count": len(items)},
-                        ensure_ascii=False,
-                        default=str,
-                    ),
+            result = await run_intraday_t(self, account_id, asof, use_llm=use_llm)
+            actions = result.get("actions") or []
+            paper_activity_service.log_event(
+                account_id,
+                event_type="cycle_step",
+                trigger_source=src,
+                title=f"分时扫描结束 · {len(actions)} 条",
+                detail="；".join(
+                    f"{a.get('ts_code')} {a.get('action')}" for a in actions[:12] if a
+                ) or "无动作",
+                observation={
+                    "count": result.get("count"),
+                    "run_id": result.get("run_id"),
+                    "actions": [
+                        {
+                            "ts_code": a.get("ts_code"),
+                            "action": a.get("action"),
+                            "bias": a.get("bias"),
+                            "price": a.get("price"),
+                        }
+                        for a in actions[:30]
+                    ],
                 },
+                run_id=result.get("run_id"),
+                trade_date=asof_d,
             )
+            return result
 
-        return {
-            "ok": True,
-            "step": "open_decide",
-            "asof": asof_d.isoformat(),
-            "run_id": run_id,
-            "account_id": account_id,
-            "actions": actions_out,
-        }
+    async def afternoon_exposure(
+        self,
+        account_id: int,
+        asof: Optional[str] = None,
+        *,
+        use_llm: bool = True,
+        trigger_source: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        from server.paper_activity_service import TRIGGER_TITLE, paper_activity_service, trigger_scope
+        from server.paper_position_policy import run_afternoon_exposure
+
+        src = trigger_source or "user_button"
+        asof_d = _to_date(asof) or datetime.now(SH).date()
+        with trigger_scope(src):
+            paper_activity_service.log_event(
+                account_id,
+                event_type="session_start",
+                trigger_source=src,
+                title=TRIGGER_TITLE.get(src, "13:00 仓位规则"),
+                detail="按明日上涨概率调整总仓位",
+                observation={"asof": asof_d.isoformat(), "use_llm": use_llm, "step": "afternoon_exposure"},
+                trade_date=asof_d,
+            )
+            return await run_afternoon_exposure(self, account_id, asof, use_llm=use_llm)
 
     # ------------------------------------------------------------------ #
     # 3) 回撤风控
@@ -819,6 +779,26 @@ class PaperCycleService:
                     market_context={"avg_cost": avg, "market_price": px, "drawdown": dd},
                     order_id=order_id,
                 )
+            try:
+                from server.paper_activity_service import paper_activity_service
+
+                paper_activity_service.log_event(
+                    account_id,
+                    event_type="order" if order_id else "cycle_step",
+                    trigger_source="risk_check",
+                    ts_code=code,
+                    title=f"回撤风控 · {action} · {code}",
+                    detail=reason,
+                    observation={"avg_cost": avg, "market_price": px, "drawdown": round(dd, 4)},
+                    action=action,
+                    quantity=qty,
+                    price=px,
+                    order_id=order_id,
+                    run_id=run_id,
+                    trade_date=asof_d,
+                )
+            except Exception as e:
+                logger.warning("风控活动日志失败: %s", e)
 
         return {
             "ok": True,
@@ -829,160 +809,21 @@ class PaperCycleService:
             "actions": actions,
         }
 
-    # ------------------------------------------------------------------ #
-    # 4) 日度持仓做 T / 续涨判断
-    # ------------------------------------------------------------------ #
     async def daily_t0(
         self,
         account_id: int,
         asof: Optional[str] = None,
         *,
         use_llm: bool = True,
+        trigger_source: Optional[str] = None,
     ) -> Dict[str, Any]:
-        self._ensure()
-        cfg = self._cfg()
-        asof_d = _to_date(asof) or self._latest_trade_date()
-        model = str(cfg.get("model") or "deepseek-chat")
-        guard = bool(cfg.get("lookback_guard_open"))
-
-        acct = paper_broker_service.get_account(account_id, mark=True)
-        positions = acct.get("positions") or []
-        actions = []
-
-        with self.engine.begin() as conn:
-            run_id = self._create_run(
-                conn,
-                step="daily_t0",
-                asof=asof_d,
-                account_id=account_id,
-                summary={"positions": len(positions)},
-            )
-
-        for p in positions:
-            code = p["ts_code"]
-            sellable = _f(p.get("sellable_qty"))
-            held = _f(p.get("quantity"))
-            t0 = self._t0_brief(code, asof_d)
-            context = {
-                "ts_code": code,
-                "position": p,
-                "t0": t0,
-                "question": "能否继续上涨？若否应 abandon 清可卖仓；近高可做T卖出部分；近低可持有或回补。",
-            }
-
-            decision = {}
-            llm_raw = ""
-            if use_llm:
-                prompt = (
-                    f"持仓日度做T/续涨裁决 {asof_d.isoformat()}\n"
-                    f"{json.dumps(context, ensure_ascii=False, default=str)}\n"
-                    "输出 JSON：action=hold|sell|abandon, quantity, reason, market_position, confidence。"
-                    "abandon 表示抛弃该标的可卖仓。"
-                )
-                decision, llm_raw = await self._llm_decide(prompt, model)
-
-            if not decision.get("action"):
-                bias = t0.get("bias")
-                if bias == "sell_high" and sellable >= 100:
-                    decision = {
-                        "action": "sell",
-                        "quantity": min(sellable, 500),
-                        "reason": "规则回退：近高做T卖出",
-                        "market_position": t0.get("market_position"),
-                    }
-                elif bias == "buy_low":
-                    decision = {
-                        "action": "hold",
-                        "quantity": 0,
-                        "reason": "规则回退：近低暂持，等待续涨",
-                        "market_position": t0.get("market_position"),
-                    }
-                else:
-                    # 弱信号且跌破成本较多 → 抛弃
-                    avg, px = _f(p.get("avg_cost")), _f(p.get("market_price"))
-                    if avg > 0 and px / avg - 1 <= -0.03 and sellable >= 100:
-                        decision = {
-                            "action": "abandon",
-                            "quantity": sellable,
-                            "reason": "规则回退：续涨概率低且已浮亏，清可卖仓",
-                            "market_position": t0.get("market_position"),
-                        }
-                    else:
-                        decision = {
-                            "action": "hold",
-                            "quantity": 0,
-                            "reason": "规则回退：观望",
-                            "market_position": t0.get("market_position"),
-                        }
-
-            action = str(decision.get("action") or "hold").lower()
-            qty = _f(decision.get("quantity"))
-            reason = str(decision.get("reason") or "")
-            order_id = None
-            exec_result = None
-            px = _f(p.get("market_price"))
-
-            if action in ("sell", "abandon", "clear") and sellable >= 100:
-                if action == "abandon" or action == "clear":
-                    qty = (sellable // 100) * 100
-                else:
-                    qty = min(max(100.0, (qty // 100) * 100), sellable)
-                if qty >= 100:
-                    exec_result = paper_broker_service.place_order(
-                        account_id,
-                        code,
-                        "sell",
-                        qty,
-                        lookback_guard=guard,
-                        signal_date=asof_d.isoformat(),
-                        reason=f"[daily_t0/{action}] {reason}",
-                    )
-                    if exec_result.get("ok"):
-                        order_id = (exec_result.get("order") or {}).get("id")
-                        px = (exec_result.get("fill") or {}).get("price") or px
-                    else:
-                        action = f"{action}_failed"
-                        reason += f" | {exec_result.get('error')}"
-            else:
-                action = "hold"
-                qty = 0
-
-            actions.append(
-                {
-                    "ts_code": code,
-                    "action": action,
-                    "quantity": qty,
-                    "reason": reason,
-                    "t0_bias": t0.get("bias"),
-                    "market_position": decision.get("market_position") or t0.get("market_position"),
-                    "order_id": order_id,
-                }
-            )
-            with self.engine.begin() as conn:
-                self._log_action(
-                    conn,
-                    run_id=run_id,
-                    account_id=account_id,
-                    asof=asof_d,
-                    step="daily_t0",
-                    ts_code=code,
-                    action=action,
-                    quantity=qty,
-                    price=px,
-                    reason=reason,
-                    market_context=context,
-                    t0_summary=t0,
-                    order_id=order_id,
-                    llm_raw=llm_raw,
-                )
-
-        return {
-            "ok": True,
-            "step": "daily_t0",
-            "asof": asof_d.isoformat(),
-            "run_id": run_id,
-            "actions": actions,
-        }
+        """兼容旧按钮：做一次当前分时做T。"""
+        return await self.intraday_t(
+            account_id,
+            asof=asof,
+            use_llm=use_llm,
+            trigger_source=trigger_source or "manual_price_scan",
+        )
 
     # ------------------------------------------------------------------ #
     # 5) 周复盘 + 调 A/B
@@ -1145,20 +986,61 @@ class PaperCycleService:
         asof: Optional[str] = None,
         *,
         use_llm: bool = True,
+        trigger_source: str = "manual_daily_lesson",
     ) -> Dict[str, Any]:
-        """开市流程：T+1日切 → 开市决策 → 风控 → 日度做T。"""
-        asof_d = _to_date(asof) or self._latest_trade_date()
-        paper_broker_service.roll_t1(account_id=account_id, asof=asof_d.isoformat())
-        open_res = await self.open_decide(account_id, asof=asof_d.isoformat(), use_llm=use_llm, roll_t1=False)
-        risk_res = await self.risk_check(account_id, asof=asof_d.isoformat(), use_llm=False)
-        t0_res = await self.daily_t0(account_id, asof=asof_d.isoformat(), use_llm=use_llm)
-        return {
-            "ok": True,
-            "asof": asof_d.isoformat(),
-            "open_decide": open_res,
-            "risk_check": risk_res,
-            "daily_t0": t0_res,
-        }
+        """T+1 日切（上海当天）→ 回撤风控 → 一次当前分时做T。不做昨日日线高低判断。"""
+        from server.paper_activity_service import TRIGGER_TITLE, paper_activity_service, trigger_scope
+
+        asof_d = _to_date(asof) or datetime.now(SH).date()
+        src = trigger_source or "manual_daily_lesson"
+        with trigger_scope(src):
+            paper_activity_service.log_event(
+                account_id,
+                event_type="session_start",
+                trigger_source=src,
+                title=TRIGGER_TITLE.get(src, "一键日课"),
+                detail="步骤：T+1 日切 → 回撤风控 → 当前分时做T",
+                observation={"asof": asof_d.isoformat(), "use_llm": use_llm, "step": "run_trading_day"},
+                trade_date=asof_d,
+            )
+            paper_broker_service.roll_t1(account_id=account_id, asof=asof_d.isoformat())
+            risk_res = await self.risk_check(account_id, asof=asof_d.isoformat(), use_llm=False)
+            t0_res = await self.intraday_t(
+                account_id, asof=asof_d.isoformat(), use_llm=use_llm, trigger_source=src
+            )
+            paper_activity_service.log_event(
+                account_id,
+                event_type="session_end",
+                trigger_source=src,
+                title="日课结束",
+                detail=(
+                    f"风控 {(len(risk_res.get('actions') or []))} 条；"
+                    f"分时 {(t0_res.get('count') or 0)} 条"
+                ),
+                observation={
+                    "risk_ok": risk_res.get("ok"),
+                    "risk_actions": risk_res.get("actions") or [],
+                    "intraday_count": t0_res.get("count"),
+                    "intraday_actions": [
+                        {
+                            "ts_code": a.get("ts_code"),
+                            "action": a.get("action"),
+                            "bias": a.get("bias"),
+                            "price": a.get("price"),
+                        }
+                        for a in (t0_res.get("actions") or [])[:30]
+                    ],
+                },
+                run_id=t0_res.get("run_id"),
+                trade_date=asof_d,
+            )
+            return {
+                "ok": True,
+                "asof": asof_d.isoformat(),
+                "trigger_source": src,
+                "risk_check": risk_res,
+                "intraday_t": t0_res,
+            }
 
     def list_runs(self, limit: int = 50, step: Optional[str] = None) -> Dict[str, Any]:
         self._ensure()

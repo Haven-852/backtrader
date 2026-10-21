@@ -52,6 +52,11 @@ class PaperToolkit:
     async def list_positions(self, account_id: int) -> Dict[str, Any]:
         return self._svc().list_positions(int(account_id))
 
+    async def get_journal(self, account_id: int, trade_date: Optional[str] = None) -> Dict[str, Any]:
+        from server.paper_activity_service import paper_activity_service
+
+        return paper_activity_service.get_journal(int(account_id), trade_date=trade_date)
+
     async def place_order(
         self,
         account_id: int,
@@ -81,6 +86,43 @@ class PaperToolkit:
             account_id=int(account_id) if account_id is not None else None,
             asof=asof,
         )
+
+    async def get_intraday_quotes(
+        self,
+        ts_code: Optional[str] = None,
+        ts_codes: Optional[str] = None,
+        account_id: Optional[int] = None,
+        trade_date: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """持仓/标的的真实 1 分钟分时末价。没有分时就报缺，不用日线估算。"""
+        from server.paper_quote import last_intraday_quotes, session_context
+
+        codes: List[str] = []
+        if ts_code:
+            codes.append(str(ts_code))
+        if ts_codes:
+            codes.extend([c.strip() for c in str(ts_codes).replace("，", ",").split(",") if c.strip()])
+        if account_id is not None:
+            acct = self._svc().get_account(int(account_id), mark=False)
+            if not acct.get("ok"):
+                return acct
+            codes.extend([str(p.get("ts_code")) for p in (acct.get("positions") or []) if p.get("ts_code")])
+        codes = list(dict.fromkeys([c.strip().upper() for c in codes if c]))
+        if not codes:
+            return {"ok": False, "error": "请提供 ts_code / ts_codes 或 account_id"}
+        ctx = session_context()
+        quotes = last_intraday_quotes(codes, trade_date=trade_date)
+        rows = [quotes[c] for c in codes if c in quotes]
+        missing = [r["ts_code"] for r in rows if not r.get("ok")]
+        return {
+            "ok": True,
+            "session_phase": ctx.get("phase"),
+            "trade_date": trade_date or ctx.get("asof"),
+            "count": len(rows),
+            "quotes": rows,
+            "missing": missing,
+            "note": None if not missing else "无分时的标的未计价，禁止用日线/成本价冒充盘中盈亏",
+        }
 
     async def mark(
         self,
@@ -179,14 +221,16 @@ PAPER_TRADE_SYSTEM_PROMPT = """你是「纸面交易 Agent」，负责在模拟�
 5. 每次决策用中文说明：感知结论 → 交易计划（标的/方向/数量/理由）→ 执行结果 → 风险与下一步。
 6. 不确定时先 `get_market_brief` 与 `get_account`/`list_positions`，再决定是否下单。
 7. 若用户只是询问账户或复盘，不要强行交易。
-8. 做 T 时：卖的是旧仓（sellable），买的是新仓（frozen）；不可假设当日买入可当日卖出。
+8. 做 T 时：卖的是旧仓（sellable），买的是新仓（frozen）；不可假设当日买入可当日卖出。佣金为成交额万二且最低 5 元，卖出另计印花税万五。同一只股票每个交易日最多做 T 一次。单票市值不超过总资产 20%。13:00 若判断明天上涨概率不超过 60%，总仓位不超过 80%。
+9. **盘中盈亏必须用分时价**：`get_account`/`list_positions`/`mark`/`get_intraday_quotes` 返回的 `market_price` 来自 1 分钟分时末价。`pnl_ready=false` 或 `quote_source=missing` 表示没有对应分时，**禁止用日线收盘、昨收或成本价估算冒充盘中盈亏**，只能如实说「暂无分时，盈亏未计」。
 
 ## 推荐工作流
-1. `get_account` / `list_positions` / `get_stats` 了解账户状态
-2. `get_market_brief` 感知目标标的（可多标的多次调用）
-3. 给出明确决策；需要交易则 `place_order`（reason 必填）
-4. 若有 pending（次日开盘），提示用户稍后 `settle`；可主动 `mark` 更新净值
-5. 用成交/持仓变化做反馈总结
+1. `get_account` / `list_positions` / `get_journal` / `get_stats` 了解账户状态与当日操作（日课还是股价唤醒、模型观察、唤醒次数）
+2. 判断持仓盈亏时看分时字段：`quote_clock`、`quote_source=intraday`、`unrealized_pnl`；缺数再 `get_intraday_quotes`
+3. `get_market_brief` 感知目标标的的日线结构（这不是盘中价）
+4. 给出明确决策；需要交易则 `place_order`（reason 必填）
+5. 若有 pending（次日开盘），提示用户稍后 `settle`；可主动 `mark` 用分时更新净值
+6. 用成交/持仓变化做反馈总结
 
 ## 输出风格
 简洁、可审计：先结论后依据；列出工具已确认的关键数字（现金、成交价、数量）。

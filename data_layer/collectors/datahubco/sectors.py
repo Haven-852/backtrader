@@ -1,13 +1,14 @@
 """
-东财行业板块持续采集（Datahubco → PostgreSQL）
+东财行业板块持续采集（Datahubco → 东财行情兜底 → PostgreSQL）
 
 表:
-  - sector_dc_index_daily    dc_index（涨跌幅/领涨股/涨跌家数/层级）
-  - sector_dc_daily          dc_daily（OHLC/成交额）
-  - sector_moneyflow_daily   moneyflow_ind_dc（资金流向）
-  - sector_dc_member         dc_member（板块成分股，按需/批量）
-  - sector_dc_hierarchy      一级→二级→三级（成分包含关系推断）
+  - sector_dc_index_daily    涨跌幅/领涨股/涨跌家数/层级
+  - sector_dc_daily          OHLC/成交额
+  - sector_moneyflow_daily   资金流向
+  - sector_dc_member         板块成分股
+  - sector_dc_hierarchy      一级→二级→三级
 
+主源 Datahubco dc_*；接口不可用时改用东财 clist（最近收盘日含成交额）。
 交易日 asof 规则复用 SelectiveDataFetcher.session_context：
   交易日闭市前 → 上一交易日；闭市后 → 当天；非交易日 → 上一交易日。
 """
@@ -18,8 +19,10 @@ import logging
 import time
 from datetime import date, datetime
 from typing import Any, Dict, List, Optional, Sequence, Set
+from zoneinfo import ZoneInfo
 
 import pandas as pd
+import requests
 from sqlalchemy import text as sa_text
 
 from data_layer.db_manager import storage_manager
@@ -29,10 +32,25 @@ from .selective import SelectiveDataFetcher
 
 logger = logging.getLogger("collector.datahubco.sectors")
 
+TZ_SH = ZoneInfo("Asia/Shanghai")
 IDX_TYPE_INDUSTRY = "行业板块"
 CONTENT_TYPE_INDUSTRY = "行业"
 
 LEVELS = ("东财一级行业", "东财二级行业", "东财三级行业")
+
+EM_CLIST_URLS = (
+    "https://push2.eastmoney.com/api/qt/clist/get",
+    "https://79.push2.eastmoney.com/api/qt/clist/get",
+    "https://82.push2.eastmoney.com/api/qt/clist/get",
+)
+EM_KLINE_URLS = (
+    "https://push2his.eastmoney.com/api/qt/stock/kline/get",
+    "https://79.push2his.eastmoney.com/api/qt/stock/kline/get",
+)
+EM_CLIST_FIELDS = (
+    "f12,f14,f2,f3,f4,f5,f6,f7,f8,f15,f16,f17,f18,f20,"
+    "f62,f104,f105,f124,f128,f136,f140,f141"
+)
 
 DDL_STATEMENTS = [
     """
@@ -146,6 +164,45 @@ def _parse_dates(series: pd.Series) -> pd.Series:
     return pd.to_datetime(series.astype(str), errors="coerce").dt.date
 
 
+def _norm_bk_code(code: Any) -> str:
+    s = str(code or "").strip().upper()
+    if s.startswith("BK") and "." not in s:
+        return f"{s}.DC"
+    return s
+
+
+def _em_num(v: Any) -> Optional[float]:
+    if v is None or v == "-" or v == "":
+        return None
+    try:
+        return float(v)
+    except (TypeError, ValueError):
+        return None
+
+
+def _em_int(v: Any) -> Optional[int]:
+    n = _em_num(v)
+    if n is None:
+        return None
+    return int(round(n))
+
+
+def _em_stock_code(code: Any, market: Any) -> Optional[str]:
+    if code is None or str(code).strip() in ("", "-", "nan"):
+        return None
+    s = str(code).strip().upper()
+    if "." in s:
+        return s
+    if s.isdigit():
+        s = s.zfill(6)
+    m = str(market).strip()
+    if m in ("1", "SH"):
+        return f"{s}.SH"
+    if m in ("2", "BJ"):
+        return f"{s}.BJ"
+    return f"{s}.SZ"
+
+
 class SectorDataFetcher:
     """东财行业板块：按 asof 拉取并写入 PostgreSQL。"""
 
@@ -153,6 +210,7 @@ class SectorDataFetcher:
         self._client = client
         self._engine = None
         self._selective = SelectiveDataFetcher(client=client)
+        self._dc_dead = False
 
     @property
     def client(self) -> DatahubcoClient:
@@ -199,6 +257,10 @@ class SectorDataFetcher:
             "is_trading_day": ctx.get("is_trading_day"),
         }
 
+    def open_dates(self, start: date, end: date) -> List[date]:
+        self._selective.ensure_trade_cal()
+        return list(self._selective._expected_open_dates(start, end))
+
     # ─── 远端拉取 ─────────────────────────────────────
 
     def fetch_dc_index(self, ymd: str, idx_type: str = IDX_TYPE_INDUSTRY) -> pd.DataFrame:
@@ -209,6 +271,8 @@ class SectorDataFetcher:
         df.columns = [str(c).lower() for c in df.columns]
         if "idx_type" in df.columns:
             df = df.loc[df["idx_type"] == idx_type].copy()
+        if "ts_code" in df.columns:
+            df["ts_code"] = df["ts_code"].map(_norm_bk_code)
         df["trade_date"] = _parse_dates(df["trade_date"])
         if "leading" in df.columns and "leading_name" not in df.columns:
             df = df.rename(columns={"leading": "leading_name"})
@@ -230,8 +294,22 @@ class SectorDataFetcher:
             return df
         df = df.copy()
         df.columns = [str(c).lower() for c in df.columns]
+        if "amount" not in df.columns:
+            for alt in ("amt", "amount_yuan", "turnover", "deal_amount"):
+                if alt in df.columns:
+                    df = df.rename(columns={alt: "amount"})
+                    break
+        if "ts_code" in df.columns:
+            df["ts_code"] = df["ts_code"].map(_norm_bk_code)
         if "category" in df.columns:
-            df = df.loc[df["category"] == category].copy()
+            filtered = df.loc[df["category"] == category]
+            if filtered.empty:
+                aliases = {category, "行业", "行业板块", "东财行业"}
+                filtered = df.loc[df["category"].isin(aliases)]
+            if filtered.empty:
+                logger.warning("dc_daily category=%s 无匹配，保留全部 %d 行", category, len(df))
+            else:
+                df = filtered.copy()
         df["trade_date"] = _parse_dates(df["trade_date"])
         for col in ("open", "high", "low", "close", "change", "pct_change", "amount", "swing", "turnover_rate"):
             if col in df.columns:
@@ -353,6 +431,284 @@ class SectorDataFetcher:
             "sector_dc_member", df, cols, "ts_code, trade_date, con_code"
         )
 
+    # ─── 东财行情兜底 ─────────────────────────────────
+
+    def _api_unavailable(self, err: Exception) -> bool:
+        msg = str(err)
+        return "unknown api_name" in msg or "HTTP 400" in msg
+
+    def _level_lookup(self) -> Dict[str, Dict[str, str]]:
+        out: Dict[str, Dict[str, str]] = {}
+        if not self.engine:
+            return out
+        try:
+            with self.engine.connect() as conn:
+                rows = conn.execute(
+                    sa_text(
+                        """
+                        SELECT DISTINCT ON (ts_code)
+                            ts_code, name, industry_level, idx_type
+                        FROM sector_dc_index_daily
+                        WHERE idx_type = '行业板块'
+                        ORDER BY ts_code, trade_date DESC
+                        """
+                    )
+                ).fetchall()
+            for r in rows:
+                code = _norm_bk_code(r[0])
+                out[code] = {
+                    "name": r[1] or "",
+                    "industry_level": r[2] or "东财三级行业",
+                    "idx_type": r[3] or IDX_TYPE_INDUSTRY,
+                }
+        except Exception as e:
+            logger.warning("读取板块层级缓存失败: %s", e)
+        return out
+
+    def _em_http_json(self, url: str, params: Dict[str, Any], retries: int = 1) -> Dict[str, Any]:
+        headers = {
+            "User-Agent": (
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+            ),
+            "Referer": "https://quote.eastmoney.com/",
+        }
+        last_err: Optional[Exception] = None
+        for attempt in range(retries):
+            try:
+                resp = requests.get(
+                    url,
+                    params=params,
+                    timeout=20,
+                    headers=headers,
+                    proxies={"http": None, "https": None},
+                )
+                resp.raise_for_status()
+                payload = resp.json()
+                return payload if isinstance(payload, dict) else {}
+            except Exception as e:
+                last_err = e
+                time.sleep(0.4 * (attempt + 1))
+        raise RuntimeError(f"东财请求失败 {url}: {last_err}")
+
+    def eastmoney_last_trade_date(self, bk_code: str = "BK1035") -> Optional[date]:
+        ymd = datetime.now(TZ_SH).strftime("%Y%m%d")
+        params = {
+            "secid": f"90.{bk_code.replace('.DC', '')}",
+            "klt": "101",
+            "fqt": "1",
+            "beg": "20260101",
+            "end": ymd,
+            "fields1": "f1,f2,f3,f4,f5,f6",
+            "fields2": "f51,f52,f53,f54,f55,f56,f57,f58,f59,f60,f61",
+        }
+        last_err: Optional[Exception] = None
+        for url in EM_KLINE_URLS:
+            try:
+                payload = self._em_http_json(url, params)
+                klines = ((payload.get("data") or {}).get("klines") or [])
+                if klines:
+                    last = str(klines[-1]).split(",")[0]
+                    return datetime.strptime(last.replace("-", "")[:8], "%Y%m%d").date()
+            except Exception as e:
+                last_err = e
+                continue
+        logger.warning("东财板块K线日期失败: %s", last_err)
+        return None
+
+    def fetch_eastmoney_industry(self, ymd: str) -> Dict[str, Any]:
+        """东财行业 clist：最近收盘日的涨跌幅 + 成交额。"""
+        requested = datetime.strptime(ymd, "%Y%m%d").date()
+        last = requested
+        rows: List[Dict[str, Any]] = []
+        pn = 1
+        total = None
+        clist_url = EM_CLIST_URLS[0]
+        while pn <= 20:
+            payload = None
+            last_err: Optional[Exception] = None
+            for url in EM_CLIST_URLS:
+                try:
+                    payload = self._em_http_json(
+                        url,
+                        {
+                            "pn": str(pn),
+                            "pz": "100",
+                            "po": "1",
+                            "np": "1",
+                            "fltt": "2",
+                            "invt": "2",
+                            "fid": "f3",
+                            "fs": "m:90+t:2+f:!50",
+                            "fields": EM_CLIST_FIELDS,
+                        },
+                    )
+                    clist_url = url
+                    break
+                except Exception as e:
+                    last_err = e
+                    continue
+            if payload is None:
+                raise RuntimeError(f"东财行业 clist 失败: {last_err}")
+            data = payload.get("data") or {}
+            diffs = data.get("diff") or []
+            if isinstance(diffs, dict):
+                diffs = list(diffs.values())
+            if not diffs:
+                break
+            rows.extend(diffs)
+            total = int(data.get("total") or len(rows))
+            if len(rows) >= total:
+                break
+            pn += 1
+
+        if not rows:
+            return {"trade_date": last, "index": pd.DataFrame(), "daily": pd.DataFrame(), "moneyflow": pd.DataFrame()}
+
+        levels = self._level_lookup()
+        index_rows: List[Dict[str, Any]] = []
+        daily_rows: List[Dict[str, Any]] = []
+        mf_rows: List[Dict[str, Any]] = []
+        for item in rows:
+            raw = str(item.get("f12") or "").strip()
+            if not raw:
+                continue
+            ts_code = _norm_bk_code(raw)
+            meta = levels.get(ts_code) or {}
+            name = item.get("f14") or meta.get("name") or ts_code
+            leading = item.get("f128")
+            if leading in ("-", None, ""):
+                leading = None
+            leading_code = _em_stock_code(item.get("f140"), item.get("f141"))
+            pct = _em_num(item.get("f3"))
+            rec_index = {
+                "ts_code": ts_code,
+                "trade_date": last,
+                "name": name,
+                "leading_name": leading,
+                "leading_code": leading_code,
+                "pct_change": pct,
+                "leading_pct": _em_num(item.get("f136")),
+                "total_mv": _em_num(item.get("f20")),
+                "turnover_rate": _em_num(item.get("f8")),
+                "up_num": _em_int(item.get("f104")),
+                "down_num": _em_int(item.get("f105")),
+                "idx_type": IDX_TYPE_INDUSTRY,
+                "industry_level": meta.get("industry_level") or "东财三级行业",
+            }
+            rec_daily = {
+                "ts_code": ts_code,
+                "trade_date": last,
+                "open": _em_num(item.get("f17")),
+                "high": _em_num(item.get("f15")),
+                "low": _em_num(item.get("f16")),
+                "close": _em_num(item.get("f2")),
+                "change": _em_num(item.get("f4")),
+                "pct_change": pct,
+                "vol": _em_int(item.get("f5")),
+                "amount": _em_num(item.get("f6")),
+                "swing": _em_num(item.get("f7")),
+                "turnover_rate": _em_num(item.get("f8")),
+                "category": IDX_TYPE_INDUSTRY,
+            }
+            rec_mf = {
+                "trade_date": last,
+                "content_type": CONTENT_TYPE_INDUSTRY,
+                "ts_code": ts_code,
+                "name": name,
+                "pct_change": pct,
+                "close": _em_num(item.get("f2")),
+                "net_amount": _em_num(item.get("f62")),
+            }
+            index_rows.append(rec_index)
+            daily_rows.append(rec_daily)
+            mf_rows.append(rec_mf)
+
+        logger.info(
+            "东财行业 clist %d 行 · 行情日 %s（请求 %s）· %s",
+            len(index_rows),
+            last.isoformat(),
+            requested.isoformat(),
+            clist_url,
+        )
+        return {
+            "trade_date": last,
+            "index": pd.DataFrame(index_rows),
+            "daily": pd.DataFrame(daily_rows),
+            "moneyflow": pd.DataFrame(mf_rows),
+        }
+
+    def fetch_sw_overlay(self, ymd: str) -> Dict[str, Any]:
+        """Datahubco 申万日行情按名称贴到东财板块代码（dc_* 不可用时的成交额来源）。"""
+        df = self.client.query("sw_daily", trade_date=ymd, limit=5000)
+        if df is None or df.empty:
+            return {"trade_date": datetime.strptime(ymd, "%Y%m%d").date(), "index": pd.DataFrame(), "daily": pd.DataFrame()}
+        df = df.copy()
+        df.columns = [str(c).lower() for c in df.columns]
+        asof = datetime.strptime(ymd, "%Y%m%d").date()
+        if "trade_date" in df.columns:
+            parsed = _parse_dates(df["trade_date"])
+            if parsed.notna().any():
+                asof = parsed.dropna().iloc[-1]
+        levels = self._level_lookup()
+        by_name: Dict[str, List[tuple]] = {}
+        for code, meta in levels.items():
+            nm = str(meta.get("name") or "").strip()
+            if nm:
+                by_name.setdefault(nm, []).append((code, meta))
+
+        index_rows: List[Dict[str, Any]] = []
+        daily_rows: List[Dict[str, Any]] = []
+        for _, row in df.iterrows():
+            nm = str(row.get("name") or "").strip()
+            targets = by_name.get(nm) or []
+            if not targets:
+                continue
+            amount = _em_num(row.get("amount"))
+            if amount is not None:
+                amount = amount * 10000.0  # 申万成交额按万元
+            pct = _em_num(row.get("pct_change"))
+            total_mv = _em_num(row.get("total_mv"))
+            if total_mv is not None:
+                total_mv = total_mv * 10000.0
+            rec_daily_base = {
+                "trade_date": asof,
+                "open": _em_num(row.get("open")),
+                "high": _em_num(row.get("high")),
+                "low": _em_num(row.get("low")),
+                "close": _em_num(row.get("close")),
+                "change": _em_num(row.get("change")),
+                "pct_change": pct,
+                "vol": _em_int(row.get("vol")),
+                "amount": amount,
+                "category": IDX_TYPE_INDUSTRY,
+            }
+            for ts_code, meta in targets:
+                index_rows.append(
+                    {
+                        "ts_code": ts_code,
+                        "trade_date": asof,
+                        "name": nm,
+                        "pct_change": pct,
+                        "total_mv": total_mv,
+                        "idx_type": IDX_TYPE_INDUSTRY,
+                        "industry_level": meta.get("industry_level") or "东财三级行业",
+                    }
+                )
+                daily_rows.append({"ts_code": ts_code, **rec_daily_base})
+
+        logger.info(
+            "申万行情映射东财板块 %d 行 · %s（源 %d）",
+            len(index_rows),
+            asof.isoformat() if hasattr(asof, "isoformat") else asof,
+            len(df),
+        )
+        return {
+            "trade_date": asof,
+            "index": pd.DataFrame(index_rows),
+            "daily": pd.DataFrame(daily_rows),
+        }
+
     # ─── 一次完整同步 ─────────────────────────────────
 
     def sync_day(
@@ -366,36 +722,112 @@ class SectorDataFetcher:
         self.ensure_tables()
         meta = self.resolve_asof(trade_date)
         ymd = meta["ymd"]
-        result: Dict[str, Any] = {"ok": True, "session": meta, "counts": {}, "errors": {}}
+        result: Dict[str, Any] = {"ok": True, "session": meta, "counts": {}, "errors": {}, "source": "datahubco"}
+
+        idx = pd.DataFrame()
+        daily = pd.DataFrame()
+        mf = pd.DataFrame()
 
         try:
             idx = self.fetch_dc_index(ymd)
+        except Exception as e:
+            result["errors"]["index"] = str(e)
+            if self._api_unavailable(e):
+                self._dc_dead = True
+            logger.warning("dc_index 不可用: %s", e)
+
+        if not self._dc_dead:
+            try:
+                daily = self.fetch_dc_daily(ymd)
+            except Exception as e:
+                result["errors"]["daily"] = str(e)
+                if self._api_unavailable(e):
+                    self._dc_dead = True
+                logger.warning("dc_daily 不可用: %s", e)
+            try:
+                mf = self.fetch_moneyflow(ymd)
+            except Exception as e:
+                result["errors"]["moneyflow"] = str(e)
+                if self._api_unavailable(e):
+                    self._dc_dead = True
+                logger.warning("moneyflow_ind_dc 不可用: %s", e)
+
+        if idx.empty or daily.empty:
+            try:
+                em = self.fetch_eastmoney_industry(ymd)
+                if not em["index"].empty:
+                    result["source"] = "eastmoney"
+                    use_date: date = em["trade_date"]
+                    meta = {
+                        **meta,
+                        "asof": use_date.isoformat(),
+                        "asof_date": use_date,
+                        "ymd": use_date.strftime("%Y%m%d"),
+                        "reason": f"{meta.get('reason')}|eastmoney_clist",
+                    }
+                    result["session"] = meta
+                    idx = em["index"]
+                    daily = em["daily"]
+                    if mf.empty:
+                        mf = em["moneyflow"]
+            except Exception as e:
+                logger.warning("东财 clist 暂不可用: %s", e)
+                result["errors"]["eastmoney"] = str(e)
+
+        if idx.empty or daily.empty:
+            try:
+                sw = self.fetch_sw_overlay(ymd)
+                if not sw["index"].empty:
+                    result["source"] = "sw_daily"
+                    use_date = sw["trade_date"]
+                    if not isinstance(use_date, date):
+                        use_date = datetime.strptime(str(use_date)[:10], "%Y-%m-%d").date()
+                    meta = {
+                        **meta,
+                        "asof": use_date.isoformat(),
+                        "asof_date": use_date,
+                        "ymd": use_date.strftime("%Y%m%d"),
+                        "reason": f"{meta.get('reason')}|sw_daily_name_overlay",
+                    }
+                    result["session"] = meta
+                    idx = sw["index"]
+                    daily = sw["daily"]
+            except Exception as e:
+                logger.error("申万行业映射失败: %s", e)
+                result["errors"]["sw_daily"] = str(e)
+
+        try:
             n = self.upsert_index(idx)
             result["counts"]["sector_dc_index_daily"] = n
-            logger.info("sector_dc_index_daily upsert %d · %s", n, ymd)
+            logger.info("sector_dc_index_daily upsert %d · %s · %s", n, meta.get("ymd"), result["source"])
         except Exception as e:
-            logger.error("dc_index 同步失败: %s", e)
-            result["errors"]["index"] = str(e)
+            logger.error("dc_index 写入失败: %s", e)
+            result["errors"]["index_upsert"] = str(e)
 
         try:
-            daily = self.fetch_dc_daily(ymd)
             n = self.upsert_daily(daily)
             result["counts"]["sector_dc_daily"] = n
+            amt_n = int(daily["amount"].fillna(0).gt(0).sum()) if (not daily.empty and "amount" in daily.columns) else 0
+            logger.info("sector_dc_daily upsert %d · amount>0 %d · %s", n, amt_n, meta.get("ymd"))
         except Exception as e:
-            logger.error("dc_daily 同步失败: %s", e)
-            result["errors"]["daily"] = str(e)
+            logger.error("dc_daily 写入失败: %s", e)
+            result["errors"]["daily_upsert"] = str(e)
 
         try:
-            mf = self.fetch_moneyflow(ymd)
             n = self.upsert_moneyflow(mf)
             result["counts"]["sector_moneyflow_daily"] = n
         except Exception as e:
-            logger.error("moneyflow 同步失败: %s", e)
-            result["errors"]["moneyflow"] = str(e)
+            logger.error("moneyflow 写入失败: %s", e)
+            result["errors"]["moneyflow_upsert"] = str(e)
 
-        # 成分股：指定代码，或取一级行业前 N 个
         codes: List[str] = list(fetch_members_for or [])
-        if not codes and "sector_dc_index_daily" in result["counts"]:
+        if getattr(self, "_dc_dead", False):
+            result["counts"]["sector_dc_member"] = 0
+            result["member_sectors"] = []
+            result["ok"] = bool(result["counts"].get("sector_dc_index_daily") or result["counts"].get("sector_dc_daily"))
+            return result
+
+        if not codes and result["counts"].get("sector_dc_index_daily"):
             try:
                 with self.engine.connect() as conn:
                     rows = conn.execute(
@@ -421,15 +853,16 @@ class SectorDataFetcher:
         for code in codes:
             try:
                 mdf = self.fetch_members(code, ymd)
-                # 仅保留 asof 当日
                 if not mdf.empty and "trade_date" in mdf.columns:
                     mdf = mdf.loc[mdf["trade_date"] == meta["asof_date"]]
                 member_n += self.upsert_members(mdf)
             except Exception as e:
                 logger.warning("成分 %s 失败: %s", code, e)
+                if self._api_unavailable(e):
+                    self._dc_dead = True
+                    break
         result["counts"]["sector_dc_member"] = member_n
         result["member_sectors"] = codes
-        # 主表至少写入一类即视为成功
         result["ok"] = bool(result["counts"].get("sector_dc_index_daily") or result["counts"].get("sector_dc_daily"))
         return result
 

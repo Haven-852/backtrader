@@ -55,7 +55,13 @@ class DatahubcoClient:
             "X-Request-Id": f"backtrader-{api}",
         }
         resp = requests.get(url, headers=headers, params=clean, timeout=self.timeout)
-        resp.raise_for_status()
+        if not resp.ok:
+            try:
+                payload = resp.json()
+                msg = payload.get("msg") or resp.text[:300]
+            except Exception:
+                msg = (resp.text or "")[:300]
+            raise RuntimeError(f"Datahubco {api} HTTP {resp.status_code}: {msg}")
         payload = resp.json()
         code = payload.get("code")
         if code not in (0, "0", None):

@@ -16,11 +16,42 @@ interface Account {
 
 interface Position {
   ts_code: string
+  name?: string
   quantity: number
+  sellable_qty?: number
+  frozen_qty?: number
   avg_cost: number
-  market_price?: number
-  market_value?: number
-  unrealized_pnl?: number
+  market_price?: number | null
+  market_value?: number | null
+  unrealized_pnl?: number | null
+  cost_amount?: number
+  pnl_pct?: number | null
+  weight?: number | null
+  pnl_ready?: boolean
+  quote_source?: string
+  quote_clock?: string
+  quote_time?: string
+  quote_trade_date?: string
+  quote_error?: string
+}
+
+interface JournalEvent {
+  id: number
+  event_type: string
+  trigger_source?: string
+  trigger_label?: string
+  ts_code?: string
+  stock_name?: string
+  title?: string
+  detail?: string
+  observation?: Record<string, any>
+  llm_woken?: boolean
+  llm_wake_index?: number
+  llm_model?: string
+  action?: string
+  quantity?: number
+  price?: number
+  created_at?: string
 }
 
 interface Message {
@@ -39,6 +70,12 @@ const orders = ref<any[]>([])
 const fills = ref<any[]>([])
 const decisions = ref<any[]>([])
 const loadingPanel = ref(false)
+const journalDate = ref(todayISO())
+const journalEvents = ref<JournalEvent[]>([])
+const journalSummary = ref('')
+const journalWakeCount = ref(0)
+const journalFillCount = ref(0)
+const journalTriggers = ref<Record<string, number>>({})
 
 const messages = ref<Message[]>([])
 const inputMessage = ref('')
@@ -56,6 +93,9 @@ const cycleActions = ref<any[]>([])
 const cycleMsg = ref('')
 const schedulerOn = ref(false)
 const schedulerStatus = ref('')
+const markComplete = ref(true)
+const markNote = ref('')
+const sessionPhase = ref('')
 
 const quickModels = [
   { id: 'deepseek-chat', name: 'DeepSeek' },
@@ -67,6 +107,14 @@ const currentAccountLabel = computed(() => {
   if (!account.value) return '未选择账户'
   return `#${account.value.id} ${account.value.name}`
 })
+
+function todayISO() {
+  const d = new Date()
+  const y = d.getFullYear()
+  const m = String(d.getMonth() + 1).padStart(2, '0')
+  const day = String(d.getDate()).padStart(2, '0')
+  return `${y}-${m}-${day}`
+}
 
 function fmtMoney(v: any) {
   const n = Number(v)
@@ -86,6 +134,41 @@ function formatContent(text: string): string {
     .replace(/\*\*(.*?)\*\*/g, '<strong class="text-emerald-400">$1</strong>')
     .replace(/`([^`]+)`/g, '<code class="bg-zinc-700 px-1 py-0.5 rounded text-xs text-emerald-300">$1</code>')
     .replace(/\n/g, '<br>')
+}
+
+function pnlClass(v: any) {
+  const n = Number(v)
+  if (!Number.isFinite(n) || n === 0) return 'text-zinc-400'
+  return n > 0 ? 'text-emerald-400' : 'text-red-400'
+}
+
+function fmtSigned(v: any) {
+  const n = Number(v)
+  if (!Number.isFinite(n)) return '-'
+  const s = n.toLocaleString('zh-CN', { maximumFractionDigits: 2 })
+  return n > 0 ? `+${s}` : s
+}
+
+function formatClock(ts?: string) {
+  if (!ts) return ''
+  const d = new Date(ts)
+  if (Number.isNaN(d.getTime())) return String(ts).slice(11, 19) || String(ts)
+  return d.toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit', second: '2-digit' })
+}
+
+function obsLine(e: JournalEvent) {
+  const o = e.observation || {}
+  const bits: string[] = []
+  if (o.clock) bits.push(`时间 ${o.clock}`)
+  if (o.price != null && o.price !== '') bits.push(`现价 ${o.price}`)
+  if (o.bias) bits.push(`初判 ${o.bias}`)
+  if (o.session_high != null) bits.push(`截至高 ${o.session_high}`)
+  if (o.session_low != null) bits.push(`截至低 ${o.session_low}`)
+  if (o.ma5 != null) bits.push(`MA5 ${o.ma5}`)
+  if (o.algorithm) bits.push(`算法 ${o.algorithm}`)
+  if (o.user_query) bits.push(`指令 ${o.user_query}`)
+  if (o.tool_rounds) bits.push(`工具 ${o.tool_rounds} 轮`)
+  return bits.join(' · ')
 }
 
 function formatTime(date?: Date | string) {
@@ -111,23 +194,37 @@ async function refreshAccountPanel() {
     orders.value = []
     fills.value = []
     decisions.value = []
+    journalEvents.value = []
+    journalSummary.value = ''
+    journalWakeCount.value = 0
+    journalFillCount.value = 0
+    journalTriggers.value = {}
     return
   }
   loadingPanel.value = true
   try {
-    const [a, o, f, d, s] = await Promise.all([
+    const [a, o, f, d, s, j] = await Promise.all([
       axios.get(`/paper/accounts/${accountId.value}`),
       axios.get(`/paper/accounts/${accountId.value}/orders`, { params: { limit: 30 } }),
       axios.get(`/paper/accounts/${accountId.value}/fills`, { params: { limit: 30 } }),
       axios.get(`/paper/accounts/${accountId.value}/decisions`, { params: { limit: 30 } }),
       axios.get(`/paper/accounts/${accountId.value}/stats`),
+      axios.get(`/paper/accounts/${accountId.value}/journal`, { params: { trade_date: journalDate.value } }),
     ])
     account.value = a.data.account
-    positions.value = a.data.positions || []
+    positions.value = j.data.positions?.length ? j.data.positions : (a.data.positions || [])
+    markComplete.value = a.data.intraday_complete !== false
+    markNote.value = a.data.note || ''
+    sessionPhase.value = a.data.session_phase || ''
     orders.value = o.data.orders || []
     fills.value = f.data.fills || []
     decisions.value = d.data.decisions || []
     stats.value = s.data.stats || null
+    journalEvents.value = j.data.events || []
+    journalSummary.value = j.data.summary || ''
+    journalWakeCount.value = j.data.llm_wake_count || 0
+    journalFillCount.value = j.data.fill_count || 0
+    journalTriggers.value = j.data.trigger_counts || {}
   } catch (e: any) {
     console.warn('刷新账户失败', e)
   } finally {
@@ -203,7 +300,7 @@ async function toggleScheduler() {
     })
     schedulerOn.value = !!res.data.running
     schedulerStatus.value = res.data.running
-      ? `已开启：每晚 ${res.data.evening} 选股，交易日 ${res.data.open} 日课`
+      ? `已开启：每晚 ${res.data.evening} 选股，交易日盘中每 ${res.data.t_scan_minutes || 5} 分钟做T`
       : '已关闭'
     pushSystem(schedulerStatus.value)
   } catch (e: any) {
@@ -232,22 +329,25 @@ async function runCycle(step: string) {
   cycleMsg.value = `运行 ${step}…`
   try {
     let res
-    const body = {
+    const body: Record<string, any> = {
       account_id: accountId.value,
       use_llm: cycleUseLlm.value,
     }
+    if (step === 'run-trading-day') body.trigger_source = 'manual_daily_lesson'
+    if (step === 'daily-t0' || step === 'open-decide') body.trigger_source = 'manual_price_scan'
+    if (step === 'afternoon-exposure') body.trigger_source = 'user_button'
     if (step === 'evening-screen') {
-      res = await axios.post('/paper/cycle/evening-screen', { fill: false, limit: 200 })
-      cycleMsg.value = `晚间选股完成：A/B 共 ${res.data.count || 0} 只入 watchlist`
+      res = await axios.post('/paper/cycle/evening-screen', { fill: true, limit: 200 })
+      cycleMsg.value = `晚间选股完成：${res.data.asof || ''} · A/B 共 ${res.data.count || 0} 只入 watchlist`
     } else if (step === 'open-decide') {
       res = await axios.post('/paper/cycle/open-decide', body)
-      cycleMsg.value = `开市决策：${(res.data.actions || []).length} 条动作`
+      cycleMsg.value = `日切并扫描：${res.data.asof || ''} · ${(res.data.actions || []).length} 条`
     } else if (step === 'risk-check') {
       res = await axios.post('/paper/cycle/risk-check', body)
       cycleMsg.value = `风控：${(res.data.actions || []).length} 条清仓动作`
     } else if (step === 'daily-t0') {
       res = await axios.post('/paper/cycle/daily-t0', body)
-      cycleMsg.value = `日度做T：${(res.data.actions || []).length} 条`
+      cycleMsg.value = `分时做T：${res.data.asof || ''} · ${(res.data.actions || []).length} 条`
     } else if (step === 'weekly-review') {
       res = await axios.post('/paper/cycle/weekly-review', { ...body, auto_apply: true })
       const s = res.data.summary || {}
@@ -255,6 +355,12 @@ async function runCycle(step: string) {
     } else if (step === 'run-trading-day') {
       res = await axios.post('/paper/cycle/run-trading-day', body)
       cycleMsg.value = `日课完成 ${res.data.asof || ''}`
+    } else if (step === 'afternoon-exposure') {
+      res = await axios.post('/paper/cycle/afternoon-exposure', body)
+      const prob = res.data.portfolio_probability
+      const cap = Math.round((res.data.exposure_cap || 0) * 100)
+      const ptxt = prob == null ? '无持仓' : `${Math.round(prob * 100)}%`
+      cycleMsg.value = `13:00仓位：明日上涨概率 ${ptxt}，总仓位上限 ${cap}%`
     }
     pushSystem(cycleMsg.value)
     await refreshAccountPanel()
@@ -284,8 +390,14 @@ async function settleNow() {
 async function markNow() {
   if (!accountId.value) return
   try {
-    await axios.post(`/paper/accounts/${accountId.value}/mark`, { write_equity: true })
-    pushSystem('已盯市并写入净值快照')
+    const res = await axios.post(`/paper/accounts/${accountId.value}/mark`, { write_equity: true })
+    const src = res.data.mark_source === 'intraday' ? '分时末价' : '盯市'
+    const miss = (res.data.missing_quotes || []).length
+    pushSystem(
+      miss
+        ? `${src}已更新；${miss} 只暂无分时，盈亏未计（未用日线估算）`
+        : `已按${src}盯市` + (res.data.asof ? ` · ${res.data.asof}` : '')
+    )
     await refreshAccountPanel()
   } catch (e: any) {
     pushSystem(`盯市失败: ${e?.response?.data?.detail || e.message}`)
@@ -376,6 +488,10 @@ watch(accountId, async (id) => {
   }
 })
 
+watch(journalDate, async () => {
+  if (accountId.value) await refreshAccountPanel()
+})
+
 onMounted(async () => {
   try {
     await loadAccounts()
@@ -420,6 +536,9 @@ onMounted(async () => {
         >
           <div class="text-zinc-200 font-medium truncate pr-5">#{{ a.id }} {{ a.name }}</div>
           <div class="text-zinc-500 mt-0.5 tabular-nums">净值 {{ fmtMoney(a.equity) }}</div>
+          <div v-if="accountId === a.id" class="text-[10px] text-emerald-400/80 mt-0.5">
+            持仓 {{ positions.length }} · 今日唤醒 {{ journalWakeCount }}
+          </div>
           <button
             @click.stop="deleteAccount(a.id)"
             class="absolute top-1.5 right-1.5 opacity-0 group-hover:opacity-100 text-zinc-600 hover:text-red-400 p-1"
@@ -433,7 +552,11 @@ onMounted(async () => {
 
       <div class="border-t border-zinc-800 p-3 space-y-2 text-xs">
         <div class="flex justify-between text-zinc-400"><span>现金</span><span class="tabular-nums text-zinc-200">{{ fmtMoney(account?.cash) }}</span></div>
-        <div class="flex justify-between text-zinc-400"><span>净值</span><span class="tabular-nums text-emerald-300">{{ fmtMoney(account?.equity) }}</span></div>
+        <div class="flex justify-between text-zinc-400">
+          <span>{{ sessionPhase === 'live' ? '盘中净值' : '分时净值' }}</span>
+          <span class="tabular-nums text-emerald-300">{{ fmtMoney(account?.equity) }}</span>
+        </div>
+        <div v-if="!markComplete" class="text-[10px] text-amber-400/90 leading-snug">{{ markNote || '部分持仓暂无分时，盈亏未计' }}</div>
         <div class="flex justify-between text-zinc-400"><span>收益</span><span class="tabular-nums" :class="(stats?.total_return || 0) >= 0 ? 'text-emerald-400' : 'text-red-400'">{{ fmtPct(stats?.total_return) }}</span></div>
         <div class="flex gap-1.5 pt-1">
           <button @click="settleNow" :disabled="!accountId" class="flex-1 px-2 py-1.5 rounded-md bg-zinc-800 hover:bg-zinc-700 disabled:opacity-40">结算</button>
@@ -456,16 +579,17 @@ onMounted(async () => {
             @click="toggleScheduler"
             :class="schedulerOn ? 'bg-amber-700/80 hover:bg-amber-600' : 'bg-blue-700/70 hover:bg-blue-600'"
             class="w-full px-2 py-1 rounded-md text-[10px] disabled:opacity-40"
-          >{{ schedulerOn ? '关闭定时（21:00 / 09:30）' : '开启定时（21:00选股 · 09:30日课）' }}</button>
+          >{{ schedulerOn ? '关闭定时（21:00 / 盘中做T）' : '开启定时（21:00选股 · 盘中每5分钟做T）' }}</button>
           <div v-if="schedulerStatus" class="text-[10px] text-zinc-500 leading-snug">{{ schedulerStatus }}</div>
           <button :disabled="cycleBusy" @click="runCycle('evening-screen')" class="w-full px-2 py-1 rounded-md bg-zinc-800 hover:bg-zinc-700 text-[10px] disabled:opacity-40">① 晚间选股 A/B Top5</button>
-          <button :disabled="cycleBusy || !accountId" @click="runCycle('run-trading-day')" class="w-full px-2 py-1 rounded-md bg-emerald-700/70 hover:bg-emerald-600 text-[10px] disabled:opacity-40">② 一键日课（开市+风控+做T）</button>
+          <button :disabled="cycleBusy || !accountId" @click="runCycle('run-trading-day')" class="w-full px-2 py-1 rounded-md bg-emerald-700/70 hover:bg-emerald-600 text-[10px] disabled:opacity-40">② 一键日课（日切+风控+当前分时做T）</button>
           <div class="grid grid-cols-2 gap-1">
-            <button :disabled="cycleBusy || !accountId" @click="runCycle('open-decide')" class="px-1.5 py-1 rounded-md bg-zinc-800 hover:bg-zinc-700 text-[10px] disabled:opacity-40">开市决策</button>
+            <button :disabled="cycleBusy || !accountId" @click="runCycle('open-decide')" class="px-1.5 py-1 rounded-md bg-zinc-800 hover:bg-zinc-700 text-[10px] disabled:opacity-40">日切+扫一次</button>
             <button :disabled="cycleBusy || !accountId" @click="runCycle('risk-check')" class="px-1.5 py-1 rounded-md bg-zinc-800 hover:bg-zinc-700 text-[10px] disabled:opacity-40">回撤清仓</button>
-            <button :disabled="cycleBusy || !accountId" @click="runCycle('daily-t0')" class="px-1.5 py-1 rounded-md bg-zinc-800 hover:bg-zinc-700 text-[10px] disabled:opacity-40">日度做T</button>
+            <button :disabled="cycleBusy || !accountId" @click="runCycle('daily-t0')" class="px-1.5 py-1 rounded-md bg-zinc-800 hover:bg-zinc-700 text-[10px] disabled:opacity-40">扫一次分时做T</button>
             <button :disabled="cycleBusy || !accountId" @click="runCycle('weekly-review')" class="px-1.5 py-1 rounded-md bg-zinc-800 hover:bg-zinc-700 text-[10px] disabled:opacity-40">周复盘</button>
           </div>
+          <button :disabled="cycleBusy || !accountId" @click="runCycle('afternoon-exposure')" class="w-full px-2 py-1 rounded-md bg-zinc-800 hover:bg-zinc-700 text-[10px] disabled:opacity-40">13:00仓位（概率&gt;60%满仓，否则留20%现金）</button>
           <div v-if="cycleMsg" class="text-[10px] text-zinc-500 leading-snug">{{ cycleMsg }}</div>
         </div>
       </div>
@@ -543,23 +667,65 @@ onMounted(async () => {
       </div>
     </div>
 
-    <!-- Right: Audit -->
-    <div class="w-80 flex-shrink-0 flex flex-col border-l border-zinc-800 bg-zinc-900/40 overflow-hidden">
-      <div class="px-3 py-2.5 border-b border-zinc-800 text-xs font-semibold text-zinc-300">持仓 · 成交 · 决策审计</div>
+    <!-- Right: Positions + journal -->
+    <div class="w-[22rem] flex-shrink-0 flex flex-col border-l border-zinc-800 bg-zinc-900/40 overflow-hidden">
+      <div class="px-3 py-2.5 border-b border-zinc-800 text-xs font-semibold text-zinc-300">持仓 · 当日日志</div>
       <div class="flex-1 overflow-auto p-3 space-y-4 text-xs">
         <section>
-          <div class="text-zinc-500 mb-1.5">持仓 ({{ positions.length }})</div>
+          <div class="text-zinc-500 mb-1.5 flex items-center justify-between">
+            <span>持仓 ({{ positions.length }})</span>
+            <span v-if="account" class="text-[10px] text-zinc-600">点击左侧账户查看</span>
+          </div>
           <div v-if="!positions.length" class="text-zinc-600">空仓</div>
           <div v-for="p in positions" :key="p.ts_code" class="bg-zinc-950/50 border border-zinc-800 rounded-lg px-2.5 py-2 mb-1.5">
-            <div class="flex justify-between"><span class="text-zinc-200 font-mono">{{ p.ts_code }}</span><span class="tabular-nums">{{ p.quantity }} 股</span></div>
-            <div class="text-zinc-500 mt-0.5 flex justify-between gap-2 text-[10px]">
-              <span>可卖 {{ p.sellable_qty ?? '-' }}</span>
-              <span>冻结 {{ p.frozen_qty ?? 0 }}</span>
+            <div class="flex justify-between items-baseline gap-2">
+              <div class="min-w-0">
+                <div class="text-zinc-100 font-medium truncate">{{ p.name || '—' }}</div>
+                <div class="font-mono text-[10px] text-zinc-500">{{ p.ts_code }}</div>
+              </div>
+              <div class="text-right shrink-0">
+                <div class="tabular-nums text-zinc-200">{{ p.quantity }} 股</div>
+                <div class="text-[10px] tabular-nums" :class="p.pnl_ready === false ? 'text-zinc-600' : pnlClass(p.unrealized_pnl)">
+                  {{ p.pnl_ready === false ? '盈亏未计' : fmtSigned(p.unrealized_pnl) }}
+                </div>
+              </div>
             </div>
-            <div class="text-zinc-500 mt-0.5 flex justify-between">
+            <div class="mt-1.5 grid grid-cols-2 gap-x-2 gap-y-0.5 text-[10px] text-zinc-500">
               <span>成本 {{ fmtMoney(p.avg_cost) }}</span>
-              <span :class="(p.unrealized_pnl || 0) >= 0 ? 'text-emerald-400' : 'text-red-400'">{{ fmtMoney(p.unrealized_pnl) }}</span>
+              <span class="text-right">{{ p.pnl_ready === false ? '暂无分时' : `分时 ${fmtMoney(p.market_price)}` }}</span>
+              <span>市值 {{ p.pnl_ready === false ? '-' : fmtMoney(p.market_value) }}</span>
+              <span class="text-right" :class="p.pnl_ready === false ? 'text-zinc-600' : pnlClass(p.pnl_pct)">
+                {{ p.pnl_ready === false ? (p.quote_error || '盈亏未计') : `盈亏 ${fmtPct(p.pnl_pct)}` }}
+              </span>
+              <span>可卖 {{ p.sellable_qty ?? '-' }}</span>
+              <span class="text-right">{{ p.quote_clock ? `分时 ${p.quote_clock}` : (p.weight != null ? `仓位 ${fmtPct(p.weight)}` : '-') }}</span>
             </div>
+          </div>
+        </section>
+
+        <section>
+          <div class="flex items-center justify-between text-zinc-500 mb-1.5 gap-2">
+            <span>当日操作</span>
+            <input v-model="journalDate" type="date" class="bg-zinc-900 border border-zinc-700 rounded px-1 py-0.5 text-[10px] text-zinc-300 outline-none" />
+          </div>
+          <div class="text-[10px] text-zinc-500 mb-1.5 leading-snug">
+            {{ journalSummary || '当日尚无操作' }}
+            <span v-if="journalWakeCount"> · 模型唤醒 {{ journalWakeCount }} 次</span>
+          </div>
+          <div v-if="!journalEvents.length" class="text-zinc-600">跑日课、盘中扫描或对话交易后会写在这里</div>
+          <div v-for="e in journalEvents.slice(0, 40)" :key="e.id" class="bg-zinc-950/40 border border-zinc-800 rounded-lg px-2.5 py-2 mb-1.5">
+            <div class="flex justify-between gap-2 items-start">
+              <div class="text-zinc-200 leading-snug">{{ e.title || e.event_type }}</div>
+              <span class="text-[10px] text-zinc-600 tabular-nums shrink-0">{{ formatClock(e.created_at) }}</span>
+            </div>
+            <div class="mt-0.5 flex flex-wrap gap-1 text-[10px]">
+              <span v-if="e.trigger_label" class="px-1 rounded bg-zinc-800 text-amber-300/90">{{ e.trigger_label }}</span>
+              <span v-if="e.llm_woken" class="px-1 rounded bg-emerald-900/50 text-emerald-300">第 {{ e.llm_wake_index || '-' }} 次唤醒</span>
+              <span v-if="e.ts_code" class="font-mono text-zinc-400">{{ e.stock_name ? e.stock_name + ' ' : '' }}{{ e.ts_code }}</span>
+              <span v-if="e.action" class="text-zinc-400">{{ e.action }}</span>
+            </div>
+            <div v-if="obsLine(e)" class="text-zinc-500 mt-1 leading-snug">观察：{{ obsLine(e) }}</div>
+            <div v-else-if="e.detail" class="text-zinc-500 mt-1 leading-snug line-clamp-3">{{ e.detail }}</div>
           </div>
         </section>
 

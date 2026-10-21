@@ -1,0 +1,49 @@
+2026-09-30 15:30:51,898 [INFO] server.chat_service: ChatService 已初始化，可用提供商: ['deepseek', 'ollama']
+2026-09-30 15:30:52,306 [INFO] collector.tushare: TushareCollector v1.0 就绪 — 已配置 8 组 Token: basic, mins, financial, flow, index, fund, news, report
+INFO:     Started server process [34632]
+INFO:     Waiting for application startup.
+2026-09-30 15:30:52,639 [INFO] main: ============================================================
+2026-09-30 15:30:52,639 [INFO] main: \U0001f680 AIquant Backtrader Agent Platform v3.0 启动中...
+2026-09-30 15:30:52,639 [INFO] main: 架构: web (Vue3) → routers → server → data_layer
+2026-09-30 15:30:52,639 [INFO] main: ============================================================
+2026-09-30 15:30:52,658 [INFO] data_layer.storage.manager: PostgreSQL 异步管理器初始化完成: postgresql+asyncpg://quant:backtrader123://***
+2026-09-30 15:30:52,658 [INFO] main: PostgreSQL 市场数据管理器 (pg_manager) 初始化成功
+2026-09-30 15:30:52,694 [INFO] data_layer.storage.conversation_repo: agent_chat_session / agent_chat_message 表已就绪
+2026-09-30 15:30:52,695 [INFO] main: Agent 对话表 (agent_chat_*) 已就绪
+2026-09-30 15:30:52,695 [INFO] main: 已注册路由: /, /health, /agents, /chat/*, /models/*, /dash/* (含 etf-board), /storage/*, /skills/*, /market/*
+2026-09-30 15:30:52,695 [INFO] main: 可用模型: 8 个 (3 个已配置)
+2026-09-30 15:30:52,695 [INFO] main: 可用提供商: ['deepseek', 'ollama']
+2026-09-30 15:30:52,695 [INFO] main: ============================================================
+2026-09-30 15:30:52,695 [INFO] main: 自选股持续日更循环已启动
+2026-09-30 15:30:52,704 [INFO] data_layer.db_manager: PostgreSQL 连接池初始化成功 (TimescaleDB 已启用)
+2026-09-30 15:30:52,739 [INFO] main: 纸面交易定时器已按配置自动启动
+2026-09-30 15:30:52,739 [INFO] server.paper_scheduler: 纸面交易定时器已启动（Asia/Shanghai）
+INFO:     Application startup complete.
+INFO:     Uvicorn running on http://127.0.0.1:8010 (Press CTRL+C to quit)
+2026-09-30 15:30:57,644 [INFO] data_layer.db_manager: InfluxDB 客户端初始化成功 url=http://127.0.0.1:8086
+2026-09-30 15:30:57,705 [INFO] data_layer.db_manager: Redis 客户端初始化成功
+2026-09-30 15:30:57,825 [INFO] data_layer.db_manager: MinIO 客户端初始化成功
+2026-09-30 15:31:07,746 [INFO] collector.datahubco: DatahubcoClient 就绪 · base=http://datahubco.com/app-api/openapi/v1/tushare
+2026-09-30 15:31:07,763 [INFO] server.selective_data_service: 非交易时段，暂停自选持续同步（after_close_include_today · asof=2026-09-30）
+2026-09-30 15:49:10,132 [INFO] collector.datahubco: DatahubcoClient 就绪 · base=http://datahubco.com/app-api/openapi/v1/tushare
+2026-09-30 15:49:10,611 [INFO] server.paper_quote: 分时报价 9 只，成功 9
+2026-09-30 15:49:10,978 [WARNING] collector.datahubco.sectors: dc_index 不可用: Datahubco dc_index HTTP 400: unknown api_name: dc_index
+2026-09-30 15:49:11,275 [INFO] server.paper_quote: 分时报价 9 只，成功 9
+2026-09-30 15:49:11,997 [INFO] server.paper_quote: 分时报价 9 只，成功 9
+2026-09-30 15:49:13,022 [WARNING] collector.datahubco.sectors: dc_index 不可用: Datahubco dc_index HTTP 400: unknown api_name: dc_index
+2026-09-30 15:49:13,294 [WARNING] collector.datahubco.sectors: 东财 clist 暂不可用: 东财行业 clist 失败: 东财请求失败 https://82.push2.eastmoney.com/api/qt/clist/get: ('Connection aborted.', RemoteDisconnected('Remote end closed connection without response'))
+2026-09-30 15:49:13,544 [INFO] server.paper_quote: 分时报价 9 只，成功 9
+2026-09-30 15:49:14,088 [INFO] server.paper_quote: 分时报价 9 只，成功 9
+2026-09-30 15:49:14,374 [INFO] collector.datahubco: sw_daily 拉取 0 行 · source=upstream
+2026-09-30 15:49:14,380 [INFO] collector.datahubco.sectors: sector_dc_index_daily upsert 0 · 20260930 · datahubco
+2026-09-30 15:49:14,381 [INFO] collector.datahubco.sectors: sector_dc_daily upsert 0 · amount>0 0 · 20260930
+2026-09-30 15:49:14,415 [WARNING] server.sector_service: 板块 asof=2026-09-30 暂无指数数据，回退到库内 2026-09-29
+2026-09-30 15:49:14,704 [INFO] server.paper_quote: 分时报价 9 只，成功 9
+2026-09-30 15:49:15,388 [WARNING] collector.datahubco.sectors: 东财 clist 暂不可用: 东财行业 clist 失败: 东财请求失败 https://82.push2.eastmoney.com/api/qt/clist/get: ('Connection aborted.', RemoteDisconnected('Remote end closed connection without response'))
+2026-09-30 15:49:15,435 [INFO] server.paper_quote: 分时报价 9 只，成功 9
+2026-09-30 15:49:16,030 [INFO] server.paper_quote: 分时报价 9 只，成功 9
+2026-09-30 15:49:16,511 [INFO] collector.datahubco: sw_daily 拉取 0 行 · source=upstream
+2026-09-30 15:49:16,519 [INFO] collector.datahubco.sectors: sector_dc_index_daily upsert 0 · 20260930 · datahubco
+2026-09-30 15:49:16,521 [INFO] collector.datahubco.sectors: sector_dc_daily upsert 0 · amount>0 0 · 20260930
+2026-09-30 15:49:16,546 [WARNING] server.sector_service: 板块 asof=2026-09-30 暂无指数数据，回退到库内 2026-09-29
+2026-09-30 15:49:16,697 [INFO] server.paper_quote: 分时报价 9 只，成功 9

@@ -288,6 +288,8 @@ class ToolAgentService:
                     # 保存完整结果摘要供 order_id 提取（place-order）
                     if isinstance(result, dict) and tool_id == "place-order" and result.get("order"):
                         step["order_id"] = (result.get("order") or {}).get("id")
+                    if isinstance(result, dict) and result.get("memory_draft"):
+                        step["memory_draft"] = result["memory_draft"]
                     step["result_preview"] = _truncate_result(result, 800)
                     tool_trace.append(step)
 

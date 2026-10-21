@@ -2,10 +2,12 @@
 纸面交易定时器（进程内常驻）
 
 - 交易日前一晚 21:00：A/B Top5 选股入 watchlist
-- 交易日 09:30：对绑定账户跑一键日课（开市决策 + 风控 + 日度做T）
+- 交易日 09:30：对绑定账户跑一键日课（T+1 日切 + 风控 + 一次分时做T）
+- 交易日 13:00：判断持仓明天上涨概率，大于 60% 满仓，否则留出 20% 现金
+- 交易日 09:30–11:30、13:00–15:00：每 5 分钟对 watchlist 再扫一次分时做T
 - 交易日周五 15:10：周复盘（可关）
 
-依赖后端进程一直运行。同一日历日每个步骤只跑一次。
+依赖后端进程一直运行。晚间选股、开市日课、周复盘每个日历日只跑一次；盘中做T每个 5 分钟格子跑一次。
 """
 
 from __future__ import annotations
@@ -57,7 +59,12 @@ class PaperScheduler:
             "last_evening": cfg.get("scheduler_last_evening"),
             "last_open": cfg.get("scheduler_last_open"),
             "last_weekly": cfg.get("scheduler_last_weekly"),
-            "note": "后端进程需保持运行；休市日自动跳过。",
+            "last_intraday": cfg.get("scheduler_last_intraday"),
+            "last_exposure": cfg.get("scheduler_last_exposure"),
+            "exposure_cap": cfg.get("exposure_cap"),
+            "exposure_prob": cfg.get("exposure_prob"),
+            "t_scan_minutes": int(cfg.get("t_scan_minutes") or 5),
+            "note": "后端进程需保持运行。交易日盘中每 5 分钟对 watchlist 做一次分时做T。",
         }
 
     def is_trading_day(self, d: date) -> bool:
@@ -146,6 +153,28 @@ class PaperScheduler:
             return False
         return self.is_trading_day(today)
 
+    def session_bucket(self, now: datetime, minutes: int = 5) -> Optional[str]:
+        """交易时段内，把当前时间收成 N 分钟一格。非交易时段返回空。"""
+        if not self.is_trading_day(now.date()):
+            return None
+        step = max(1, int(minutes or 5))
+        hm = now.hour * 60 + now.minute
+        morning = 9 * 60 + 30 <= hm <= 11 * 60 + 30
+        afternoon = 13 * 60 <= hm <= 15 * 60
+        if not (morning or afternoon):
+            return None
+        floored = (now.minute // step) * step
+        return f"{now.date().isoformat()}T{now.hour:02d}:{floored:02d}"
+
+    def should_exposure(self, now: datetime, cfg: Dict[str, Any]) -> bool:
+        """13:00 之后、收盘前，每个交易日只判一次仓位。"""
+        if str(cfg.get("scheduler_last_exposure") or "")[:10] == now.date().isoformat():
+            return False
+        if not self.is_trading_day(now.date()):
+            return False
+        hm = now.hour * 60 + now.minute
+        return 13 * 60 <= hm < 15 * 60
+
     async def _tick(self) -> None:
         cfg = paper_cycle_service.get_config().get("config") or {}
         if not cfg.get("scheduler_enabled"):
@@ -155,15 +184,21 @@ class PaperScheduler:
 
         if self.should_evening(now, cfg):
             logger.info("定时器：晚间选股 %s", now.date())
-            result = await asyncio.to_thread(paper_cycle_service.evening_screen, None, fill=False, limit=200)
+            # fill=True：确保「当天」日线齐，按当日收盘条件选 A/B
+            result = await asyncio.to_thread(paper_cycle_service.evening_screen, None, fill=True, limit=200)
             paper_cycle_service.update_config({"scheduler_last_evening": now.date().isoformat()})
-            logger.info("晚间选股完成 ok=%s count=%s", result.get("ok"), result.get("count"))
+            logger.info(
+                "晚间选股完成 ok=%s asof=%s count=%s",
+                result.get("ok"),
+                result.get("asof"),
+                result.get("count"),
+            )
             if not result.get("ok"):
                 self.last_error = str(result.get("error"))
         elif self._missed_evening(now, cfg):
             yday = (now.date() - timedelta(days=1)).isoformat()
             logger.info("定时器：补跑昨晚选股（标记 %s）", yday)
-            result = await asyncio.to_thread(paper_cycle_service.evening_screen, None, fill=False, limit=200)
+            result = await asyncio.to_thread(paper_cycle_service.evening_screen, None, fill=True, limit=200)
             paper_cycle_service.update_config({"scheduler_last_evening": yday})
             if not result.get("ok"):
                 self.last_error = str(result.get("error"))
@@ -179,9 +214,49 @@ class PaperScheduler:
                 paper_cycle_service.update_config({"scheduler_last_open": now.date().isoformat()})
             else:
                 logger.info("定时器：开市日课 account=%s llm=%s", aid, use_llm)
-                result = await paper_cycle_service.run_trading_day(int(aid), use_llm=use_llm)
-                paper_cycle_service.update_config({"scheduler_last_open": now.date().isoformat()})
+                result = await paper_cycle_service.run_trading_day(
+                    int(aid), use_llm=use_llm, trigger_source="scheduler_daily_lesson"
+                )
+                bucket = self.session_bucket(now, int(cfg.get("t_scan_minutes") or 5))
+                paper_cycle_service.update_config({
+                    "scheduler_last_open": now.date().isoformat(),
+                    "scheduler_last_intraday": bucket or now.strftime("%Y-%m-%dT%H:%M"),
+                })
                 logger.info("日课完成 ok=%s", result.get("ok"))
+
+        cfg = paper_cycle_service.get_config().get("config") or {}
+        aid = cfg.get("scheduler_account_id")
+        if self.should_exposure(now, cfg) and aid:
+            logger.info("定时器：13:00 仓位 account=%s", aid)
+            result = await paper_cycle_service.afternoon_exposure(
+                int(aid),
+                use_llm=bool(cfg.get("scheduler_use_llm")),
+                trigger_source="scheduler_exposure",
+            )
+            logger.info(
+                "仓位完成 ok=%s cap=%s prob=%s",
+                result.get("ok"),
+                result.get("exposure_cap"),
+                result.get("portfolio_probability"),
+            )
+            if not result.get("ok"):
+                self.last_error = str(result.get("error"))
+
+        cfg = paper_cycle_service.get_config().get("config") or {}
+        aid = cfg.get("scheduler_account_id")
+        bucket = self.session_bucket(now, int(cfg.get("t_scan_minutes") or 5))
+        last_bucket = str(cfg.get("scheduler_last_intraday") or "")
+        if bucket and bucket != last_bucket and aid and not self.should_open(now, cfg):
+            logger.info("定时器：盘中做T %s account=%s", bucket, aid)
+            result = await paper_cycle_service.intraday_t(
+                int(aid),
+                use_llm=bool(cfg.get("scheduler_use_llm")),
+                trigger_source="price_scan",
+            )
+            paper_cycle_service.update_config({"scheduler_last_intraday": bucket})
+            logger.info("盘中做T完成 ok=%s count=%s", result.get("ok"), result.get("count"))
+            if not result.get("ok"):
+                self.last_error = str(result.get("error"))
 
         cfg = paper_cycle_service.get_config().get("config") or {}
         if self.should_weekly(now, cfg) and cfg.get("scheduler_account_id"):

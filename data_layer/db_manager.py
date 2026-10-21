@@ -46,14 +46,20 @@ class StorageManager:
         if 'influx' not in self._connections:
             try:
                 from influxdb_client import InfluxDBClient
+                url = (config.get_connection_string("influx") or "http://127.0.0.1:8086").strip()
+                # Windows 上 localhost 常解析到 ::1 导致超时，统一走 IPv4
+                if "localhost" in url.lower():
+                    url = url.replace("localhost", "127.0.0.1").replace("LOCALHOST", "127.0.0.1")
                 client = InfluxDBClient(
-                    url=config.get_connection_string("influx"),
+                    url=url,
                     token=config.influx_token or "supersecretadmin token",
                     org=config.influx_org or "quant",
-                    timeout=5_000,  # ms，避免 health 检查无限卡住
+                    timeout=10_000,  # ms
                 )
                 self._connections['influx'] = client
-                self.logger.info("InfluxDB 客户端初始化成功")
+                self._connections['influx_org'] = config.influx_org or "quant"
+                self._connections['influx_bucket'] = config.influx_bucket or "market_data"
+                self.logger.info("InfluxDB 客户端初始化成功 url=%s", url)
             except Exception as e:
                 self.logger.error(f"InfluxDB 连接失败: {e}")
                 return None

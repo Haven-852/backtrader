@@ -8,7 +8,10 @@ GET  /strategy/meta             - 数据覆盖
 POST /strategy/hypothesize      - 假设生成（后端）
 POST /strategy/backtest         - 回测（后端，真实日线）
 POST /strategy/reflect          - 反思（后端）
-POST /strategy/screener/setups - A 底部观察 / B 升势回踩选股
+POST /strategy/screener/setups - A 观察池 / B 升势回踩选股
+POST /strategy/pipeline/cycle   - 观察池→自选50→起飞推荐→衰竭出池
+GET  /strategy/pipeline/observe - 观察池列表
+GET  /strategy/pipeline/recommend - 推荐池列表
 """
 
 from fastapi import APIRouter, HTTPException, Query
@@ -193,14 +196,20 @@ async def reflect(body: ReflectRequest):
 
 
 class SetupScreenerRequest(BaseModel):
-    asof: Optional[str] = Field(None, description="交易日 YYYY-MM-DD，默认上一已收盘交易日")
+    asof: Optional[str] = Field(
+        None,
+        description="交易日 YYYY-MM-DD；默认=当天会话已收盘日（收盘后即今日，开盘前/非交易日为上一交易日）",
+    )
     include_st: bool = False
     include_main: bool = True
     include_star: bool = True
     include_chinext: bool = True
     include_bse: bool = False
     include_cdr: bool = False
-    include_a: bool = Field(True, description="A 类：沿MA5下滑止跌，观察随后1-2周反弹（下跌越短涨得越短）")
+    include_a: bool = Field(
+        True,
+        description="A 类观察池：大跌后缩量筑底、靠近20日低点、MA5走平（只观察，等起飞）",
+    )
     include_b: bool = Field(True, description="B 类：升势回踩 MA5（反转候选）")
     limit: int = Field(60, ge=10, le=1000)
     fill: bool = Field(True, description="窗口日线不足时自动从 Datahubco 按交易日拉全日线写入 stock_daily")
@@ -208,7 +217,7 @@ class SetupScreenerRequest(BaseModel):
 
 @router.get("/screener/asof")
 async def screener_asof():
-    """选股默认交易日（上一已收盘日）"""
+    """选股默认交易日：跟随当天会话（收盘后=今日，否则=上一已收盘日）"""
     try:
         from data_layer.collectors.datahubco.selective import selective_fetcher
 
@@ -227,8 +236,8 @@ async def screener_asof():
 @router.post("/screener/setups")
 async def screener_setups(body: SetupScreenerRequest):
     """
-    用最近 15 日日线判断前一交易日状态：
-    A 沿MA5下滑止跌后的反弹起点（观察，下跌越短预期上涨越短）、B 升势回踩 MA5（推荐）。放量下跌抛弃。
+    用日线判断 asof（默认当天已收盘日）是否满足：
+    A 观察池（缩量筑底转弯）、B 升势回踩 MA5。放量下跌抛弃。
     窗口覆盖不足时默认从 Datahubco 按交易日拉取全日线。
     """
     try:
@@ -255,3 +264,127 @@ async def screener_setups(body: SetupScreenerRequest):
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"选股失败: {e}")
+
+
+class PipelineCycleRequest(BaseModel):
+    asof: Optional[str] = Field(None, description="交易日 YYYY-MM-DD；默认当天已收盘日")
+    min_score: float = Field(70.0, ge=0, le=100, description="观察池最低分数")
+    max_n: int = Field(50, ge=5, le=100, description="观察池/自选上限")
+    fill: bool = Field(True, description="日线缺口自动补齐")
+    require_sector: bool = Field(False, description="起飞必须板块共振")
+    require_top_list: bool = Field(False, description="起飞必须上龙虎榜")
+    require_flow_signal: bool = Field(
+        True, description="起飞需板块共振或龙虎榜/游资异动至少一项"
+    )
+
+
+@router.post("/pipeline/cycle")
+async def pipeline_cycle(body: PipelineCycleRequest):
+    """
+    全流程：策略A≥min_score → 观察池/自选(≤max_n) → 起飞入推荐池 → 动能衰竭出池。
+    """
+    try:
+        from server.recommend_pool_service import recommend_pool_service
+
+        result = await asyncio.to_thread(
+            recommend_pool_service.run_cycle,
+            body.asof,
+            min_score=body.min_score,
+            max_n=body.max_n,
+            fill=body.fill,
+            require_sector=body.require_sector,
+            require_top_list=body.require_top_list,
+            require_flow_signal=body.require_flow_signal,
+        )
+        if not result.get("ok"):
+            raise HTTPException(status_code=400, detail=result.get("error") or "流水线失败")
+        return result
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"流水线失败: {e}")
+
+
+@router.post("/pipeline/observe")
+async def pipeline_observe_sync(body: PipelineCycleRequest):
+    """仅同步观察池：A≥min_score 写入观察池并同步看板自选(source=observe_a)。"""
+    try:
+        from server.recommend_pool_service import recommend_pool_service
+
+        result = await asyncio.to_thread(
+            recommend_pool_service.sync_observe_from_screener,
+            body.asof,
+            min_score=body.min_score,
+            max_n=body.max_n,
+            fill=body.fill,
+            sync_dash=True,
+        )
+        if not result.get("ok"):
+            raise HTTPException(status_code=400, detail=result.get("error") or "观察池同步失败")
+        return result
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"观察池同步失败: {e}")
+
+
+@router.post("/pipeline/takeoff")
+async def pipeline_takeoff(body: PipelineCycleRequest):
+    """对观察池扫描起飞，写入推荐池。"""
+    try:
+        from server.recommend_pool_service import recommend_pool_service
+
+        result = await asyncio.to_thread(
+            recommend_pool_service.scan_takeoff,
+            body.asof,
+            require_sector=body.require_sector,
+            require_top_list=body.require_top_list,
+            require_flow_signal=body.require_flow_signal,
+        )
+        if not result.get("ok"):
+            raise HTTPException(status_code=400, detail=result.get("error") or "起飞扫描失败")
+        return result
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"起飞扫描失败: {e}")
+
+
+@router.post("/pipeline/exhaust")
+async def pipeline_exhaust(asof: Optional[str] = Query(None, description="交易日 YYYY-MM-DD")):
+    """推荐池动能衰竭扫描，命中则 status=exhausted 移出。"""
+    try:
+        from server.recommend_pool_service import recommend_pool_service
+
+        result = await asyncio.to_thread(recommend_pool_service.scan_exhaustion, asof)
+        if not result.get("ok"):
+            raise HTTPException(status_code=400, detail=result.get("error") or "衰竭扫描失败")
+        return result
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"衰竭扫描失败: {e}")
+
+
+@router.get("/pipeline/observe")
+async def pipeline_observe_list(active_only: bool = Query(True)):
+    """观察池列表。"""
+    try:
+        from server.recommend_pool_service import recommend_pool_service
+
+        return await asyncio.to_thread(recommend_pool_service.list_observe_pool, active_only)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/pipeline/recommend")
+async def pipeline_recommend_list(
+    status: str = Query("active", description="active / exhausted / all"),
+):
+    """推荐池列表（行情看板「推荐池」数据源）。"""
+    try:
+        from server.recommend_pool_service import recommend_pool_service
+
+        return await asyncio.to_thread(recommend_pool_service.list_recommend_pool, status)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))

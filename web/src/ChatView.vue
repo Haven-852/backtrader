@@ -92,6 +92,24 @@
                   </details>
                 </div>
               </div>
+              <div v-if="draftsOf(msg).length" class="mt-2 space-y-2">
+                <div
+                  v-for="(draft, di) in draftsOf(msg)"
+                  :key="di"
+                  class="bg-zinc-900/80 border border-sky-500/30 rounded-lg px-3 py-2"
+                >
+                  <div class="text-[11px] text-sky-300">知识库-市场记忆-今日 · {{ draft.trade_date }} · {{ draft.regime?.label || '未判断' }}</div>
+                  <div class="text-xs text-zinc-300 mt-1 whitespace-pre-wrap">{{ draft.summary?.text }}</div>
+                  <button
+                    type="button"
+                    class="mt-2 px-2.5 py-1 text-[11px] rounded-lg bg-emerald-700 hover:bg-emerald-600 disabled:opacity-50"
+                    :disabled="fillState[fillKey(i, di)] === 'saving' || fillState[fillKey(i, di)] === 'done'"
+                    @click="fillMemory(draft, i, di)"
+                  >
+                    {{ fillLabel(i, di) }}
+                  </button>
+                </div>
+              </div>
               <div v-if="msg.data" class="mt-2">
                 <div v-if="msg.dataType === 'tables'" class="bg-zinc-900 rounded-xl overflow-hidden border border-zinc-700">
                   <table class="w-full text-xs">
@@ -395,6 +413,7 @@ const activeSkill = ref<Skill | null>(null)
 const selectedTool = ref<Tool | null>(null)
 const toolInputs = reactive<Record<string, string>>({})
 const skillExecuting = ref(false)
+const fillState = ref<Record<string, string>>({})
 const showHandbook = ref(false)
 const handbookContent = ref('')
 const handbookPath = ref('')
@@ -413,6 +432,38 @@ const quickModels = [
 function fmt(val: any) {
   if (val === null || val === undefined) return 'NULL'
   return String(val)
+}
+
+function draftsOf(msg: Message) {
+  const out: any[] = []
+  for (const step of msg.toolTrace || []) {
+    if (step?.memory_draft) out.push(step.memory_draft)
+  }
+  if (!out.length && msg.data?.memory_draft) out.push(msg.data.memory_draft)
+  return out
+}
+
+function fillKey(msgIndex: number, draftIndex: number) {
+  return `${msgIndex}-${draftIndex}`
+}
+
+function fillLabel(msgIndex: number, draftIndex: number) {
+  const state = fillState.value[fillKey(msgIndex, draftIndex)]
+  if (state === 'saving') return '写入中…'
+  if (state === 'done') return '已填入市场记忆'
+  if (state === 'error') return '写入失败，再试一次'
+  return '填入市场记忆'
+}
+
+async function fillMemory(draft: any, msgIndex: number, draftIndex: number) {
+  const key = fillKey(msgIndex, draftIndex)
+  fillState.value = { ...fillState.value, [key]: 'saving' }
+  try {
+    await axios.post('/kb/memory', draft)
+    fillState.value = { ...fillState.value, [key]: 'done' }
+  } catch (e) {
+    fillState.value = { ...fillState.value, [key]: 'error' }
+  }
 }
 
 function addMessage(role: string, content: string, skillName?: string, data?: any, dataType?: string, toolTrace?: any[]) {
@@ -684,6 +735,17 @@ async function executeTool() {
         addMessage('system', text, toolName)
         await persistSystemMessage(text, toolName)
       }
+    } else if (toolId === 'today') {
+      const text = data.preview || data.error || '已生成今日市场记忆草稿'
+      const trace = data.memory_draft ? [{
+        skill_id: skillId,
+        tool_id: toolId,
+        function: 'kb_market__today',
+        result_ok: data.ok !== false,
+        memory_draft: data.memory_draft,
+      }] : []
+      addMessage('system', text, toolName, data, 'market-memory', trace)
+      await persistSystemMessage(text, toolName, data, 'market-memory')
     } else if (toolId === 'query-nl') {
       const text = data.error || data.suggestion || '查询完成'
       addMessage('system', text, toolName)

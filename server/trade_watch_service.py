@@ -138,7 +138,7 @@ class TradeWatchService:
     ) -> Dict[str, Any]:
         """
         从 screener 命中 + dash 自选 生成当日盯盘名单。
-        默认总数上限 15，优先 B（升势回踩）再 A（底部观察）再自选。
+        默认总数上限 15，优先 B（升势回踩）再 A（观察池）再自选。
         """
         self._ensure()
         asof_d = _to_date(asof) or self._latest_trade_date() or date.today()
@@ -227,7 +227,7 @@ class TradeWatchService:
                 "dash": include_dash,
             },
             "hint": (
-                "优先 B 升势回踩，其次 A 底部观察，再次自选；"
+                "优先 B 升势回踩，其次 A 观察池，再次自选；"
                 "建议总数 3～15。后续可用命中→收益反馈改进阈值。"
             ),
         }

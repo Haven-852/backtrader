@@ -128,18 +128,19 @@
       <!-- ===== 自选股侧栏（可折叠，同花顺风格） ===== -->
       <aside
         class="relative flex-shrink-0 border-r border-zinc-800 bg-zinc-900/90 flex flex-col min-h-[68vh] transition-[width] duration-300 ease-out overflow-hidden"
-        :style="{ width: watchlistOpen ? '200px' : '28px' }"
+        :style="{ width: watchlistOpen ? '220px' : '28px' }"
       >
         <!-- 折叠态：竖条触发 -->
         <button
           v-if="!watchlistOpen"
           @click="watchlistOpen = true"
           class="h-full w-full flex flex-col items-center justify-start pt-3 gap-2 hover:bg-zinc-800/80 transition-colors"
-          title="展开自选股"
+          title="展开自选股 / 推荐池"
         >
           <i class="fa-solid fa-star text-amber-400 text-xs"></i>
-          <span class="text-[11px] text-zinc-300 writing-vertical tracking-widest">自选股</span>
+          <span class="text-[11px] text-zinc-300 writing-vertical tracking-widest">自选/推荐</span>
           <span class="text-[10px] text-zinc-600 tabular-nums">{{ watchlist.length }}</span>
+          <span class="text-[10px] text-rose-500/80 tabular-nums">{{ recommendPool.length }}</span>
           <i class="fa-solid fa-chevron-right text-[10px] text-zinc-500 mt-2"></i>
         </button>
 
@@ -161,12 +162,12 @@
           </div>
 
           <div class="flex-1 overflow-y-auto scrollbar-thin">
-            <div v-if="!watchlist.length" class="px-3 py-8 text-center text-[11px] text-zinc-500 leading-relaxed">
+            <div v-if="!watchlist.length" class="px-3 py-6 text-center text-[11px] text-zinc-500 leading-relaxed">
               暂无自选<br/>右键股票名称<br/>「添加到自选股」
             </div>
             <div
               v-for="item in watchlist"
-              :key="item.ts_code"
+              :key="'w-' + item.ts_code"
               @click="selectWatchlistItem(item)"
               @contextmenu.prevent="openCtxMenu($event, item, true)"
               :class="[
@@ -201,6 +202,52 @@
                 {{ item.kind === 'index' ? '指数' : item.kind === 'etf' ? 'ETF' : '股票' }}
               </div>
             </div>
+
+            <!-- 推荐池 -->
+            <div class="sticky top-0 z-10 flex items-center justify-between px-2.5 py-2 border-y border-rose-900/40 bg-rose-950/30 mt-1">
+              <div class="flex items-center gap-1.5 min-w-0">
+                <i class="fa-solid fa-rocket text-rose-400 text-xs"></i>
+                <span class="text-xs font-semibold text-rose-200">推荐池</span>
+                <span class="text-[10px] text-rose-400/70 tabular-nums">{{ recommendPool.length }}</span>
+              </div>
+              <button
+                type="button"
+                class="text-[10px] text-rose-300/80 hover:text-rose-200 px-1"
+                title="刷新推荐池"
+                @click.stop="loadRecommendPool"
+              >
+                <i class="fa-solid fa-rotate" :class="{ 'animate-spin': recommendLoading }"></i>
+              </button>
+            </div>
+            <div v-if="recommendError" class="px-2.5 py-2 text-[10px] text-red-400">{{ recommendError }}</div>
+            <div v-else-if="!recommendPool.length" class="px-3 py-5 text-center text-[11px] text-zinc-500 leading-relaxed">
+              暂无起飞标的<br/>跑策略流水线后出现
+            </div>
+            <div
+              v-for="item in recommendPool"
+              :key="'r-' + item.ts_code"
+              @click="selectRecommendItem(item)"
+              :class="[
+                'px-2.5 py-2 border-b border-zinc-800/70 cursor-pointer transition-colors',
+                currentTsCode === item.ts_code ? 'bg-rose-950/40' : 'hover:bg-rose-950/20'
+              ]"
+            >
+              <div class="flex items-start justify-between gap-1">
+                <div class="min-w-0">
+                  <div class="text-xs text-zinc-100 truncate font-medium">{{ item.name || item.ts_code }}</div>
+                  <div class="text-[10px] text-zinc-500 font-mono truncate">{{ item.ts_code }}</div>
+                  <div class="mt-0.5 text-[9px] text-rose-300/80 truncate" :title="item.takeoff_reason">
+                    {{ item.sector_l2_name || item.sector_l3_name || '起飞' }}
+                    <span v-if="item.score != null" class="text-zinc-500"> · {{ Number(item.score).toFixed(0) }}分</span>
+                  </div>
+                  <div class="flex flex-wrap gap-1 mt-1">
+                    <span v-if="item.sector_resonance" class="text-[8px] px-1 rounded bg-emerald-500/15 text-emerald-400">共振</span>
+                    <span v-if="item.top_list_hit" class="text-[8px] px-1 rounded bg-amber-500/15 text-amber-400">龙虎榜</span>
+                    <span v-if="item.vol_ratio" class="text-[8px] px-1 rounded bg-zinc-800 text-zinc-400">量×{{ Number(item.vol_ratio).toFixed(1) }}</span>
+                  </div>
+                </div>
+              </div>
+            </div>
           </div>
         </template>
       </aside>
@@ -218,7 +265,7 @@
           >
             <i class="fa-solid fa-arrow-left mr-1"></i>返回选股结果
           </button>
-          <span class="text-emerald-500/80">来自「底部观察 / 升势回踩」选股，搜索结果仍保留</span>
+          <span class="text-emerald-500/80">来自「观察池 / 升势回踩」选股，搜索结果仍保留</span>
         </div>
         <!-- 标题栏 -->
         <div
@@ -701,6 +748,9 @@ function loadWatchlistFromStorage(): any[] {
 
 const watchlist = ref<any[]>(loadWatchlistFromStorage())
 const watchlistOpen = ref(localStorage.getItem(WATCHLIST_OPEN_KEY) !== '0')
+const recommendPool = ref<any[]>([])
+const recommendLoading = ref(false)
+const recommendError = ref('')
 
 const SEARCH_BARS = 30
 const EXTEND_CAL_DAYS = 90
@@ -883,6 +933,35 @@ async function hydrateWatchlist() {
   } catch (e) {
     console.warn('同步自选名单失败', e)
   }
+}
+
+async function loadRecommendPool() {
+  recommendLoading.value = true
+  recommendError.value = ''
+  try {
+    const res = await fetch('/strategy/pipeline/recommend?status=active')
+    const data = await res.json().catch(() => ({}))
+    if (!res.ok) {
+      recommendError.value = data.detail || `HTTP ${res.status}`
+      recommendPool.value = []
+      return
+    }
+    recommendPool.value = data.items || []
+  } catch (e: any) {
+    recommendError.value = e?.message || String(e)
+    recommendPool.value = []
+  } finally {
+    recommendLoading.value = false
+  }
+}
+
+function selectRecommendItem(item: any) {
+  if (!item?.ts_code) return
+  selectStock({
+    ts_code: item.ts_code,
+    name: item.name || item.ts_code,
+    industry: item.sector_l2_name || item.sector_l3_name || '推荐池',
+  }, { fromWatchlist: true })
 }
 
 async function addToWatchlist(item: any) {
@@ -2948,6 +3027,7 @@ onMounted(() => {
   setupAfterCloseCatchup()
   loadSectorBoard()
   hydrateWatchlist()
+  loadRecommendPool()
   resizeHandler = () => handleResize()
   window.addEventListener('resize', resizeHandler)
   document.addEventListener('click', onGlobalClick)

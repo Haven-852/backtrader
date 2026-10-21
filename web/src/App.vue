@@ -12,7 +12,7 @@
         </div>
       </div>
 
-      <div class="p-3 flex-1 space-y-1">
+      <div class="p-3 flex-1 space-y-1 overflow-y-auto">
         <!-- 大模型对话 -->
         <div
           @click="currentTab = 0"
@@ -90,6 +90,20 @@
             <div class="text-xs text-zinc-500">纸面账户 · 交易 Agent</div>
           </div>
         </div>
+
+        <!-- 知识库 -->
+        <div
+          @click="currentTab = 6"
+          :class="{ 'bg-zinc-800 text-white': currentTab === 6, 'text-zinc-400 hover:text-white hover:bg-zinc-800/50': currentTab !== 6 }"
+          class="flex items-center gap-3 px-4 py-3 rounded-xl cursor-pointer transition-all"
+        >
+          <i class="fa-solid fa-book-open w-5 text-center"></i>
+          <div>
+            <div class="font-medium text-sm">知识库</div>
+            <div class="text-xs text-zinc-500">复盘 · 规则 · 经验</div>
+          </div>
+        </div>
+
       </div>
 
       <div class="p-5 border-t border-zinc-800 text-xs text-zinc-600">
@@ -237,11 +251,10 @@
                 <div v-for="t in filteredItems" :key="t.name" @click="selectItem(t)"
                   :class="['group cursor-pointer rounded-lg p-3 border transition-all', selectedItem?.name === t.name ? 'bg-blue-600/20 border-blue-500/50' : 'bg-zinc-900/50 border-transparent hover:border-zinc-700 hover:bg-zinc-900']">
                   <div class="flex items-center justify-between mb-0.5">
-                    <span class="text-sm font-medium truncate">{{ t.label }}</span>
+                    <span class="text-sm font-medium truncate" :title="t.name">{{ t.label || t.name }}</span>
                     <span v-if="t.has_data" class="text-xs text-emerald-500 flex-shrink-0 ml-2"><i class="fa-solid fa-circle text-[6px]"></i> 有数据</span>
                     <span v-else class="text-xs text-zinc-600 flex-shrink-0 ml-2">空</span>
                   </div>
-                  <div class="text-xs text-zinc-500 font-mono mb-1 truncate">{{ t.name }}</div>
                   <div class="text-xs text-zinc-600 line-clamp-1 leading-relaxed">{{ t.desc }}</div>
                   <div class="flex items-center justify-between mt-1.5">
                     <span class="text-xs text-zinc-700">{{ t.category }}</span>
@@ -269,9 +282,9 @@
                 <div class="flex-shrink-0 px-5 py-4 border-b border-zinc-800">
                   <div class="flex items-center justify-between mb-2">
                     <div>
-                      <h3 class="text-lg font-bold">{{ previewData.label || previewData.name }}</h3>
+                      <h3 class="text-lg font-bold">{{ previewData.label || previewData.info?.name || previewData.name }}</h3>
                       <div class="flex items-center gap-3 mt-1">
-                        <span class="text-xs text-zinc-500 font-mono">{{ previewData.name }}</span>
+                        <span class="text-xs text-zinc-500">{{ previewData.info?.category || previewData.info?.source || '' }}</span>
                         <span class="text-xs px-2 py-0.5 rounded bg-zinc-800 text-zinc-400">{{ activeBackend }}</span>
                       </div>
                     </div>
@@ -339,6 +352,11 @@
         <div v-show="currentTab === 5" class="flex-1 min-h-0 overflow-hidden">
           <PaperTradeView />
         </div>
+
+        <!-- Knowledge Tab -->
+        <div v-show="currentTab === 6" class="flex-1 min-h-0 overflow-hidden">
+          <KnowledgeView />
+        </div>
       </div>
     </div>
   </div>
@@ -352,10 +370,11 @@ import DashView from './DashView.vue'
 import MarketDashView from './MarketDashView.vue'
 import StrategyView from './StrategyView.vue'
 import PaperTradeView from './PaperTradeView.vue'
+import KnowledgeView from './KnowledgeView.vue'
 import { currentTab } from './appNav'
 
-const tabTitles = ['大模型对话', '行情看板', '存储层状态', '行情中心', '策略分析', '模拟交易']
-const tabSubtitles = ['DeepSeek · GPT · Claude', 'K线 · MA · MACD · RSI', '连通测试 · 数据预览', '全市场 · 30张表', '模式A/B · 回测 · 记忆', '纸面账户 · 感知决策执行']
+const tabTitles = ['大模型对话', '行情看板', '存储层状态', '行情中心', '策略分析', '模拟交易', '知识库']
+const tabSubtitles = ['DeepSeek · GPT · Claude', 'K线 · MA · MACD · RSI', '连通测试 · 数据预览', '全市场 · 30张表', '模式A/B · 回测 · 记忆', '纸面账户 · 感知决策执行', '今日认知 · 交易复盘']
 
 const testModels = [
   { id: 'deepseek-chat', name: 'DeepSeek Chat', provider: 'deepseek' },

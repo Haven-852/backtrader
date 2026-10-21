@@ -31,6 +31,10 @@ async def execute_tool(skill_id: str, tool_id: str, payload: Dict[str, Any] | No
     if skill_id == "paper-trade":
         return await _exec_paper_trade(tool_id, payload)
 
+    if skill_id == "kb-market" and tool_id == "today":
+        from tools.kb_market_toolkit import kb_market_toolkit
+        return kb_market_toolkit.build_today(payload.get("trade_date"))
+
     # QuantSkills 外部包
     from tools.quantskill_runtime import PACKAGE_DIRS, execute_quantskill
     if skill_id in PACKAGE_DIRS:
@@ -75,6 +79,13 @@ async def _exec_paper_trade(tool_id: str, payload: Dict[str, Any]) -> Dict[str, 
         if payload.get("account_id") is None:
             return {"ok": False, "error": "缺少参数 account_id"}
         return await paper_toolkit.list_positions(int(payload["account_id"]))
+    if tool_id == "get-journal":
+        if payload.get("account_id") is None:
+            return {"ok": False, "error": "缺少参数 account_id"}
+        return await paper_toolkit.get_journal(
+            int(payload["account_id"]),
+            trade_date=payload.get("trade_date"),
+        )
     if tool_id == "get-market-brief":
         ts_code = payload.get("ts_code") or ""
         if not ts_code:
@@ -83,6 +94,13 @@ async def _exec_paper_trade(tool_id: str, payload: Dict[str, Any]) -> Dict[str, 
             ts_code=str(ts_code),
             limit=int(payload.get("limit") or 120),
             features=payload.get("features"),
+        )
+    if tool_id == "get-intraday-quotes":
+        return await paper_toolkit.get_intraday_quotes(
+            ts_code=payload.get("ts_code"),
+            ts_codes=payload.get("ts_codes"),
+            account_id=int(payload["account_id"]) if payload.get("account_id") is not None else None,
+            trade_date=payload.get("trade_date"),
         )
     if tool_id == "place-order":
         for k in ("account_id", "ts_code", "side", "quantity"):
@@ -309,6 +327,45 @@ async def _exec_datahubco(toolkit, tool_id: str, payload: Dict[str, Any]) -> Dic
             write_back=bool(write_back),
             limit=int(payload.get("limit") or 500),
             return_removed=bool(return_removed),
+        )
+
+    if tool_id == "get-fund-data":
+        dataset = payload.get("dataset") or ""
+        if not dataset:
+            return {"ok": False, "error": "缺少参数 dataset"}
+        write_back = payload.get("write_back")
+        if write_back is None:
+            write_back = True
+        return await toolkit.get_fund_data_async(
+            dataset=str(dataset),
+            ts_code=payload.get("ts_code"),
+            start_date=payload.get("start_date"),
+            end_date=payload.get("end_date"),
+            trade_date=payload.get("trade_date"),
+            period=payload.get("period"),
+            source=str(payload.get("source") or "auto"),
+            write_back=bool(write_back),
+            limit=int(payload.get("limit") or 500),
+            content_type=str(payload.get("content_type") or "行业"),
+        )
+
+    if tool_id == "get-stock-sector-moneyflow":
+        ts_code = payload.get("ts_code") or ""
+        if not ts_code:
+            return {"ok": False, "error": "缺少参数 ts_code"}
+        write_back = payload.get("write_back")
+        if write_back is None:
+            write_back = True
+        levels = payload.get("levels")
+        if isinstance(levels, str):
+            levels = [x.strip() for x in levels.replace("，", ",").split(",") if x.strip()]
+        return await toolkit.get_stock_sector_moneyflow_async(
+            ts_code=str(ts_code),
+            trade_date=payload.get("trade_date"),
+            levels=levels,
+            source=str(payload.get("source") or "auto"),
+            write_back=bool(write_back),
+            limit=int(payload.get("limit") or 50),
         )
 
     return {"ok": False, "error": f"未知工具: {tool_id}"}

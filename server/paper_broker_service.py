@@ -4,8 +4,10 @@ Paper Broker Service - 纸面账户 / 模拟交易
 向量撮合语义（对齐 strategy_cycle_service）：
 - lookback_guard=True  → exec_price_mode=next_open：信号日收盘下单，次日开盘成交
 - lookback_guard=False → exec_price_mode=same_close：信号日收盘价立即成交（存在前视）
+- exec_price 有值 → exec_price_mode=intraday：按给出的分钟价立即成交
+- 佣金万二、最低 5 元；卖出另收印花税万五
 
-能力：开户、查仓、下单、结算 pending、按收盘盯市、成交统计
+能力：开户、查仓、下单、结算 pending、按分时末价盯市（缺分时不计盘中盈亏）、成交统计
 """
 
 from __future__ import annotations
@@ -51,6 +53,9 @@ PAPER_DDL = [
         market_price    NUMERIC(16,4),
         market_value    NUMERIC(20,4),
         unrealized_pnl  NUMERIC(20,4),
+        quote_source    VARCHAR(16),
+        quote_time      TIMESTAMPTZ,
+        quote_trade_date DATE,
         updated_at      TIMESTAMPTZ   DEFAULT NOW(),
         PRIMARY KEY (account_id, ts_code)
     )
@@ -87,6 +92,7 @@ PAPER_DDL = [
         price           NUMERIC(16,4) NOT NULL,
         amount          NUMERIC(20,4) NOT NULL,
         commission      NUMERIC(16,4) DEFAULT 0,
+        stamp_tax       NUMERIC(16,4) DEFAULT 0,
         trade_date      DATE          NOT NULL,
         created_at      TIMESTAMPTZ   DEFAULT NOW()
     )
@@ -118,10 +124,30 @@ PAPER_DDL = [
     """,
 ]
 
+# A 股纸面费用：佣金万二、最低 5 元；卖出另收印花税万五。无滑点。
+COMMISSION_RATE = 0.0002
+COMMISSION_MIN = 5.0
+STAMP_TAX_RATE = 0.0005
+
+
+def calc_trade_fees(side: str, amount: float) -> Tuple[float, float]:
+    """返回 (佣金, 印花税)。买入印花税为 0。"""
+    amt = max(float(amount or 0), 0.0)
+    if amt <= 0:
+        return 0.0, 0.0
+    commission = max(round(amt * COMMISSION_RATE, 4), COMMISSION_MIN)
+    stamp = round(amt * STAMP_TAX_RATE, 4) if (side or "").lower() == "sell" else 0.0
+    return commission, stamp
+
+
 PAPER_MIGRATE_DDL = [
     "ALTER TABLE paper_account ADD COLUMN IF NOT EXISTS t1_asof DATE",
+    "ALTER TABLE paper_fill ADD COLUMN IF NOT EXISTS stamp_tax NUMERIC(16,4) DEFAULT 0",
     "ALTER TABLE paper_position ADD COLUMN IF NOT EXISTS sellable_qty NUMERIC(20,4) NOT NULL DEFAULT 0",
     "ALTER TABLE paper_position ADD COLUMN IF NOT EXISTS frozen_qty NUMERIC(20,4) NOT NULL DEFAULT 0",
+    "ALTER TABLE paper_position ADD COLUMN IF NOT EXISTS quote_source VARCHAR(16)",
+    "ALTER TABLE paper_position ADD COLUMN IF NOT EXISTS quote_time TIMESTAMPTZ",
+    "ALTER TABLE paper_position ADD COLUMN IF NOT EXISTS quote_trade_date DATE",
     # 兼容旧数据：若可卖+冻结为 0 但有持仓，视为全部可卖（历史仓）
     """
     UPDATE paper_position
@@ -522,38 +548,148 @@ class PaperBrokerService:
             acct = _row_to_dict(row)
             positions = self._list_positions_conn(conn, account_id)
 
+        extra: Dict[str, Any] = {}
         if mark and positions:
             marked = self.mark_to_market(account_id, write_equity=False)
             if marked.get("ok"):
                 acct = marked.get("account") or acct
                 positions = marked.get("positions") or positions
+                extra = {
+                    "mark_source": marked.get("mark_source"),
+                    "session_phase": marked.get("session_phase"),
+                    "intraday_complete": marked.get("intraday_complete"),
+                    "missing_quotes": marked.get("missing_quotes") or [],
+                    "note": marked.get("note"),
+                    "asof": marked.get("asof"),
+                }
 
-        return {"ok": True, "account": acct, "positions": positions}
+        equity = _f((acct or {}).get("equity"))
+        positions = self._decorate_positions(positions, equity=equity)
+        return {"ok": True, "account": acct, "positions": positions, **extra}
+
+    def _stock_names_conn(self, conn, codes: List[str]) -> Dict[str, str]:
+        codes = [c for c in codes if c]
+        if not codes:
+            return {}
+        try:
+            placeholders = ",".join(f":c{i}" for i in range(len(codes)))
+            params = {f"c{i}": c for i, c in enumerate(codes)}
+            rows = conn.execute(
+                sa_text(
+                    f"SELECT ts_code, name FROM ref_stock_basic WHERE ts_code IN ({placeholders})"
+                ),
+                params,
+            ).fetchall()
+            return {str(r.ts_code): str(r.name or "") for r in rows}
+        except Exception as e:
+            logger.warning("持仓名称查询失败: %s", e)
+            return {}
+
+    def _decorate_positions(
+        self,
+        positions: List[Dict[str, Any]],
+        *,
+        equity: float = 0.0,
+        names: Optional[Dict[str, str]] = None,
+    ) -> List[Dict[str, Any]]:
+        names = names or {}
+        missing = [
+            p.get("ts_code")
+            for p in positions
+            if p.get("ts_code") and not (p.get("name") or names.get(p.get("ts_code") or ""))
+        ]
+        if missing:
+            try:
+                with self.engine.connect() as conn:
+                    names = {**self._stock_names_conn(conn, missing), **names}
+            except Exception:
+                pass
+        out: List[Dict[str, Any]] = []
+        for p in positions:
+            d = dict(p)
+            qty = _f(d.get("quantity"))
+            avg = _f(d.get("avg_cost"))
+            quoted = str(d.get("quote_source") or "") == "intraday"
+            raw_px = d.get("market_price")
+            px = _f(raw_px) if quoted and raw_px is not None else (_f(raw_px) if quoted else 0.0)
+            if not quoted:
+                d["name"] = d.get("name") or names.get(d.get("ts_code") or "", "") or ""
+                d["market_price"] = None
+                d["market_value"] = None
+                d["unrealized_pnl"] = None
+                d["cost_amount"] = round(qty * avg, 4)
+                d["pnl_pct"] = None
+                d["weight"] = None
+                d["pnl_ready"] = False
+                d["quote_clock"] = None
+                out.append(d)
+                continue
+            if d.get("market_value") is not None:
+                mv = _f(d.get("market_value"))
+            else:
+                mv = qty * px
+            if d.get("unrealized_pnl") is not None:
+                pnl = _f(d.get("unrealized_pnl"))
+            else:
+                pnl = (px - avg) * qty
+            d["name"] = d.get("name") or names.get(d.get("ts_code") or "", "") or ""
+            d["market_price"] = round(px, 4)
+            d["market_value"] = round(mv, 4)
+            d["unrealized_pnl"] = round(pnl, 4)
+            d["cost_amount"] = round(qty * avg, 4)
+            d["pnl_pct"] = round(px / avg - 1.0, 6) if avg > 0 else None
+            d["weight"] = round(mv / equity, 6) if equity and equity > 0 else None
+            d["pnl_ready"] = True
+            qt = d.get("quote_clock") or d.get("quote_time")
+            if not d.get("quote_clock"):
+                d["quote_clock"] = (
+                    str(qt)[11:16] if isinstance(qt, str) and len(str(qt)) >= 16 else None
+                )
+            out.append(d)
+        return out
 
     def _list_positions_conn(self, conn, account_id: int) -> List[Dict[str, Any]]:
-        rows = conn.execute(
-            sa_text(
-                """
-                SELECT * FROM paper_position
-                WHERE account_id = :aid AND quantity > 0
-                ORDER BY ts_code
-                """
-            ),
-            {"aid": account_id},
-        ).fetchall()
+        try:
+            rows = conn.execute(
+                sa_text(
+                    """
+                    SELECT p.*, COALESCE(b.name, '') AS name
+                    FROM paper_position p
+                    LEFT JOIN ref_stock_basic b ON b.ts_code = p.ts_code
+                    WHERE p.account_id = :aid AND p.quantity > 0
+                    ORDER BY p.ts_code
+                    """
+                ),
+                {"aid": account_id},
+            ).fetchall()
+        except Exception:
+            rows = conn.execute(
+                sa_text(
+                    """
+                    SELECT * FROM paper_position
+                    WHERE account_id = :aid AND quantity > 0
+                    ORDER BY ts_code
+                    """
+                ),
+                {"aid": account_id},
+            ).fetchall()
         return [_row_to_dict(r) for r in rows]
 
     def list_positions(self, account_id: int) -> Dict[str, Any]:
-        self._ensure_tables()
-        with self.engine.connect() as conn:
-            acct = conn.execute(
-                sa_text("SELECT id FROM paper_account WHERE id = :id"),
-                {"id": account_id},
-            ).fetchone()
-            if not acct:
-                return {"ok": False, "error": f"账户不存在: {account_id}"}
-            positions = self._list_positions_conn(conn, account_id)
-        return {"ok": True, "account_id": account_id, "count": len(positions), "positions": positions}
+        marked = self.mark_to_market(account_id, write_equity=False)
+        if not marked.get("ok"):
+            return marked
+        return {
+            "ok": True,
+            "account_id": account_id,
+            "count": len(marked.get("positions") or []),
+            "positions": marked.get("positions") or [],
+            "mark_source": marked.get("mark_source"),
+            "session_phase": marked.get("session_phase"),
+            "intraday_complete": marked.get("intraday_complete"),
+            "missing_quotes": marked.get("missing_quotes") or [],
+            "note": marked.get("note"),
+        }
 
     # ------------------------------------------------------------------ #
     # 下单
@@ -568,6 +704,7 @@ class PaperBrokerService:
         signal_date: Optional[str] = None,
         reason: Optional[str] = None,
         order_type: str = "market",
+        exec_price: Optional[float] = None,
     ) -> Dict[str, Any]:
         self._ensure_tables()
         ts_code = (ts_code or "").strip().upper()
@@ -592,9 +729,22 @@ class PaperBrokerService:
 
             guard = bool(acct_row.lookback_guard) if lookback_guard is None else bool(lookback_guard)
             exec_mode = "next_open" if guard else "same_close"
+            live_px = _f(exec_price) if exec_price is not None else None
+            if exec_price is not None and (live_px <= 0 or math.isnan(live_px)):
+                return {"ok": False, "error": f"无效分时成交价: {exec_price}"}
+            if live_px:
+                # 盘中做T：按当前分钟价立即成交，不用日线收盘，也不挂次日开盘
+                guard = False
+                exec_mode = "intraday"
 
             sig_d = _to_date(signal_date) if signal_date else None
-            if sig_d is None:
+            bar = None
+            if live_px:
+                if sig_d is None:
+                    from zoneinfo import ZoneInfo
+
+                    sig_d = datetime.now(ZoneInfo("Asia/Shanghai")).date()
+            elif sig_d is None:
                 bar = self._get_bar(conn, ts_code, mode="latest")
                 if not bar:
                     return {"ok": False, "error": f"无行情: {ts_code}，请先补日线"}
@@ -671,13 +821,14 @@ class PaperBrokerService:
             ).fetchone()
             order = _row_to_dict(order_row)
 
-            # same_close：立即撮合
+            # same_close / intraday：立即撮合。分时价优先，否则用信号日收盘价。
             if not guard:
+                fill_px = live_px if live_px else _f((bar or {}).get("close"))
                 fill_result = self._fill_order_conn(
                     conn,
                     order_id=int(order["id"]),
                     account_id=account_id,
-                    force_price=_f(bar["close"]),
+                    force_price=fill_px,
                     force_date=sig_d,
                 )
                 if not fill_result.get("ok"):
@@ -782,10 +933,11 @@ class PaperBrokerService:
 
         cash = _f(acct.cash)
         amount = qty * px
-        commission = 0.0
+        commission, stamp_tax = calc_trade_fees(side, amount)
+        fee_total = commission + stamp_tax
 
         if side == "buy":
-            cost = amount + commission
+            cost = amount + fee_total
             if cash + 1e-6 < cost:
                 return {"ok": False, "error": f"现金不足: 需要 {cost:.2f}，可用 {cash:.2f}"}
             new_cash = cash - cost
@@ -807,13 +959,13 @@ class PaperBrokerService:
                 if old_sellable <= 0 and old_frozen <= 0 and old_qty > 0:
                     old_sellable = old_qty
                 new_qty = old_qty + qty
-                avg = (old_qty * old_cost + amount) / new_qty if new_qty else px
+                avg = (old_qty * old_cost + amount + fee_total) / new_qty if new_qty else px
                 # T+1：当日买入进入冻结，不可卖
                 new_sellable = old_sellable
                 new_frozen = old_frozen + qty
             else:
                 new_qty = qty
-                avg = px
+                avg = (amount + fee_total) / qty if qty else px
                 new_sellable = 0.0
                 new_frozen = qty
             conn.execute(
@@ -872,7 +1024,7 @@ class PaperBrokerService:
                         f"总持仓 {held}，卖出请求 {qty}"
                     ),
                 }
-            new_cash = cash + amount - commission
+            new_cash = cash + amount - fee_total
             new_qty = held - qty
             new_sellable = sellable - qty
             new_frozen = frozen
@@ -919,10 +1071,10 @@ class PaperBrokerService:
                 """
                 INSERT INTO paper_fill (
                     order_id, account_id, ts_code, side, quantity,
-                    price, amount, commission, trade_date
+                    price, amount, commission, stamp_tax, trade_date
                 ) VALUES (
                     :oid, :aid, :code, :side, :qty,
-                    :px, :amt, :comm, :td
+                    :px, :amt, :comm, :stamp, :td
                 )
                 RETURNING *
                 """
@@ -936,6 +1088,7 @@ class PaperBrokerService:
                 "px": px,
                 "amt": amount,
                 "comm": commission,
+                "stamp": stamp_tax,
                 "td": trade_date,
             },
         ).fetchone()
@@ -1148,8 +1301,33 @@ class PaperBrokerService:
         asof: Optional[str] = None,
         write_equity: bool = True,
     ) -> Dict[str, Any]:
+        """用真实 1 分钟分时末价盯市。没有分时的持仓不计盘中盈亏，不用日线/成本价冒充。"""
         self._ensure_tables()
-        asof_d = _to_date(asof) if asof else None
+        from server.paper_quote import last_intraday_quotes, session_context
+
+        ctx = session_context()
+        asof_d = _to_date(asof) if asof else ctx.get("trade_date")
+        quote_asof = asof_d.isoformat() if isinstance(asof_d, date) else None
+
+        with self.engine.connect() as conn:
+            row = conn.execute(
+                sa_text("SELECT id FROM paper_account WHERE id = :id"),
+                {"id": account_id},
+            ).fetchone()
+            if not row:
+                return {"ok": False, "error": f"账户不存在: {account_id}"}
+            codes = [
+                str(p.ts_code)
+                for p in conn.execute(
+                    sa_text(
+                        "SELECT ts_code FROM paper_position "
+                        "WHERE account_id = :aid AND quantity > 0"
+                    ),
+                    {"aid": account_id},
+                ).fetchall()
+            ]
+
+        quotes = last_intraday_quotes(codes, trade_date=quote_asof) if codes else {}
 
         with self.engine.begin() as conn:
             acct = conn.execute(
@@ -1159,35 +1337,60 @@ class PaperBrokerService:
             if not acct:
                 return {"ok": False, "error": f"账户不存在: {account_id}"}
 
-            positions = conn.execute(
-                sa_text(
-                    """
-                    SELECT * FROM paper_position
-                    WHERE account_id = :aid AND quantity > 0
-                    FOR UPDATE
-                    """
-                ),
-                {"aid": account_id},
-            ).fetchall()
+            try:
+                positions = conn.execute(
+                    sa_text(
+                        """
+                        SELECT p.*, COALESCE(b.name, '') AS name
+                        FROM paper_position p
+                        LEFT JOIN ref_stock_basic b ON b.ts_code = p.ts_code
+                        WHERE p.account_id = :aid AND p.quantity > 0
+                        FOR UPDATE OF p
+                        """
+                    ),
+                    {"aid": account_id},
+                ).fetchall()
+            except Exception:
+                positions = conn.execute(
+                    sa_text(
+                        """
+                        SELECT * FROM paper_position
+                        WHERE account_id = :aid AND quantity > 0
+                        FOR UPDATE
+                        """
+                    ),
+                    {"aid": account_id},
+                ).fetchall()
 
             market_value = 0.0
             out_positions: List[Dict[str, Any]] = []
+            missing: List[str] = []
             snap_date = asof_d or date.today()
 
             for p in positions:
-                bar = self._get_bar(conn, p.ts_code, asof_d, mode="latest")
-                px = _f(bar["close"]) if bar else _f(p.market_price) or _f(p.avg_cost)
-                if bar and bar["trade_date"]:
-                    # 净值日期取持仓标的中最新可用交易日
-                    if asof_d is None or bar["trade_date"] <= (asof_d or bar["trade_date"]):
-                        if bar["trade_date"] > snap_date or asof_d is None:
-                            # 用各标的最新 bar 中较新者；有 asof 则用 asof
-                            pass
                 qty = _f(p.quantity)
                 avg = _f(p.avg_cost)
-                mv = qty * px
-                upnl = (px - avg) * qty
-                market_value += mv
+                q = quotes.get(str(p.ts_code).upper()) or {}
+                if q.get("ok") and q.get("price"):
+                    px = float(q["price"])
+                    mv = qty * px
+                    upnl = (px - avg) * qty
+                    market_value += mv
+                    q_src = "intraday"
+                    q_time = str(q.get("bar_time") or "")
+                    if len(q_time) < 16:
+                        q_time = None
+                    q_day = _to_date(q.get("trade_date")) or asof_d
+                    if q_day:
+                        snap_date = q_day
+                else:
+                    px = None
+                    mv = None
+                    upnl = None
+                    q_src = "missing"
+                    q_time = None
+                    q_day = asof_d
+                    missing.append(str(p.ts_code))
                 conn.execute(
                     sa_text(
                         """
@@ -1195,6 +1398,9 @@ class PaperBrokerService:
                             market_price = :px,
                             market_value = :mv,
                             unrealized_pnl = :upnl,
+                            quote_source = :qsrc,
+                            quote_time = CAST(:qtime AS timestamptz),
+                            quote_trade_date = :qday,
                             updated_at = NOW()
                         WHERE account_id = :aid AND ts_code = :code
                         """
@@ -1205,29 +1411,37 @@ class PaperBrokerService:
                         "px": px,
                         "mv": mv,
                         "upnl": upnl,
+                        "qsrc": q_src,
+                        "qtime": q_time,
+                        "qday": q_day,
                     },
                 )
                 out_positions.append(
                     {
                         "account_id": account_id,
                         "ts_code": p.ts_code,
+                        "name": str(getattr(p, "name", "") or ""),
                         "quantity": qty,
                         "sellable_qty": _f(getattr(p, "sellable_qty", 0)),
                         "frozen_qty": _f(getattr(p, "frozen_qty", 0)),
                         "avg_cost": avg,
                         "market_price": px,
-                        "market_value": round(mv, 4),
-                        "unrealized_pnl": round(upnl, 4),
+                        "market_value": None if mv is None else round(mv, 4),
+                        "unrealized_pnl": None if upnl is None else round(upnl, 4),
+                        "quote_source": q_src,
+                        "quote_time": q_time,
+                        "quote_trade_date": q_day.isoformat() if isinstance(q_day, date) else q_day,
+                        "quote_clock": q.get("clock") if q.get("ok") else None,
+                        "quote_error": None if q.get("ok") else (q.get("error") or "无分时"),
                     }
                 )
-                if bar and bar["trade_date"]:
-                    snap_date = bar["trade_date"] if asof_d is None else asof_d
 
             if asof_d:
                 snap_date = asof_d
 
             cash = _f(acct.cash)
             equity = cash + market_value
+            complete = not missing
             conn.execute(
                 sa_text(
                     """
@@ -1241,7 +1455,7 @@ class PaperBrokerService:
             )
 
             daily_return = None
-            if write_equity:
+            if write_equity and complete:
                 prev = conn.execute(
                     sa_text(
                         """
@@ -1291,12 +1505,21 @@ class PaperBrokerService:
         return {
             "ok": True,
             "account": acct_out,
-            "positions": out_positions,
+            "positions": self._decorate_positions(out_positions, equity=equity),
             "cash": cash,
             "market_value": round(market_value, 4),
             "equity": round(equity, 4),
             "asof": snap_date.isoformat() if isinstance(snap_date, date) else str(snap_date),
             "daily_return": None if daily_return is None else round(daily_return, 6),
+            "mark_source": "intraday",
+            "session_phase": ctx.get("phase"),
+            "intraday_complete": complete,
+            "missing_quotes": missing,
+            "note": (
+                None
+                if complete
+                else "以下持仓没有对应分时，盘中盈亏未计算（未用日线估算）：" + "、".join(missing)
+            ),
         }
 
     # ------------------------------------------------------------------ #

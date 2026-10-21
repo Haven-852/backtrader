@@ -1205,7 +1205,19 @@ class SelectiveDataFetcher:
             logger.warning("更新自选同步状态失败 %s: %s", ts_code, e)
 
     def sync_watchlist_continuous(self) -> Dict[str, Any]:
-        """对仍在自选中的股票做每日补数；已移除的不会出现在名单中。"""
+        """对仍在自选中的股票做每日补数；仅交易时段运行，已移除的不会出现在名单中。"""
+        self.ensure_trade_cal()
+        ctx = self.session_context()
+        if not ctx.get("in_trading_session"):
+            return {
+                "ok": True,
+                "skipped": True,
+                "reason": ctx.get("reason") or "not_in_session",
+                "asof": ctx.get("asof"),
+                "in_trading_session": False,
+                "count": 0,
+                "synced": [],
+            }
         items = self.watchlist_list()
         synced: List[Dict[str, Any]] = []
         skipped: List[str] = []

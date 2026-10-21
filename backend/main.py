@@ -67,6 +67,7 @@ from routers.skill_router import router as skill_router
 from routers.market_data_router import router as market_data_router
 from routers.strategy_router import router as strategy_router
 from routers.paper_router import router as paper_router
+from routers.knowledge_router import router as knowledge_router
 from routers.data_router import router as data_router
 
 app.include_router(system_router)          # /, /health, /agents
@@ -78,6 +79,7 @@ app.include_router(skill_router)           # /skills/*
 app.include_router(market_data_router)     # /market/*
 app.include_router(strategy_router)        # /strategy/*
 app.include_router(paper_router)           # /paper/*
+app.include_router(knowledge_router)       # /kb/*
 app.include_router(data_router)            # /data/selective/*, /data/continuous/*
 
 # ─── 启动日志 ─────────────────────────────────────────
