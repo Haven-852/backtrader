@@ -8,7 +8,7 @@ GET  /strategy/meta             - 数据覆盖
 POST /strategy/hypothesize      - 假设生成（后端）
 POST /strategy/backtest         - 回测（后端，真实日线）
 POST /strategy/reflect          - 反思（后端）
-POST /strategy/screener/below-ma - 前一日低于 N 日均线选股
+POST /strategy/screener/setups - A 底部观察 / B 升势回踩选股
 """
 
 from fastapi import APIRouter, HTTPException, Query
@@ -192,18 +192,18 @@ async def reflect(body: ReflectRequest):
         raise HTTPException(status_code=500, detail=f"反思失败: {e}")
 
 
-class BelowMaRequest(BaseModel):
+class SetupScreenerRequest(BaseModel):
     asof: Optional[str] = Field(None, description="交易日 YYYY-MM-DD，默认上一已收盘交易日")
-    ma_period: int = Field(5, ge=2, le=60)
-    below_pct: float = Field(0, ge=0, le=50, description="相对均线至少低多少个百分点，0 表示只要低于均线")
     include_st: bool = False
     include_main: bool = True
     include_star: bool = True
     include_chinext: bool = True
     include_bse: bool = False
     include_cdr: bool = False
-    limit: int = Field(200, ge=10, le=1000)
-    fill: bool = Field(True, description="缺口则从 Tushare 兼容源拉取并写入 stock_daily")
+    include_a: bool = Field(True, description="A 类：沿MA5下滑止跌，观察随后1-2周反弹（下跌越短涨得越短）")
+    include_b: bool = Field(True, description="B 类：升势回踩 MA5（反转候选）")
+    limit: int = Field(60, ge=10, le=1000)
+    fill: bool = Field(True, description="窗口日线不足时自动从 Datahubco 按交易日拉全日线写入 stock_daily")
 
 
 @router.get("/screener/asof")
@@ -224,26 +224,27 @@ async def screener_asof():
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@router.post("/screener/below-ma")
-async def screener_below_ma(body: BelowMaRequest):
+@router.post("/screener/setups")
+async def screener_setups(body: SetupScreenerRequest):
     """
-    搜索指定交易日（默认前一已收盘日）收盘价低于 N 日均线的股票。
-    缺口日线从 Datahubco 拉取写入 stock_daily，命中写入 strategy_screener_hit。
+    用最近 15 日日线判断前一交易日状态：
+    A 沿MA5下滑止跌后的反弹起点（观察，下跌越短预期上涨越短）、B 升势回踩 MA5（推荐）。放量下跌抛弃。
+    窗口覆盖不足时默认从 Datahubco 按交易日拉取全日线。
     """
     try:
         from server.screener_service import screener_service
 
         result = await asyncio.to_thread(
-            screener_service.screen_below_ma,
+            screener_service.screen_setups,
             body.asof,
-            body.ma_period,
-            body.below_pct,
             body.include_st,
             body.include_main,
             body.include_star,
             body.include_chinext,
             body.include_bse,
             body.include_cdr,
+            body.include_a,
+            body.include_b,
             body.limit,
             body.fill,
         )

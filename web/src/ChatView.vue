@@ -405,6 +405,7 @@ const quickModels = [
   { id: 'gpt-4o-mini', name: 'GPT-4o Mini' },
   { id: 'claude-3-sonnet', name: 'Claude' },
   { id: 'ollama', name: 'Ollama 本地' },
+  { id: 'qwen3:8b', name: 'Qwen3 本地' },
 ]
 
 // ─── Helpers ─────────────────────────────────────────

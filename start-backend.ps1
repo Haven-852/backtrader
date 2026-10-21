@@ -40,10 +40,42 @@ if (Test-Path $EnvFile) {
 }
 
 # Prefer 8010: Windows may leave orphan LISTEN sockets on 8000/8001 that accept nothing.
-$BackendPort = if ($env:BACKEND_PORT) { $env:BACKEND_PORT } else { "8010" }
+$BackendPort = if ($env:BACKEND_PORT) { [int]$env:BACKEND_PORT } else { 8010 }
+
+function Test-PortInUse([int]$Port) {
+    try {
+        $conn = Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction SilentlyContinue
+        return $null -ne $conn
+    } catch {
+        $line = netstat -ano | Select-String -Pattern ":$Port\s+.*LISTENING"
+        return $null -ne $line
+    }
+}
+
+if (Test-PortInUse $BackendPort) {
+    Write-Host "[WARN] Port $BackendPort is already in use (Errno 10048 if you bind again)." -ForegroundColor Yellow
+    Write-Host "       A previous backend is likely still running." -ForegroundColor Yellow
+    $owner = $null
+    try {
+        $owner = (Get-NetTCPConnection -LocalPort $BackendPort -State Listen -ErrorAction SilentlyContinue | Select-Object -First 1).OwningProcess
+    } catch {}
+    if ($owner) {
+        $pn = (Get-Process -Id $owner -ErrorAction SilentlyContinue).ProcessName
+        Write-Host "       PID=$owner ($pn). Stop it first, e.g.: Stop-Process -Id $owner" -ForegroundColor Gray
+    }
+    $alt = $BackendPort + 1
+    while ((Test-PortInUse $alt) -and $alt -lt ($BackendPort + 20)) { $alt++ }
+    if (-not (Test-PortInUse $alt)) {
+        Write-Host "[INFO] Switching to free port $alt. Set BACKEND_PORT=$alt if frontend proxy needs it." -ForegroundColor Cyan
+        $BackendPort = $alt
+    } else {
+        Write-Host "[ERROR] No free port near $BackendPort. Stop the old process and retry." -ForegroundColor Red
+        exit 1
+    }
+}
 
 Write-Host ""
-Write-Host "Starting FastAPI on http://0.0.0.0:$BackendPort" -ForegroundColor Cyan
+Write-Host "Starting FastAPI on http://127.0.0.1:$BackendPort" -ForegroundColor Cyan
 Write-Host "Docs: http://127.0.0.1:$BackendPort/docs" -ForegroundColor White
 Write-Host "Press Ctrl+C to stop" -ForegroundColor Yellow
 

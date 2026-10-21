@@ -28,12 +28,113 @@ async def execute_tool(skill_id: str, tool_id: str, payload: Dict[str, Any] | No
         from agents.strategy.strategy_t0.tools import execute as exec_t0
         return await exec_t0(tool_id, payload)
 
+    if skill_id == "paper-trade":
+        return await _exec_paper_trade(tool_id, payload)
+
     # QuantSkills 外部包
     from tools.quantskill_runtime import PACKAGE_DIRS, execute_quantskill
     if skill_id in PACKAGE_DIRS:
         return await execute_quantskill(skill_id, tool_id, payload)
 
     return {"ok": False, "error": f"未知技能: {skill_id}"}
+
+
+async def _exec_paper_trade(tool_id: str, payload: Dict[str, Any]) -> Dict[str, Any]:
+    from tools.paper_toolkit import paper_toolkit
+
+    if tool_id == "create-account":
+        return await paper_toolkit.create_account(
+            name=str(payload.get("name") or "交易Agent账户"),
+            initial_cash=float(payload.get("initial_cash") or 1_000_000),
+            lookback_guard=bool(payload["lookback_guard"]) if "lookback_guard" in payload else True,
+        )
+    if tool_id == "delete-account":
+        if payload.get("account_id") is None:
+            return {"ok": False, "error": "缺少参数 account_id"}
+        hard = payload.get("hard")
+        if hard is None:
+            hard = True
+        return await paper_toolkit.delete_account(int(payload["account_id"]), hard=bool(hard))
+    if tool_id == "roll-t1":
+        aid = payload.get("account_id")
+        return await paper_toolkit.roll_t1(
+            account_id=int(aid) if aid is not None else None,
+            asof=payload.get("asof"),
+            force=bool(payload.get("force") or False),
+        )
+    if tool_id == "list-accounts":
+        return await paper_toolkit.list_accounts(status=str(payload.get("status") or "active"))
+    if tool_id == "get-account":
+        if payload.get("account_id") is None:
+            return {"ok": False, "error": "缺少参数 account_id"}
+        mark = payload.get("mark")
+        if mark is None:
+            mark = True
+        return await paper_toolkit.get_account(int(payload["account_id"]), mark=bool(mark))
+    if tool_id == "list-positions":
+        if payload.get("account_id") is None:
+            return {"ok": False, "error": "缺少参数 account_id"}
+        return await paper_toolkit.list_positions(int(payload["account_id"]))
+    if tool_id == "get-market-brief":
+        ts_code = payload.get("ts_code") or ""
+        if not ts_code:
+            return {"ok": False, "error": "缺少参数 ts_code"}
+        return await paper_toolkit.get_market_brief(
+            ts_code=str(ts_code),
+            limit=int(payload.get("limit") or 120),
+            features=payload.get("features"),
+        )
+    if tool_id == "place-order":
+        for k in ("account_id", "ts_code", "side", "quantity"):
+            if payload.get(k) is None or payload.get(k) == "":
+                return {"ok": False, "error": f"缺少参数 {k}"}
+        return await paper_toolkit.place_order(
+            account_id=int(payload["account_id"]),
+            ts_code=str(payload["ts_code"]),
+            side=str(payload["side"]),
+            quantity=float(payload["quantity"]),
+            lookback_guard=payload.get("lookback_guard"),
+            signal_date=payload.get("signal_date"),
+            reason=payload.get("reason"),
+        )
+    if tool_id == "settle":
+        aid = payload.get("account_id")
+        return await paper_toolkit.settle(
+            account_id=int(aid) if aid is not None else None,
+            asof=payload.get("asof"),
+        )
+    if tool_id == "mark":
+        if payload.get("account_id") is None:
+            return {"ok": False, "error": "缺少参数 account_id"}
+        write_equity = payload.get("write_equity")
+        if write_equity is None:
+            write_equity = True
+        return await paper_toolkit.mark(
+            account_id=int(payload["account_id"]),
+            asof=payload.get("asof"),
+            write_equity=bool(write_equity),
+        )
+    if tool_id == "get-stats":
+        if payload.get("account_id") is None:
+            return {"ok": False, "error": "缺少参数 account_id"}
+        return await paper_toolkit.get_stats(int(payload["account_id"]))
+    if tool_id == "list-orders":
+        if payload.get("account_id") is None:
+            return {"ok": False, "error": "缺少参数 account_id"}
+        return await paper_toolkit.list_orders(
+            int(payload["account_id"]),
+            status=payload.get("status"),
+            limit=int(payload.get("limit") or 50),
+        )
+    if tool_id == "list-fills":
+        if payload.get("account_id") is None:
+            return {"ok": False, "error": "缺少参数 account_id"}
+        return await paper_toolkit.list_fills(
+            int(payload["account_id"]),
+            limit=int(payload.get("limit") or 50),
+        )
+
+    return {"ok": False, "error": f"未知工具: {tool_id}"}
 
 
 async def _exec_sql_toolkit(sql_toolkit, tool_id: str, payload: Dict[str, Any]) -> Dict[str, Any]:

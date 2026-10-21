@@ -46,6 +46,10 @@ class ChatRequest:
     system_prompt: Optional[str] = None
     temperature: float = 0.7
     max_tokens: int = 4096
+    # 交易 Agent：paper_trade 模式仅暴露纸面工具
+    agent_mode: Optional[str] = None  # "paper_trade" | None
+    tool_skills: Optional[List[str]] = None
+    context: Dict = field(default_factory=dict)  # e.g. {"account_id": 1}
 
 
 @dataclass
@@ -105,6 +109,18 @@ class AnthropicProvider(ModelProvider):
 class OllamaProvider(ModelProvider):
     """Ollama 本地模型提供商"""
 
+    def __init__(self, api_key: str, base_url: str, default_model: str):
+        # 兼容 OLLAMA_BASE_URL=http://localhost:11434 与 .../api
+        super().__init__(api_key, self._normalize_base(base_url), default_model)
+
+    @staticmethod
+    def _normalize_base(base_url: str) -> str:
+        url = (base_url or "http://localhost:11434").rstrip("/")
+        if url.endswith("/api"):
+            return url
+        # 常见误配：写成根地址，正确聊天接口是 /api/chat
+        return f"{url}/api"
+
     def get_headers(self) -> Dict:
         return {"Content-Type": "application/json"}
 
@@ -146,8 +162,14 @@ class ChatService:
         # Ollama 本地
         "ollama": "ollama",
         "qwen": "ollama",
+        "qwen3": "ollama",
+        "qwen3:8b": "ollama",
+        "qwen3-coder:30b": "ollama",
+        "deepseek-r1:8b": "ollama",
         "llama": "ollama",
         "mistral": "ollama",
+        "nomic-embed-text": "ollama",
+        "nomic-embed-text:latest": "ollama",
         # Grok
         "grok-1": "grok",
         "grok-2": "grok",
@@ -223,9 +245,12 @@ class ChatService:
         provider = self._providers.get(provider_name)
 
         if provider and provider_name == "ollama":
-            # Ollama：使用配置的模型名
+            # Ollama：使用配置的模型名；UI 选「ollama」时用默认本地模型
             actual_model = os.getenv("OLLAMA_MODEL", "deepseek-r1:8b")
-            if model not in ("ollama",):
+            if model not in ("ollama", "qwen", "llama", "mistral"):
+                actual_model = model
+            # 带冒号的是 Ollama 完整模型名（如 qwen3:8b）
+            if ":" in (model or ""):
                 actual_model = model
         elif provider:
             actual_model = model
@@ -287,11 +312,28 @@ class ChatService:
                 return await self._chat_openai_compatible(provider, actual_model, messages, request)
         except Exception as e:
             logger.error(f"模型调用失败 [{request.model}]: {e}")
+            err = str(e)
+            hint = ""
+            if "11434" in err or "/chat" in err or "ollama" in err.lower() or "502" in err:
+                hint = (
+                    "\n\n**Ollama 排查**：\n"
+                    "1) 确认 `ollama serve` / Ollama 应用已运行；\n"
+                    "2) 接口应为 `http://localhost:11434/api/chat`（`.env` 的 `OLLAMA_BASE_URL` "
+                    "可写 `http://localhost:11434`，代码会自动补 `/api`）；\n"
+                    "3) 若仍 502，多为系统 HTTP 代理劫持 localhost——本服务已对 Ollama 禁用代理；"
+                    "请重启后端后再试；\n"
+                    f"4) 默认模型 `{os.getenv('OLLAMA_MODEL', 'deepseek-r1:8b')}`，用 `ollama list` 确认已安装。"
+                )
+            elif "401" in err or "403" in err:
+                hint = "\n\n请检查对应提供商的 API Key 是否有效。"
             return ChatResponse(
-                content=f"模型调用失败: {str(e)}\n\n已自动切换到模拟模式。请检查 API Key 配置是否正确。",
+                content=(
+                    f"模型调用失败: {err}\n\n"
+                    f"已自动切换到模拟模式。请检查 API Key / 本地模型配置是否正确。{hint}"
+                ),
                 model=request.model,
                 provider="error",
-                usage={"error": str(e)},
+                usage={"error": err},
             )
 
     async def chat_stream(self, request: ChatRequest) -> AsyncGenerator[str, None]:
@@ -427,7 +469,12 @@ class ChatService:
         self, provider: OllamaProvider, model: str, messages: List[Dict], request: ChatRequest
     ) -> ChatResponse:
         """Ollama 本地模型对话调用"""
-        async with httpx.AsyncClient(timeout=180.0) as client:
+        # trust_env=False：避免系统/环境 HTTP 代理把 localhost:11434 转到错误网关(502)
+        # 推理模型（deepseek-r1 等）常把答案写在 thinking，需更大 num_predict
+        num_predict = request.max_tokens
+        if any(x in (model or "").lower() for x in ("r1", "reason", "think")):
+            num_predict = max(int(num_predict or 0), 1024)
+        async with httpx.AsyncClient(timeout=180.0, trust_env=False) as client:
             resp = await client.post(
                 provider.get_chat_url(),
                 json={
@@ -436,19 +483,28 @@ class ChatService:
                     "stream": False,
                     "options": {
                         "temperature": request.temperature,
-                        "num_predict": request.max_tokens,
+                        "num_predict": num_predict,
                     },
                 },
             )
             resp.raise_for_status()
             data = resp.json()
+            msg = data.get("message") or {}
+            content = (msg.get("content") or "").strip()
+            thinking = (msg.get("thinking") or "").strip()
+            if not content and thinking:
+                content = thinking
+            elif content and thinking and thinking not in content:
+                # 可选附带思考摘要（截断），避免前端空白
+                pass
             return ChatResponse(
-                content=data.get("message", {}).get("content", ""),
+                content=content or "（模型未返回文本，请换模型或增大 max_tokens）",
                 model=data.get("model", model),
                 provider="ollama",
                 usage={
                     "total_duration": data.get("total_duration", 0),
                     "eval_count": data.get("eval_count", 0),
+                    "has_thinking": bool(thinking),
                 },
             )
 
@@ -456,7 +512,7 @@ class ChatService:
         self, provider: OllamaProvider, model: str, messages: List[Dict]
     ) -> AsyncGenerator[str, None]:
         """Ollama 流式调用"""
-        async with httpx.AsyncClient(timeout=300.0) as client:
+        async with httpx.AsyncClient(timeout=300.0, trust_env=False) as client:
             async with client.stream(
                 "POST",
                 provider.get_chat_url(),

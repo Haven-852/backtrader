@@ -669,6 +669,13 @@ POSTGRES_DDL_LIST = [
         close        NUMERIC(12,4),
         ma5          NUMERIC(12,4),
         below_pct    NUMERIC(12,4),
+        setup_type   VARCHAR(8),
+        score        NUMERIC(8,2),
+        label        VARCHAR(32),
+        pct_chg      NUMERIC(12,4),
+        reason       TEXT,
+        decline_days INT,
+        expect_up_days INT,
         PRIMARY KEY (run_id, ts_code)
     )
     """,
@@ -686,6 +693,140 @@ POSTGRES_DDL_LIST = [
         last_synced_at  TIMESTAMPTZ,
         last_sync_ok    BOOLEAN,
         last_sync_error TEXT
+    )
+    """,
+
+    # 23. 纸面账户
+    """
+    CREATE TABLE IF NOT EXISTS paper_account (
+        id              SERIAL PRIMARY KEY,
+        name            VARCHAR(64)   NOT NULL,
+        initial_cash    NUMERIC(20,4) NOT NULL,
+        cash            NUMERIC(20,4) NOT NULL,
+        equity          NUMERIC(20,4) NOT NULL,
+        currency        VARCHAR(8)    DEFAULT 'CNY',
+        status          VARCHAR(16)   DEFAULT 'active',
+        lookback_guard  BOOLEAN       DEFAULT TRUE,
+        t1_asof         DATE,
+        created_at      TIMESTAMPTZ   DEFAULT NOW(),
+        updated_at      TIMESTAMPTZ   DEFAULT NOW()
+    )
+    """,
+
+    # 24. 纸面持仓
+    """
+    CREATE TABLE IF NOT EXISTS paper_position (
+        account_id      INT           NOT NULL REFERENCES paper_account(id) ON DELETE CASCADE,
+        ts_code         VARCHAR(16)   NOT NULL,
+        quantity        NUMERIC(20,4) NOT NULL DEFAULT 0,
+        sellable_qty    NUMERIC(20,4) NOT NULL DEFAULT 0,
+        frozen_qty      NUMERIC(20,4) NOT NULL DEFAULT 0,
+        avg_cost        NUMERIC(16,4) NOT NULL DEFAULT 0,
+        market_price    NUMERIC(16,4),
+        market_value    NUMERIC(20,4),
+        unrealized_pnl  NUMERIC(20,4),
+        updated_at      TIMESTAMPTZ   DEFAULT NOW(),
+        PRIMARY KEY (account_id, ts_code)
+    )
+    """,
+
+    # 25. 纸面委托
+    """
+    CREATE TABLE IF NOT EXISTS paper_order (
+        id              SERIAL PRIMARY KEY,
+        account_id      INT           NOT NULL REFERENCES paper_account(id) ON DELETE CASCADE,
+        ts_code         VARCHAR(16)   NOT NULL,
+        side            VARCHAR(8)    NOT NULL,
+        order_type      VARCHAR(16)   DEFAULT 'market',
+        quantity        NUMERIC(20,4) NOT NULL,
+        filled_qty      NUMERIC(20,4) DEFAULT 0,
+        status          VARCHAR(16)   NOT NULL DEFAULT 'pending',
+        lookback_guard  BOOLEAN       NOT NULL DEFAULT TRUE,
+        exec_price_mode VARCHAR(16)   NOT NULL DEFAULT 'next_open',
+        signal_date     DATE,
+        exec_date       DATE,
+        limit_price     NUMERIC(16,4),
+        reason          TEXT,
+        reject_reason   TEXT,
+        created_at      TIMESTAMPTZ   DEFAULT NOW(),
+        updated_at      TIMESTAMPTZ   DEFAULT NOW()
+    )
+    """,
+
+    # 26. 纸面成交
+    """
+    CREATE TABLE IF NOT EXISTS paper_fill (
+        id              SERIAL PRIMARY KEY,
+        order_id        INT           NOT NULL REFERENCES paper_order(id) ON DELETE CASCADE,
+        account_id      INT           NOT NULL REFERENCES paper_account(id) ON DELETE CASCADE,
+        ts_code         VARCHAR(16)   NOT NULL,
+        side            VARCHAR(8)    NOT NULL,
+        quantity        NUMERIC(20,4) NOT NULL,
+        price           NUMERIC(16,4) NOT NULL,
+        amount          NUMERIC(20,4) NOT NULL,
+        commission      NUMERIC(16,4) DEFAULT 0,
+        trade_date      DATE          NOT NULL,
+        created_at      TIMESTAMPTZ   DEFAULT NOW()
+    )
+    """,
+
+    # 27. 纸面每日净值
+    """
+    CREATE TABLE IF NOT EXISTS paper_equity_daily (
+        account_id      INT           NOT NULL REFERENCES paper_account(id) ON DELETE CASCADE,
+        trade_date      DATE          NOT NULL,
+        cash            NUMERIC(20,4) NOT NULL,
+        market_value    NUMERIC(20,4) NOT NULL,
+        equity          NUMERIC(20,4) NOT NULL,
+        daily_return    NUMERIC(12,6),
+        created_at      TIMESTAMPTZ   DEFAULT NOW(),
+        PRIMARY KEY (account_id, trade_date)
+    )
+    """,
+
+    # 28. 纸面决策审计（LLM 感知-决策-执行-反馈）
+    """
+    CREATE TABLE IF NOT EXISTS paper_decision_log (
+        id                  SERIAL PRIMARY KEY,
+        account_id          INT           NOT NULL REFERENCES paper_account(id) ON DELETE CASCADE,
+        session_id          VARCHAR(36),
+        user_query          TEXT,
+        assistant_summary   TEXT,
+        tool_trace          JSONB,
+        order_ids           INT[],
+        meta                JSONB,
+        created_at          TIMESTAMPTZ   DEFAULT NOW()
+    )
+    """,
+
+    # 29. 交易盯盘名单（选股层产出）
+    """
+    CREATE TABLE IF NOT EXISTS trade_watchlist (
+        id              SERIAL PRIMARY KEY,
+        ts_code         VARCHAR(16)   NOT NULL,
+        name            VARCHAR(64),
+        source          VARCHAR(32)   NOT NULL,
+        reason          TEXT,
+        score           NUMERIC(8,2),
+        asof            DATE          NOT NULL,
+        active          BOOLEAN       DEFAULT TRUE,
+        meta            JSONB,
+        created_at      TIMESTAMPTZ   DEFAULT NOW(),
+        UNIQUE (ts_code, asof, source)
+    )
+    """,
+
+    # 30. 盘中巡检事件
+    """
+    CREATE TABLE IF NOT EXISTS trade_scan_event (
+        id              SERIAL PRIMARY KEY,
+        ts_code         VARCHAR(16)   NOT NULL,
+        asof            DATE          NOT NULL,
+        event_type      VARCHAR(32)   NOT NULL,
+        severity        VARCHAR(8)    NOT NULL DEFAULT 'soft',
+        price           NUMERIC(16,4),
+        detail          JSONB,
+        created_at      TIMESTAMPTZ   DEFAULT NOW()
     )
     """,
 ]
@@ -1269,6 +1410,19 @@ POSTGRES_INDEX_DDL_LIST = [
     "CREATE INDEX IF NOT EXISTS idx_sector_dc_index_level ON sector_dc_index_daily (trade_date, industry_level)",
     "CREATE INDEX IF NOT EXISTS idx_sector_member_code ON sector_dc_member (ts_code, trade_date)",
     "CREATE INDEX IF NOT EXISTS idx_sector_hierarchy_parent ON sector_dc_hierarchy (parent_code)",
+    # 纸面交易
+    "CREATE INDEX IF NOT EXISTS idx_paper_account_status ON paper_account (status)",
+    "CREATE INDEX IF NOT EXISTS idx_paper_position_code ON paper_position (ts_code)",
+    "CREATE INDEX IF NOT EXISTS idx_paper_order_account ON paper_order (account_id, created_at DESC)",
+    "CREATE INDEX IF NOT EXISTS idx_paper_order_pending ON paper_order (status, exec_date)",
+    "CREATE INDEX IF NOT EXISTS idx_paper_fill_account ON paper_fill (account_id, trade_date DESC)",
+    "CREATE INDEX IF NOT EXISTS idx_paper_equity_account ON paper_equity_daily (account_id, trade_date DESC)",
+    "CREATE INDEX IF NOT EXISTS idx_paper_decision_account ON paper_decision_log (account_id, created_at DESC)",
+    "CREATE INDEX IF NOT EXISTS idx_paper_decision_session ON paper_decision_log (session_id)",
+    "CREATE INDEX IF NOT EXISTS idx_trade_watchlist_asof ON trade_watchlist (asof DESC, active)",
+    "CREATE INDEX IF NOT EXISTS idx_trade_watchlist_code ON trade_watchlist (ts_code, asof DESC)",
+    "CREATE INDEX IF NOT EXISTS idx_trade_scan_event_asof ON trade_scan_event (asof DESC, created_at DESC)",
+    "CREATE INDEX IF NOT EXISTS idx_trade_scan_event_code ON trade_scan_event (ts_code, asof, event_type)",
 ]
 
 # TimescaleDB Hypertable 专用索引

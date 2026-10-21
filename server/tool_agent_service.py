@@ -1,6 +1,7 @@
 """
 Tool Agent Service
 大模型缺数据时：阅读 tools/HANDBOOK.md → 选择工具 → 执行 → 回填结果 → 再回答
+支持 agent_mode=paper_trade：仅纸面交易工具 + 专用 system prompt
 """
 
 from __future__ import annotations
@@ -20,6 +21,19 @@ logger = logging.getLogger(__name__)
 MAX_TOOL_ROUNDS = 8
 MAX_TOOL_RESULT_CHARS = 24000
 
+# paper 工具中若缺 account_id，可从 context 注入
+_PAPER_ACCOUNT_TOOLS = {
+    "get-account",
+    "list-positions",
+    "place-order",
+    "settle",
+    "mark",
+    "get-stats",
+    "list-orders",
+    "list-fills",
+    "roll-t1",
+}
+
 
 def _truncate_result(obj: Any, max_chars: int = MAX_TOOL_RESULT_CHARS) -> str:
     try:
@@ -31,41 +45,131 @@ def _truncate_result(obj: Any, max_chars: int = MAX_TOOL_RESULT_CHARS) -> str:
     return text
 
 
+def _extract_order_ids(tool_trace: List[Dict[str, Any]]) -> List[int]:
+    ids: List[int] = []
+    for step in tool_trace or []:
+        if step.get("order_id") is not None:
+            try:
+                ids.append(int(step["order_id"]))
+                continue
+            except Exception:
+                pass
+        if step.get("tool_id") != "place-order" and "place_order" not in str(step.get("function") or ""):
+            continue
+        preview = step.get("result_preview") or ""
+        try:
+            data = json.loads(preview) if isinstance(preview, str) and preview.startswith("{") else None
+        except Exception:
+            data = None
+        if isinstance(data, dict):
+            order = data.get("order") or {}
+            oid = order.get("id")
+            if oid is not None:
+                try:
+                    ids.append(int(oid))
+                except Exception:
+                    pass
+    # 去重保序
+    seen = set()
+    out: List[int] = []
+    for i in ids:
+        if i not in seen:
+            seen.add(i)
+            out.append(i)
+    return out
+
+
 class ToolAgentService:
     """带工具循环的对话服务（OpenAI 兼容 function calling）"""
+
+    def _resolve_mode(self, request: ChatRequest) -> tuple[Optional[str], Optional[List[str]], str]:
+        """返回 (mode, skill_ids, system_prompt)"""
+        mode = (request.agent_mode or "").strip() or None
+        skill_ids = list(request.tool_skills) if request.tool_skills else None
+        ctx = request.context or {}
+        extra = request.system_prompt
+
+        if mode == "paper_trade":
+            skill_ids = skill_ids or ["paper-trade"]
+            account_id = ctx.get("account_id")
+            extra_bits = []
+            if extra:
+                extra_bits.append(extra)
+            if account_id is not None:
+                extra_bits.append(
+                    f"当前绑定纸面账户 account_id={account_id}。"
+                    f"调用需要 account_id 的工具时，若未指定则使用该账户。"
+                )
+            system_prompt = tools.build_agent_system_prompt(
+                "\n".join(extra_bits) if extra_bits else None,
+                skill_ids=skill_ids,
+                mode="paper_trade",
+            )
+            return mode, skill_ids, system_prompt
+
+        system_prompt = tools.build_agent_system_prompt(extra, skill_ids=skill_ids)
+        return mode, skill_ids, system_prompt
+
+    def _inject_context_args(
+        self,
+        skill_id: str,
+        tool_id: str,
+        args: Dict[str, Any],
+        context: Optional[Dict[str, Any]],
+    ) -> Dict[str, Any]:
+        ctx = context or {}
+        out = dict(args or {})
+        if skill_id == "paper-trade" and tool_id in _PAPER_ACCOUNT_TOOLS:
+            if out.get("account_id") is None and ctx.get("account_id") is not None:
+                out["account_id"] = ctx["account_id"]
+        return out
 
     async def chat_with_tools(self, request: ChatRequest) -> ChatResponse:
         provider, actual_model = chat_service._resolve_provider(request.model)
 
         if not provider:
-            # 无 API Key：退回普通 chat（会走 fallback）
             return await chat_service.chat(request)
+
+        mode, skill_ids, system_prompt = self._resolve_mode(request)
 
         # Anthropic / Ollama：暂用「手册注入 + 普通对话」，不走原生 tools
         from server.chat_service import AnthropicProvider, OllamaProvider
         if isinstance(provider, (AnthropicProvider, OllamaProvider)):
-            sys_prompt = tools.build_agent_system_prompt(request.system_prompt)
-            sys_prompt += (
-                "\n当前通道不支持原生 function calling。"
-                "若需查数，请明确告诉用户去右侧技能面板手动执行 sql-toolkit 工具，"
-                "或建议切换 DeepSeek / OpenAI 模型以启用自动工具调用。"
-            )
             patched = ChatRequest(
                 query=request.query,
                 model=request.model,
                 provider=request.provider,
                 stream=False,
                 history=request.history,
-                system_prompt=sys_prompt,
+                system_prompt=system_prompt + (
+                    "\n当前通道不支持原生 function calling。"
+                    "请用文字说明你想调用的工具与参数，或建议切换 DeepSeek / OpenAI。"
+                ),
                 temperature=request.temperature,
                 max_tokens=request.max_tokens,
+                agent_mode=request.agent_mode,
+                tool_skills=skill_ids,
+                context=request.context,
             )
             resp = await chat_service.chat(patched)
-            resp.usage = {**(resp.usage or {}), "tools_enabled": False, "reason": "provider_no_tools"}
+            resp.usage = {**(resp.usage or {}), "tools_enabled": False, "reason": "provider_no_tools", "agent_mode": mode}
             return resp
 
-        system_prompt = tools.build_agent_system_prompt(request.system_prompt)
-        openai_tools = tools.get_openai_tools()
+        openai_tools = tools.get_openai_tools(skill_ids=skill_ids)
+        if not openai_tools:
+            out = await chat_service.chat(
+                ChatRequest(
+                    query=request.query,
+                    model=request.model,
+                    provider=request.provider,
+                    history=request.history,
+                    system_prompt=system_prompt,
+                    temperature=request.temperature,
+                    max_tokens=request.max_tokens,
+                )
+            )
+            out.usage = {**(out.usage or {}), "tools_enabled": False, "reason": "no_tools"}
+            return out
 
         messages: List[Dict[str, Any]] = [{"role": "system", "content": system_prompt}]
         for h in (request.history or [])[-10:]:
@@ -94,7 +198,6 @@ class ToolAgentService:
                     json=payload,
                 )
                 if resp.status_code >= 400:
-                    # 部分模型不支持 tools：降级普通对话
                     err_text = resp.text[:300]
                     logger.warning(f"tools 调用失败，降级普通对话: {resp.status_code} {err_text}")
                     fallback = ChatRequest(
@@ -113,6 +216,7 @@ class ToolAgentService:
                         "fallback": True,
                         "tool_error": err_text,
                         "tool_trace": tool_trace,
+                        "agent_mode": mode,
                     }
                     return out
 
@@ -126,7 +230,6 @@ class ToolAgentService:
                 finish = choice.get("finish_reason") or "stop"
                 tool_calls = message.get("tool_calls") or []
 
-                # 无工具调用 → 最终回答
                 if not tool_calls or finish == "stop":
                     content = message.get("content") or ""
                     if not content and tool_trace:
@@ -140,11 +243,12 @@ class ToolAgentService:
                             "tools_enabled": True,
                             "tool_rounds": round_i + 1,
                             "tool_trace": tool_trace,
+                            "agent_mode": mode,
+                            "order_ids": _extract_order_ids(tool_trace),
                         },
                         finish_reason=finish,
                     )
 
-                # 记录 assistant tool_calls 消息
                 messages.append({
                     "role": "assistant",
                     "content": message.get("content"),
@@ -161,6 +265,7 @@ class ToolAgentService:
                         args = {}
 
                     skill_id, tool_id = tools.parse_fn_name(fn_name)
+                    args = self._inject_context_args(skill_id or "", tool_id or "", args, request.context)
                     step = {
                         "round": round_i + 1,
                         "id": tc.get("id"),
@@ -180,7 +285,10 @@ class ToolAgentService:
                             result = {"ok": False, "error": str(e)}
 
                     step["result_ok"] = bool(result.get("ok", True)) if isinstance(result, dict) else True
-                    step["result_preview"] = _truncate_result(result, 500)
+                    # 保存完整结果摘要供 order_id 提取（place-order）
+                    if isinstance(result, dict) and tool_id == "place-order" and result.get("order"):
+                        step["order_id"] = (result.get("order") or {}).get("id")
+                    step["result_preview"] = _truncate_result(result, 800)
                     tool_trace.append(step)
 
                     messages.append({
@@ -189,7 +297,6 @@ class ToolAgentService:
                         "content": _truncate_result(result),
                     })
 
-            # 工具轮次用尽：再要一轮纯文字结论，避免「已经查到却不回答」
             if tool_trace:
                 messages.append({
                     "role": "user",
@@ -229,6 +336,8 @@ class ToolAgentService:
                                     "tool_trace": tool_trace,
                                     "tool_rounds": MAX_TOOL_ROUNDS,
                                     "synthesized_after_limit": True,
+                                    "agent_mode": mode,
+                                    "order_ids": _extract_order_ids(tool_trace),
                                 },
                                 finish_reason=choice.get("finish_reason") or "stop",
                             )
@@ -239,7 +348,14 @@ class ToolAgentService:
                 content="工具调用轮次已达上限，请缩小问题范围后重试。",
                 model=actual_model,
                 provider=request.provider,
-                usage={**total_usage, "tools_enabled": True, "tool_trace": tool_trace, "tool_rounds": MAX_TOOL_ROUNDS},
+                usage={
+                    **total_usage,
+                    "tools_enabled": True,
+                    "tool_trace": tool_trace,
+                    "tool_rounds": MAX_TOOL_ROUNDS,
+                    "agent_mode": mode,
+                    "order_ids": _extract_order_ids(tool_trace),
+                },
                 finish_reason="length",
             )
 

@@ -131,10 +131,10 @@
             ]"
           >
             <div class="flex items-center justify-between mb-0.5">
-              <span class="text-xs font-medium text-zinc-200">低于5日均线</span>
+              <span class="text-xs font-medium text-zinc-200">底部观察 / 升势回踩</span>
               <span class="text-[9px] px-1.5 py-0.5 rounded bg-zinc-800 text-zinc-500">选股</span>
             </div>
-            <p class="text-[10px] text-zinc-500 leading-relaxed">前一交易日收盘低于 MA5，可设偏离幅度</p>
+            <p class="text-[10px] text-zinc-500 leading-relaxed">A 沿MA5下滑止跌后观察 1–2 周反弹 / B 升势回踩；缺数自动走 Datahubco 补日线</p>
           </div>
         </div>
         <div v-if="catalogError" class="px-3 py-2 text-[10px] text-red-400 border-b border-zinc-800">
@@ -184,8 +184,8 @@
             <div class="bg-zinc-900 rounded-2xl border border-zinc-800 p-4 space-y-3">
               <div class="flex items-center justify-between gap-2">
                 <h4 class="text-xs font-semibold text-zinc-300 flex items-center gap-2">
-                  <i class="fa-solid fa-filter text-emerald-400"></i> 低于5日均线选股
-                  <span class="text-[10px] text-zinc-500 font-normal">默认搜索上一已收盘日，缺口日线写入 PostgreSQL</span>
+                  <i class="fa-solid fa-filter text-emerald-400"></i> 底部观察 / 升势回踩
+                  <span class="text-[10px] text-zinc-500 font-normal">A：沿下降 MA5 下滑止跌，观察随后 1–2 周反弹；下跌越短预期涨得越短。缺数自动从 Datahubco 补齐</span>
                 </h4>
                 <button
                   type="button"
@@ -203,19 +203,17 @@
                   <input v-model="screener.asof" type="date" class="w-full bg-zinc-800 border border-zinc-700 rounded-lg px-2.5 py-1.5 text-xs outline-none" />
                 </div>
                 <div>
-                  <label class="text-[10px] text-zinc-500 block mb-1">均线周期</label>
-                  <input v-model.number="screener.maPeriod" type="number" min="2" max="60" class="w-full bg-zinc-800 border border-zinc-700 rounded-lg px-2.5 py-1.5 text-xs outline-none" />
-                </div>
-                <div>
-                  <label class="text-[10px] text-zinc-500 block mb-1">至少低于均线 %</label>
-                  <input v-model.number="screener.belowPct" type="number" min="0" max="50" step="0.5" class="w-full bg-zinc-800 border border-zinc-700 rounded-lg px-2.5 py-1.5 text-xs outline-none" />
-                </div>
-                <div>
                   <label class="text-[10px] text-zinc-500 block mb-1">最多返回</label>
                   <input v-model.number="screener.limit" type="number" min="10" max="1000" class="w-full bg-zinc-800 border border-zinc-700 rounded-lg px-2.5 py-1.5 text-xs outline-none" />
                 </div>
               </div>
               <div class="flex flex-wrap gap-1.5">
+                <label class="flex items-center gap-1 px-2 py-1 rounded-md bg-amber-950/40 text-[10px] text-amber-300 cursor-pointer border border-amber-900/40">
+                  <input v-model="screener.includeA" type="checkbox" class="rounded border-zinc-600" /> A 底部观察
+                </label>
+                <label class="flex items-center gap-1 px-2 py-1 rounded-md bg-emerald-950/40 text-[10px] text-emerald-300 cursor-pointer border border-emerald-900/40">
+                  <input v-model="screener.includeB" type="checkbox" class="rounded border-zinc-600" /> B 升势回踩
+                </label>
                 <label class="flex items-center gap-1 px-2 py-1 rounded-md bg-zinc-800/80 text-[10px] text-zinc-400 cursor-pointer">
                   <input v-model="screener.includeMain" type="checkbox" class="rounded border-zinc-600" /> 主板
                 </label>
@@ -232,51 +230,133 @@
                   <input v-model="screener.includeSt" type="checkbox" class="rounded border-zinc-600" /> 包含 ST
                 </label>
               </div>
-              <p class="text-[10px] text-zinc-600">点击一行即可到行情看板看 K 线；侧栏回到「策略分析」或看板上的「返回选股」可继续看本次搜索结果。</p>
+              <p class="text-[10px] text-zinc-600">B 类按得分推荐；A 类只观察沿 MA5 下滑止跌后的反弹起点，不是买入清单。下跌越短，预期反弹越短（约 4–10 个交易日）。15 日窗口缺数会先走 Datahubco 拉全日线。点击一行到行情看板看 K 线。</p>
               <p v-if="screenerError" class="text-xs text-red-400 bg-red-500/10 border border-red-500/20 rounded-lg px-3 py-2">{{ screenerError }}</p>
-              <div v-if="screenerResult" class="text-[10px] text-zinc-400">
-                交易日 {{ screenerResult.asof }} · 股票池 {{ screenerResult.universe }} · 入库 {{ screenerResult.filled_rows }} 行 · 命中 {{ screenerResult.hit_count }}
+              <div v-if="screenerResult" class="text-[10px] text-zinc-400 space-y-0.5">
+                <div>
+                  交易日 {{ screenerResult.asof }} · 股票池 {{ screenerResult.universe }} · B {{ screenerResult.hit_count_b ?? 0 }} · A {{ screenerResult.hit_count_a ?? 0 }}
+                </div>
+                <div v-if="screenerResult.fill_report" class="text-zinc-500">
+                  Datahubco
+                  · 补 {{ (screenerResult.fill_report.days_fetched || []).length }} 日
+                  · 写入 {{ screenerResult.fill_report.rows ?? screenerResult.filled_rows ?? 0 }} 行
+                  · 已齐跳过 {{ (screenerResult.fill_report.days_skipped || []).length }} 日
+                  <span v-if="(screenerResult.fill_report.errors || []).length" class="text-amber-400">
+                    · 失败 {{ screenerResult.fill_report.errors.length }} 日
+                  </span>
+                </div>
+                <div v-else-if="screenerResult.filled_rows" class="text-zinc-500">入库 {{ screenerResult.filled_rows }} 行</div>
+                <div v-if="screenerResult.note" class="text-zinc-600">{{ screenerResult.note }}</div>
               </div>
-              <div v-if="screenerResult?.hits?.length" class="border border-zinc-800 rounded-xl overflow-hidden">
-                <table class="w-full text-[11px]">
-                  <thead class="bg-zinc-800/80 text-zinc-500">
-                    <tr>
-                      <th class="text-left px-2 py-1.5 font-medium">代码</th>
-                      <th class="text-left px-2 py-1.5 font-medium">名称</th>
-                      <th class="text-left px-2 py-1.5 font-medium">板块</th>
-                      <th class="text-right px-2 py-1.5 font-medium">收盘</th>
-                      <th class="text-right px-2 py-1.5 font-medium">MA{{ screener.maPeriod }}</th>
-                      <th class="text-right px-2 py-1.5 font-medium">低于%</th>
-                      <th class="px-2 py-1.5"></th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    <tr
-                      v-for="h in screenerResult.hits"
-                      :key="h.ts_code"
-                      class="border-t border-zinc-800/60 hover:bg-zinc-800/40 cursor-pointer"
-                      :class="screenerActiveCode === h.ts_code ? 'bg-emerald-500/10' : ''"
-                      title="点击在行情看板查看"
-                      @click="openHitInDash(h)"
-                    >
-                      <td class="px-2 py-1.5 font-mono text-zinc-300">{{ h.ts_code }}</td>
-                      <td class="px-2 py-1.5 text-zinc-200">
-                        {{ h.name }}
-                        <span v-if="h.is_st" class="ml-1 text-[9px] text-red-400">ST</span>
-                      </td>
-                      <td class="px-2 py-1.5 text-zinc-500">{{ h.market }}</td>
-                      <td class="px-2 py-1.5 text-right tabular-nums">{{ h.close }}</td>
-                      <td class="px-2 py-1.5 text-right tabular-nums text-zinc-400">{{ h.ma5 }}</td>
-                      <td class="px-2 py-1.5 text-right tabular-nums text-emerald-400">{{ h.below_pct }}</td>
-                      <td class="px-2 py-1.5 text-right">
-                        <span class="text-[10px] text-sky-400">看行情</span>
-                      </td>
-                    </tr>
-                  </tbody>
-                </table>
+              <div v-if="screenerLoading" class="text-xs text-zinc-500 py-4 text-center">
+                <i class="fa-solid fa-spinner animate-spin mr-1"></i>正在检查 15 日日线，缺口从 Datahubco 自动补齐后分类 A / B…
               </div>
-              <div v-else-if="screenerResult && !screenerLoading" class="text-xs text-zinc-600 py-6 text-center">
-                没有满足条件的股票
+              <div v-if="hitsB.length" class="space-y-1.5">
+                <div class="flex items-center gap-2 text-[11px] text-emerald-300">
+                  <span class="px-1.5 py-0.5 rounded bg-emerald-500/15 border border-emerald-500/20">B 升势回踩</span>
+                  <span class="text-zinc-500">反转候选 · {{ hitsB.length }} 只 · 按得分排序</span>
+                </div>
+                <div class="border border-emerald-900/40 rounded-xl overflow-hidden">
+                  <table class="w-full text-[11px]">
+                    <thead class="bg-zinc-800/80 text-zinc-500">
+                      <tr>
+                        <th class="text-left px-2 py-1.5 font-medium">代码</th>
+                        <th class="text-left px-2 py-1.5 font-medium">名称</th>
+                        <th class="text-left px-2 py-1.5 font-medium">板块</th>
+                        <th class="text-right px-2 py-1.5 font-medium">收盘</th>
+                        <th class="text-right px-2 py-1.5 font-medium">MA5</th>
+                        <th class="text-right px-2 py-1.5 font-medium">低于%</th>
+                        <th class="text-right px-2 py-1.5 font-medium">涨跌%</th>
+                        <th class="text-right px-2 py-1.5 font-medium">得分</th>
+                        <th class="text-left px-2 py-1.5 font-medium">原因</th>
+                        <th class="px-2 py-1.5"></th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      <tr
+                        v-for="h in hitsB"
+                        :key="'B-'+h.ts_code"
+                        class="border-t border-zinc-800/60 hover:bg-zinc-800/40 cursor-pointer"
+                        :class="screenerActiveCode === h.ts_code ? 'bg-emerald-500/10' : ''"
+                        title="点击在行情看板查看"
+                        @click="openHitInDash(h)"
+                      >
+                        <td class="px-2 py-1.5 font-mono text-zinc-300">{{ h.ts_code }}</td>
+                        <td class="px-2 py-1.5 text-zinc-200">
+                          {{ h.name }}
+                          <span v-if="h.is_st" class="ml-1 text-[9px] text-red-400">ST</span>
+                        </td>
+                        <td class="px-2 py-1.5 text-zinc-500">{{ h.market }}</td>
+                        <td class="px-2 py-1.5 text-right tabular-nums">{{ h.close }}</td>
+                        <td class="px-2 py-1.5 text-right tabular-nums text-zinc-400">{{ h.ma5 }}</td>
+                        <td class="px-2 py-1.5 text-right tabular-nums text-emerald-400">{{ h.below_pct }}</td>
+                        <td class="px-2 py-1.5 text-right tabular-nums" :class="Number(h.pct_chg) >= 0 ? 'text-red-400' : 'text-emerald-400'">{{ h.pct_chg }}</td>
+                        <td class="px-2 py-1.5 text-right tabular-nums text-emerald-300">{{ h.score }}</td>
+                        <td class="px-2 py-1.5 text-zinc-500">{{ h.reason }}</td>
+                        <td class="px-2 py-1.5 text-right">
+                          <span class="text-[10px] text-sky-400">看行情</span>
+                        </td>
+                      </tr>
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+              <div v-if="hitsA.length" class="space-y-1.5">
+                <div class="flex items-center gap-2 text-[11px] text-amber-300">
+                  <span class="px-1.5 py-0.5 rounded bg-amber-500/15 border border-amber-500/20">A 底部观察</span>
+                  <span class="text-zinc-500">沿MA5下滑止跌 · {{ hitsA.length }} 只 · 不是买入清单</span>
+                </div>
+                <div class="border border-amber-900/40 rounded-xl overflow-hidden">
+                  <table class="w-full text-[11px]">
+                    <thead class="bg-zinc-800/80 text-zinc-500">
+                      <tr>
+                        <th class="text-left px-2 py-1.5 font-medium">代码</th>
+                        <th class="text-left px-2 py-1.5 font-medium">名称</th>
+                        <th class="text-left px-2 py-1.5 font-medium">板块</th>
+                        <th class="text-right px-2 py-1.5 font-medium">收盘</th>
+                        <th class="text-right px-2 py-1.5 font-medium">MA5</th>
+                        <th class="text-right px-2 py-1.5 font-medium">低于%</th>
+                        <th class="text-right px-2 py-1.5 font-medium">涨跌%</th>
+                        <th class="text-right px-2 py-1.5 font-medium">连跌</th>
+                        <th class="text-right px-2 py-1.5 font-medium">预期反弹</th>
+                        <th class="text-right px-2 py-1.5 font-medium">得分</th>
+                        <th class="text-left px-2 py-1.5 font-medium">原因</th>
+                        <th class="px-2 py-1.5"></th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      <tr
+                        v-for="h in hitsA"
+                        :key="'A-'+h.ts_code"
+                        class="border-t border-zinc-800/60 hover:bg-zinc-800/40 cursor-pointer"
+                        :class="screenerActiveCode === h.ts_code ? 'bg-amber-500/10' : ''"
+                        title="点击在行情看板查看"
+                        @click="openHitInDash(h)"
+                      >
+                        <td class="px-2 py-1.5 font-mono text-zinc-300">{{ h.ts_code }}</td>
+                        <td class="px-2 py-1.5 text-zinc-200">
+                          {{ h.name }}
+                          <span v-if="h.is_st" class="ml-1 text-[9px] text-red-400">ST</span>
+                        </td>
+                        <td class="px-2 py-1.5 text-zinc-500">{{ h.market }}</td>
+                        <td class="px-2 py-1.5 text-right tabular-nums">{{ h.close }}</td>
+                        <td class="px-2 py-1.5 text-right tabular-nums text-zinc-400">{{ h.ma5 }}</td>
+                        <td class="px-2 py-1.5 text-right tabular-nums text-amber-400">{{ h.below_pct }}</td>
+                        <td class="px-2 py-1.5 text-right tabular-nums" :class="Number(h.pct_chg) >= 0 ? 'text-red-400' : 'text-emerald-400'">{{ h.pct_chg }}</td>
+                        <td class="px-2 py-1.5 text-right tabular-nums text-zinc-300">{{ h.decline_days ?? '-' }}日</td>
+                        <td class="px-2 py-1.5 text-right tabular-nums text-amber-200">{{ h.expect_up_days ?? '-' }}日</td>
+                        <td class="px-2 py-1.5 text-right tabular-nums text-amber-300">{{ h.score }}</td>
+                        <td class="px-2 py-1.5 text-zinc-500">{{ h.reason }}</td>
+                        <td class="px-2 py-1.5 text-right">
+                          <span class="text-[10px] text-sky-400">看行情</span>
+                        </td>
+                      </tr>
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+              <div v-else-if="screenerResult && !screenerLoading && !hitsA.length && !hitsB.length" class="text-xs text-zinc-600 py-6 text-center">
+                没有满足 A / B 条件的股票
               </div>
             </div>
           </template>
@@ -675,17 +755,29 @@ const screenerLoading = ref(false)
 const screenerError = ref('')
 const screenerResult = ref<any>(null)
 const screenerActiveCode = ref('')
-const SCREENER_CACHE_KEY = 'strategy_screener_cache_v1'
+const SCREENER_CACHE_KEY = 'strategy_screener_cache_v2'
 const screener = reactive({
   asof: '',
-  maPeriod: 5,
-  belowPct: 0,
-  limit: 200,
+  limit: 60,
+  includeA: true,
+  includeB: true,
   includeMain: true,
   includeStar: true,
   includeChinext: true,
   includeBse: false,
   includeSt: false,
+})
+const hitsB = computed(() => {
+  const data = screenerResult.value
+  if (!data) return []
+  if (Array.isArray(data.hits_b)) return data.hits_b
+  return (data.hits || []).filter((h: any) => h.setup_type === 'B')
+})
+const hitsA = computed(() => {
+  const data = screenerResult.value
+  if (!data) return []
+  if (Array.isArray(data.hits_a)) return data.hits_a
+  return (data.hits || []).filter((h: any) => h.setup_type === 'A')
 })
 
 const cycleNodes = [
@@ -751,20 +843,20 @@ async function runScreener() {
   screenerError.value = ''
   screenerResult.value = null
   try {
-    const res = await fetch('/strategy/screener/below-ma', {
+    const res = await fetch('/strategy/screener/setups', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         asof: screener.asof || null,
-        ma_period: screener.maPeriod || 5,
-        below_pct: screener.belowPct || 0,
         include_st: screener.includeSt,
         include_main: screener.includeMain,
         include_star: screener.includeStar,
         include_chinext: screener.includeChinext,
         include_bse: screener.includeBse,
         include_cdr: false,
-        limit: screener.limit || 200,
+        include_a: screener.includeA,
+        include_b: screener.includeB,
+        limit: screener.limit || 60,
         fill: true,
       }),
     })
@@ -779,7 +871,7 @@ async function runScreener() {
     if (data.asof) screener.asof = String(data.asof).slice(0, 10)
     persistScreenerCache()
     pushLog(
-      `[选股] ${data.asof} 低于MA${data.ma_period} ≥${data.below_pct}% · 池${data.universe} · 入库${data.filled_rows} · 命中${data.hit_count}`,
+      `[选股] ${data.asof} · B${data.hit_count_b ?? 0} · A${data.hit_count_a ?? 0} · Datahubco补${(data.fill_report?.days_fetched || []).length}日/写${data.fill_report?.rows ?? data.filled_rows ?? 0}行`,
       'ok',
     )
   } catch (e: any) {

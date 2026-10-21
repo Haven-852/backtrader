@@ -486,6 +486,263 @@ SKILL_REGISTRY: Dict[str, Dict[str, Any]] = {
 """,
     },
     "t0-intraday": T0_SKILL,
+    "paper-trade": {
+        "id": "paper-trade",
+        "name": "纸面交易",
+        "icon": "wallet",
+        "category": "模拟交易",
+        "desc": (
+            "虚拟账户模拟交易：开户、查仓、感知行情、下单（次日开盘/当日收盘）、"
+            "结算 pending、盯市净值、成交统计。仅纸面成交，不连接真实券商。"
+        ),
+        "enabled": True,
+        "tools": [
+            {
+                "id": "create-account",
+                "name": "开户",
+                "desc": "创建纸面账户，设定初始资金与默认 lookback_guard",
+                "params": [
+                    {"name": "name", "label": "账户名", "type": "text", "required": False},
+                    {"name": "initial_cash", "label": "初始资金", "type": "number", "required": False},
+                    {"name": "lookback_guard", "label": "前视保护", "type": "boolean", "required": False},
+                ],
+                "returns": "账户对象",
+                "openai_parameters": {
+                    "type": "object",
+                    "properties": {
+                        "name": {"type": "string", "description": "账户名称"},
+                        "initial_cash": {"type": "number", "description": "初始资金，默认 1000000"},
+                        "lookback_guard": {
+                            "type": "boolean",
+                            "description": "True=次日开盘成交；False=当日收盘成交",
+                        },
+                    },
+                    "required": [],
+                },
+            },
+            {
+                "id": "delete-account",
+                "name": "删除账户",
+                "desc": "删除纸面账户。hard=true 物理删除并级联清理；hard=false 仅关闭",
+                "params": [
+                    {"name": "account_id", "label": "账户ID", "type": "number", "required": True},
+                    {"name": "hard", "label": "物理删除", "type": "boolean", "required": False},
+                ],
+                "returns": "删除结果",
+                "openai_parameters": {
+                    "type": "object",
+                    "properties": {
+                        "account_id": {"type": "integer", "description": "要删除的账户 ID"},
+                        "hard": {
+                            "type": "boolean",
+                            "description": "true=物理删除（默认）；false=仅关闭",
+                        },
+                    },
+                    "required": ["account_id"],
+                },
+            },
+            {
+                "id": "roll-t1",
+                "name": "T+1日切",
+                "desc": "将冻结仓(frozen_qty)转为可卖仓(sellable_qty)；新交易日开盘前调用",
+                "params": [
+                    {"name": "account_id", "label": "账户ID", "type": "number", "required": False},
+                    {"name": "asof", "label": "日切日期", "type": "text", "required": False},
+                ],
+                "returns": "日切结果",
+                "openai_parameters": {
+                    "type": "object",
+                    "properties": {
+                        "account_id": {"type": "integer", "description": "不传则全部活跃账户"},
+                        "asof": {"type": "string", "description": "YYYY-MM-DD"},
+                        "force": {"type": "boolean", "description": "同日已切过是否强制"},
+                    },
+                    "required": [],
+                },
+            },
+            {
+                "id": "list-accounts",
+                "name": "账户列表",
+                "desc": "列出纸面账户",
+                "params": [{"name": "status", "label": "状态", "type": "text", "required": False}],
+                "returns": "账户列表",
+                "openai_parameters": {
+                    "type": "object",
+                    "properties": {
+                        "status": {"type": "string", "description": "active/closed，空=全部"},
+                    },
+                    "required": [],
+                },
+            },
+            {
+                "id": "get-account",
+                "name": "账户详情",
+                "desc": "查询账户现金/净值及持仓（可盯市）",
+                "params": [
+                    {"name": "account_id", "label": "账户ID", "type": "number", "required": True},
+                ],
+                "returns": "账户+持仓",
+                "openai_parameters": {
+                    "type": "object",
+                    "properties": {
+                        "account_id": {"type": "integer", "description": "纸面账户 ID"},
+                        "mark": {"type": "boolean", "description": "是否用最新收盘价盯市，默认 true"},
+                    },
+                    "required": ["account_id"],
+                },
+            },
+            {
+                "id": "list-positions",
+                "name": "持仓列表",
+                "desc": "查询账户持仓",
+                "params": [
+                    {"name": "account_id", "label": "账户ID", "type": "number", "required": True},
+                ],
+                "returns": "持仓列表",
+                "openai_parameters": {
+                    "type": "object",
+                    "properties": {
+                        "account_id": {"type": "integer"},
+                    },
+                    "required": ["account_id"],
+                },
+            },
+            {
+                "id": "get-market-brief",
+                "name": "市场感知",
+                "desc": "读取标的日线感知：regime、均线/RSI/MACD、近端K线，供决策使用",
+                "params": [
+                    {"name": "ts_code", "label": "标的代码", "type": "text", "required": True},
+                ],
+                "returns": "感知摘要",
+                "openai_parameters": {
+                    "type": "object",
+                    "properties": {
+                        "ts_code": {"type": "string", "description": "如 000001.SZ / 300750.SZ"},
+                        "limit": {"type": "integer", "description": "回看日线根数，默认 120"},
+                        "features": {
+                            "type": "string",
+                            "description": "逗号分隔特征，默认 ma,rsi,macd,vol_pctile",
+                        },
+                    },
+                    "required": ["ts_code"],
+                },
+            },
+            {
+                "id": "place-order",
+                "name": "下单",
+                "desc": "纸面下单。buy/sell；买入数量须为100整数倍；reason 写清决策理由",
+                "params": [
+                    {"name": "account_id", "label": "账户ID", "type": "number", "required": True},
+                    {"name": "ts_code", "label": "标的", "type": "text", "required": True},
+                    {"name": "side", "label": "方向", "type": "text", "required": True},
+                    {"name": "quantity", "label": "数量", "type": "number", "required": True},
+                    {"name": "reason", "label": "理由", "type": "text", "required": False},
+                ],
+                "returns": "订单/成交",
+                "openai_parameters": {
+                    "type": "object",
+                    "properties": {
+                        "account_id": {"type": "integer"},
+                        "ts_code": {"type": "string"},
+                        "side": {"type": "string", "enum": ["buy", "sell"]},
+                        "quantity": {"type": "number", "description": "股数；买入须为100整数倍"},
+                        "lookback_guard": {
+                            "type": "boolean",
+                            "description": "覆盖账户默认；True次日开盘，False当日收盘",
+                        },
+                        "signal_date": {"type": "string", "description": "信号日 YYYY-MM-DD"},
+                        "reason": {"type": "string", "description": "决策理由（审计用，建议必填）"},
+                    },
+                    "required": ["account_id", "ts_code", "side", "quantity"],
+                },
+            },
+            {
+                "id": "settle",
+                "name": "结算挂单",
+                "desc": "结算 lookback_guard 产生的 pending（次日开盘成交）",
+                "params": [
+                    {"name": "account_id", "label": "账户ID", "type": "number", "required": False},
+                ],
+                "returns": "结算结果",
+                "openai_parameters": {
+                    "type": "object",
+                    "properties": {
+                        "account_id": {"type": "integer", "description": "不传则结算全部账户"},
+                        "asof": {"type": "string", "description": "仅结算 exec_date<=asof"},
+                    },
+                    "required": [],
+                },
+            },
+            {
+                "id": "mark",
+                "name": "盯市",
+                "desc": "按最新收盘价更新净值并写入每日快照",
+                "params": [
+                    {"name": "account_id", "label": "账户ID", "type": "number", "required": True},
+                ],
+                "returns": "盯市结果",
+                "openai_parameters": {
+                    "type": "object",
+                    "properties": {
+                        "account_id": {"type": "integer"},
+                        "asof": {"type": "string"},
+                        "write_equity": {"type": "boolean"},
+                    },
+                    "required": ["account_id"],
+                },
+            },
+            {
+                "id": "get-stats",
+                "name": "交易统计",
+                "desc": "收益、回撤、胜率、买卖笔数等",
+                "params": [
+                    {"name": "account_id", "label": "账户ID", "type": "number", "required": True},
+                ],
+                "returns": "统计",
+                "openai_parameters": {
+                    "type": "object",
+                    "properties": {"account_id": {"type": "integer"}},
+                    "required": ["account_id"],
+                },
+            },
+            {
+                "id": "list-orders",
+                "name": "委托列表",
+                "desc": "查询委托（可按 status 过滤）",
+                "params": [
+                    {"name": "account_id", "label": "账户ID", "type": "number", "required": True},
+                ],
+                "returns": "委托列表",
+                "openai_parameters": {
+                    "type": "object",
+                    "properties": {
+                        "account_id": {"type": "integer"},
+                        "status": {"type": "string"},
+                        "limit": {"type": "integer"},
+                    },
+                    "required": ["account_id"],
+                },
+            },
+            {
+                "id": "list-fills",
+                "name": "成交列表",
+                "desc": "查询成交记录",
+                "params": [
+                    {"name": "account_id", "label": "账户ID", "type": "number", "required": True},
+                ],
+                "returns": "成交列表",
+                "openai_parameters": {
+                    "type": "object",
+                    "properties": {
+                        "account_id": {"type": "integer"},
+                        "limit": {"type": "integer"},
+                    },
+                    "required": ["account_id"],
+                },
+            },
+        ],
+    },
 }
 
 # QuantSkills 外部技能包（市场复盘 / 期货 DeepView / A股个股档案）
@@ -561,11 +818,14 @@ def parse_fn_name(fn_name: str) -> Tuple[Optional[str], Optional[str]]:
     return skill_id, right.replace("_", "-")
 
 
-def get_openai_tools() -> List[Dict[str, Any]]:
-    """生成 OpenAI / DeepSeek function calling tools 列表"""
+def get_openai_tools(skill_ids: Optional[List[str]] = None) -> List[Dict[str, Any]]:
+    """生成 OpenAI / DeepSeek function calling tools 列表；可按 skill_ids 过滤"""
+    allow = set(skill_ids) if skill_ids else None
     tools: List[Dict[str, Any]] = []
     for skill in SKILL_REGISTRY.values():
         if not skill.get("enabled", True):
+            continue
+        if allow is not None and skill["id"] not in allow:
             continue
         for t in skill.get("tools", []):
             tools.append({
@@ -583,10 +843,42 @@ def get_openai_tools() -> List[Dict[str, Any]]:
     return tools
 
 
-def build_agent_system_prompt(extra: Optional[str] = None) -> str:
+def build_agent_system_prompt(
+    extra: Optional[str] = None,
+    *,
+    skill_ids: Optional[List[str]] = None,
+    mode: Optional[str] = None,
+) -> str:
+    if mode == "paper_trade":
+        from tools.paper_toolkit import PAPER_TRADE_SYSTEM_PROMPT
+
+        skill_ids = skill_ids or ["paper-trade"]
+        catalog_lines = []
+        for skill in list_skills():
+            if skill["id"] not in skill_ids:
+                continue
+            catalog_lines.append(f"### {skill['name']} (`{skill['id']}`)")
+            catalog_lines.append(skill["desc"])
+            for t in skill.get("tools", []):
+                catalog_lines.append(
+                    f"- `{_fn_name(skill['id'], t['id'])}` — {t.get('name')}: {t.get('desc')}"
+                )
+            catalog_lines.append("")
+
+        prompt = f"""{PAPER_TRADE_SYSTEM_PROMPT}
+
+## 可调用函数一览
+{chr(10).join(catalog_lines)}
+"""
+        if extra:
+            prompt += f"\n## 额外系统说明\n{extra}\n"
+        return prompt
+
     handbook = get_handbook()
     catalog_lines = []
     for skill in list_skills():
+        if skill_ids is not None and skill["id"] not in skill_ids:
+            continue
         catalog_lines.append(f"### {skill['name']} (`{skill['id']}`)")
         catalog_lines.append(skill["desc"])
         for t in skill.get("tools", []):

@@ -77,6 +77,19 @@
             <div class="text-xs text-zinc-500">回测 · Agent · 记忆</div>
           </div>
         </div>
+
+        <!-- 模拟交易 -->
+        <div
+          @click="currentTab = 5"
+          :class="{ 'bg-zinc-800 text-white': currentTab === 5, 'text-zinc-400 hover:text-white hover:bg-zinc-800/50': currentTab !== 5 }"
+          class="flex items-center gap-3 px-4 py-3 rounded-xl cursor-pointer transition-all"
+        >
+          <i class="fa-solid fa-wallet w-5 text-center"></i>
+          <div>
+            <div class="font-medium text-sm">模拟交易</div>
+            <div class="text-xs text-zinc-500">纸面账户 · 交易 Agent</div>
+          </div>
+        </div>
       </div>
 
       <div class="p-5 border-t border-zinc-800 text-xs text-zinc-600">
@@ -321,6 +334,11 @@
         <div v-show="currentTab === 4" class="flex-1 min-h-0 overflow-hidden">
           <StrategyView />
         </div>
+
+        <!-- Paper Trade Tab -->
+        <div v-show="currentTab === 5" class="flex-1 min-h-0 overflow-hidden">
+          <PaperTradeView />
+        </div>
       </div>
     </div>
   </div>
@@ -333,10 +351,11 @@ import ChatView from './ChatView.vue'
 import DashView from './DashView.vue'
 import MarketDashView from './MarketDashView.vue'
 import StrategyView from './StrategyView.vue'
+import PaperTradeView from './PaperTradeView.vue'
 import { currentTab } from './appNav'
 
-const tabTitles = ['大模型对话', '行情看板', '存储层状态', '行情中心', '策略分析']
-const tabSubtitles = ['DeepSeek · GPT · Claude', 'K线 · MA · MACD · RSI', '连通测试 · 数据预览', '全市场 · 30张表', '模式A/B · 回测 · 记忆']
+const tabTitles = ['大模型对话', '行情看板', '存储层状态', '行情中心', '策略分析', '模拟交易']
+const tabSubtitles = ['DeepSeek · GPT · Claude', 'K线 · MA · MACD · RSI', '连通测试 · 数据预览', '全市场 · 30张表', '模式A/B · 回测 · 记忆', '纸面账户 · 感知决策执行']
 
 const testModels = [
   { id: 'deepseek-chat', name: 'DeepSeek Chat', provider: 'deepseek' },

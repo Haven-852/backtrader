@@ -66,6 +66,7 @@ from routers.storage_router import router as storage_router
 from routers.skill_router import router as skill_router
 from routers.market_data_router import router as market_data_router
 from routers.strategy_router import router as strategy_router
+from routers.paper_router import router as paper_router
 from routers.data_router import router as data_router
 
 app.include_router(system_router)          # /, /health, /agents
@@ -76,6 +77,7 @@ app.include_router(storage_router)         # /storage/*
 app.include_router(skill_router)           # /skills/*
 app.include_router(market_data_router)     # /market/*
 app.include_router(strategy_router)        # /strategy/*
+app.include_router(paper_router)           # /paper/*
 app.include_router(data_router)            # /data/selective/*, /data/continuous/*
 
 # ─── 启动日志 ─────────────────────────────────────────
@@ -116,6 +118,16 @@ async def startup_event():
     except Exception as e:
         logger.warning(f"自选股持续日更循环启动失败: {e}")
 
+    try:
+        from server.paper_cycle_service import paper_cycle_service
+        from server.paper_scheduler import paper_scheduler
+        cfg = paper_cycle_service.get_config().get("config") or {}
+        if cfg.get("scheduler_enabled"):
+            paper_scheduler.start()
+            logger.info("纸面交易定时器已按配置自动启动")
+    except Exception as e:
+        logger.warning(f"纸面交易定时器启动失败: {e}")
+
 
 @app.on_event("shutdown")
 async def shutdown_event():
@@ -128,6 +140,11 @@ async def shutdown_event():
             await task
         except asyncio.CancelledError:
             pass
+    try:
+        from server.paper_scheduler import paper_scheduler
+        await paper_scheduler.stop()
+    except Exception:
+        pass
 
 
 # ─── 直接运行 ─────────────────────────────────────────

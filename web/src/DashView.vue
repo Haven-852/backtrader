@@ -218,7 +218,7 @@
           >
             <i class="fa-solid fa-arrow-left mr-1"></i>返回选股结果
           </button>
-          <span class="text-emerald-500/80">来自「低于5日均线」，搜索结果仍保留</span>
+          <span class="text-emerald-500/80">来自「底部观察 / 升势回踩」选股，搜索结果仍保留</span>
         </div>
         <!-- 标题栏 -->
         <div

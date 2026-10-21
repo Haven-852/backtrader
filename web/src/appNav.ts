@@ -1,6 +1,6 @@
 import { ref } from 'vue'
 
-/** 与 App.vue 侧栏 tab 同步：0 对话 / 1 行情看板 / 2 存储 / 3 行情中心 / 4 策略分析 */
+/** 与 App.vue 侧栏 tab 同步：0 对话 / 1 行情看板 / 2 存储 / 3 行情中心 / 4 策略分析 / 5 模拟交易 */
 export const currentTab = ref(1)
 
 export type DashFocus = {

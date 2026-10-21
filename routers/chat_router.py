@@ -37,6 +37,16 @@ class MessageRequest(BaseModel):
     session_id: Optional[str] = Field(None, description="会话 ID；空则新建并落库")
     persist: bool = Field(default=True, description="是否写入 PostgreSQL")
     user_id: str = Field(default="default", description="用户标识")
+    agent_mode: Optional[str] = Field(
+        None, description="Agent 模式：paper_trade=纸面交易（仅纸面工具）"
+    )
+    tool_skills: Optional[List[str]] = Field(
+        None, description="限制可用技能 ID 列表，如 ['paper-trade']"
+    )
+    account_id: Optional[int] = Field(
+        None, description="纸面账户 ID（paper_trade 模式注入工具上下文）"
+    )
+    context: Dict[str, Any] = Field(default_factory=dict, description="额外上下文")
 
 
 class MessageResponse(BaseModel):
@@ -90,6 +100,10 @@ async def send_message(request: MessageRequest):
             if db_hist:
                 history = db_hist
 
+        ctx = dict(request.context or {})
+        if request.account_id is not None:
+            ctx["account_id"] = request.account_id
+
         chat_req = ChatRequest(
             query=request.query,
             model=request.model,
@@ -99,6 +113,9 @@ async def send_message(request: MessageRequest):
             system_prompt=request.system_prompt,
             temperature=request.temperature,
             max_tokens=request.max_tokens,
+            agent_mode=request.agent_mode,
+            tool_skills=request.tool_skills,
+            context=ctx,
         )
 
         if request.use_tools:
@@ -109,6 +126,7 @@ async def send_message(request: MessageRequest):
 
         usage = response.usage or {}
         tool_trace = usage.get("tool_trace") or []
+        order_ids = usage.get("order_ids") or []
 
         if request.persist:
             try:
@@ -127,11 +145,32 @@ async def send_message(request: MessageRequest):
                 import logging
                 logging.getLogger(__name__).warning("对话落库失败: %s", pe)
 
+        # 纸面交易模式：写入决策审计
+        if request.agent_mode == "paper_trade" and ctx.get("account_id") is not None:
+            try:
+                from server.paper_broker_service import paper_broker_service
+                paper_broker_service.log_decision(
+                    int(ctx["account_id"]),
+                    session_id=session_id,
+                    user_query=request.query,
+                    assistant_summary=response.content or "",
+                    tool_trace=tool_trace,
+                    order_ids=[int(x) for x in order_ids],
+                    meta={
+                        "model": response.model,
+                        "provider": response.provider,
+                        "agent_mode": "paper_trade",
+                    },
+                )
+            except Exception as de:
+                import logging
+                logging.getLogger(__name__).warning("决策日志写入失败: %s", de)
+
         return MessageResponse(
             content=response.content,
             model=response.model,
             provider=response.provider,
-            usage={k: v for k, v in usage.items() if k != "tool_trace"},
+            usage={k: v for k, v in usage.items() if k not in ("tool_trace",)},
             finish_reason=response.finish_reason,
             timestamp=response.timestamp,
             tool_trace=tool_trace,
