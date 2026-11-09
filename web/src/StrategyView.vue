@@ -131,10 +131,10 @@
             ]"
           >
             <div class="flex items-center justify-between mb-0.5">
-              <span class="text-xs font-medium text-zinc-200">观察池 / 升势回踩</span>
+              <span class="text-xs font-medium text-zinc-200">阶段 × 流程选股</span>
               <span class="text-[9px] px-1.5 py-0.5 rounded bg-zinc-800 text-zinc-500">选股</span>
             </div>
-            <p class="text-[10px] text-zinc-500 leading-relaxed">A 观察池（缩量筑底转弯）/ B 升势回踩；缺数自动走 Datahubco 补日线</p>
+            <p class="text-[10px] text-zinc-500 leading-relaxed">上升/震荡/下降 × 入选到卖出；点方法加载对应日线窗口做全市场筛选</p>
           </div>
           <div
             @click="openIntraday"
@@ -149,7 +149,7 @@
               <span class="text-xs font-medium text-zinc-200">日内高低点</span>
               <span class="text-[9px] px-1.5 py-0.5 rounded bg-zinc-800 text-zinc-500">LightGBM</span>
             </div>
-            <p class="text-[10px] text-zinc-500 leading-relaxed">5 分钟先碰障碍的三分类。旁边列出当前有分钟线、能进训练集的股票和日期。</p>
+            <p class="text-[10px] text-zinc-500 leading-relaxed">日频：收盘后预测次日高低点参考价；分钟：15 分钟内先碰障碍的三分类。</p>
           </div>
         </div>
         <div v-if="catalogError" class="px-3 py-2 text-[10px] text-red-400 border-b border-zinc-800">
@@ -196,281 +196,12 @@
 
         <div class="flex-1 overflow-y-auto scrollbar-thin p-4 space-y-4">
           <IntradayTurningPanel v-if="mainTab === 'intraday'" />
-          <template v-if="mainTab === 'screener'">
-            <div class="bg-zinc-900 rounded-2xl border border-zinc-800 p-4 space-y-3">
-              <div class="flex items-center justify-between gap-2">
-                <h4 class="text-xs font-semibold text-zinc-300 flex items-center gap-2">
-                  <i class="fa-solid fa-filter text-emerald-400"></i> 观察池 / 升势回踩 / 趋势回踩
-                  <span class="text-[10px] text-zinc-500 font-normal">A 只观察；B 回踩 MA5；C 升势缩量回踩 MA10、次日开盘买。缺数自动从 Datahubco 补齐</span>
-                </h4>
-                <div class="flex items-center gap-1.5 flex-shrink-0">
-                  <button
-                    type="button"
-                    @click="runPipeline"
-                    :disabled="pipelineLoading || screenerLoading"
-                    class="px-3 py-1.5 rounded-lg text-[11px] bg-rose-600/20 text-rose-300 border border-rose-500/30 hover:bg-rose-600/30 disabled:opacity-50"
-                    title="A≥70→自选50→起飞推荐→衰竭出池"
-                  >
-                    <i class="fa-solid fa-rocket mr-1" :class="{ 'fa-spinner animate-spin': pipelineLoading }"></i>
-                    {{ pipelineLoading ? '流水线…' : '跑推荐流水线' }}
-                  </button>
-                  <button
-                    type="button"
-                    @click="runScreener"
-                    :disabled="screenerLoading"
-                    class="px-3 py-1.5 rounded-lg text-[11px] bg-emerald-600/20 text-emerald-300 border border-emerald-500/30 hover:bg-emerald-600/30 disabled:opacity-50"
-                  >
-                    <i class="fa-solid fa-magnifying-glass mr-1" :class="{ 'fa-spinner animate-spin': screenerLoading }"></i>
-                    {{ screenerLoading ? '搜索并入库中…' : '开始搜索' }}
-                  </button>
-                </div>
-              </div>
-              <div class="grid grid-cols-2 lg:grid-cols-4 gap-2">
-                <div>
-                  <label class="text-[10px] text-zinc-500 block mb-1">交易日</label>
-                  <input
-                    v-model="screener.asof"
-                    type="date"
-                    class="w-full bg-zinc-800 border border-zinc-700 rounded-lg px-2.5 py-1.5 text-xs outline-none"
-                    title="默认跟随当天已收盘交易日；需要历史回看时再点此修改"
-                    @change="screenerAsofPinned = true"
-                  />
-                </div>
-                <div>
-                  <label class="text-[10px] text-zinc-500 block mb-1">最多返回</label>
-                  <input v-model.number="screener.limit" type="number" min="10" max="1000" class="w-full bg-zinc-800 border border-zinc-700 rounded-lg px-2.5 py-1.5 text-xs outline-none" />
-                </div>
-              </div>
-              <div class="flex flex-wrap gap-1.5">
-                <label class="flex items-center gap-1 px-2 py-1 rounded-md bg-amber-950/40 text-[10px] text-amber-300 cursor-pointer border border-amber-900/40">
-                  <input v-model="screener.includeA" type="checkbox" class="rounded border-zinc-600" /> A 观察池
-                </label>
-                <label class="flex items-center gap-1 px-2 py-1 rounded-md bg-emerald-950/40 text-[10px] text-emerald-300 cursor-pointer border border-emerald-900/40">
-                  <input v-model="screener.includeB" type="checkbox" class="rounded border-zinc-600" /> B 升势回踩
-                </label>
-                <label class="flex items-center gap-1 px-2 py-1 rounded-md bg-sky-950/40 text-[10px] text-sky-300 cursor-pointer border border-sky-900/40">
-                  <input v-model="screener.includeC" type="checkbox" class="rounded border-zinc-600" /> C 趋势回踩
-                </label>
-                <label class="flex items-center gap-1 px-2 py-1 rounded-md bg-zinc-800/80 text-[10px] text-zinc-400 cursor-pointer">
-                  <input v-model="screener.includeMain" type="checkbox" class="rounded border-zinc-600" /> 主板
-                </label>
-                <label class="flex items-center gap-1 px-2 py-1 rounded-md bg-zinc-800/80 text-[10px] text-zinc-400 cursor-pointer">
-                  <input v-model="screener.includeStar" type="checkbox" class="rounded border-zinc-600" /> 科创板
-                </label>
-                <label class="flex items-center gap-1 px-2 py-1 rounded-md bg-zinc-800/80 text-[10px] text-zinc-400 cursor-pointer">
-                  <input v-model="screener.includeChinext" type="checkbox" class="rounded border-zinc-600" /> 创业板
-                </label>
-                <label class="flex items-center gap-1 px-2 py-1 rounded-md bg-zinc-800/80 text-[10px] text-zinc-400 cursor-pointer">
-                  <input v-model="screener.includeBse" type="checkbox" class="rounded border-zinc-600" /> 北交所
-                </label>
-                <label class="flex items-center gap-1 px-2 py-1 rounded-md bg-zinc-800/80 text-[10px] text-zinc-400 cursor-pointer">
-                  <input v-model="screener.includeSt" type="checkbox" class="rounded border-zinc-600" /> 包含 ST
-                </label>
-              </div>
-              <p class="text-[10px] text-zinc-600">B 按得分推荐；A 观察池只观察不买入；C=升势里缩量回踩 MA10，收盘出信号、次日开盘买，止损在近10日结构低点，风险≤4%，T+1 后才能卖，最多持 5 日。窗口约 40 日，缺数会先走 Datahubco 补全日线。点击一行到行情看板看 K 线。「跑推荐流水线」仍只走 A 观察→起飞，不含 C。</p>
-              <p v-if="pipelineError" class="text-xs text-red-400 bg-red-500/10 border border-red-500/20 rounded-lg px-3 py-2">{{ pipelineError }}</p>
-              <div v-if="pipelineResult" class="text-[10px] text-rose-300/90 bg-rose-950/20 border border-rose-900/40 rounded-lg px-3 py-2 space-y-0.5">
-                <div>
-                  流水线 {{ pipelineResult.asof }}
-                  · 观察 {{ pipelineResult.observe?.count ?? 0 }}
-                  · 起飞入池 {{ pipelineResult.takeoff?.promoted_count ?? 0 }}
-                  · 衰竭出池 {{ pipelineResult.exhaustion?.exhausted_count ?? 0 }}
-                  · 推荐池活跃 {{ pipelineResult.recommend_active ?? 0 }}
-                </div>
-                <div v-if="pipelineResult.observe?.note" class="text-amber-300/90">
-                  {{ pipelineResult.observe.note }}
-                  <span v-if="pipelineResult.observe?.score_top5?.length" class="text-zinc-500">
-                    · Top分 {{ pipelineResult.observe.score_top5.join(' / ') }}
-                  </span>
-                </div>
-                <div v-if="(pipelineResult.takeoff?.promoted || []).length" class="text-zinc-400 truncate">
-                  新晋：{{ (pipelineResult.takeoff.promoted || []).slice(0, 5).map((x: any) => x.name || x.ts_code).join('、') }}
-                </div>
-                <div v-if="(pipelineResult.exhaustion?.exhausted || []).length" class="text-zinc-500 truncate">
-                  出池：{{ (pipelineResult.exhaustion.exhausted || []).slice(0, 5).map((x: any) => x.name || x.ts_code).join('、') }}
-                </div>
-              </div>
-              <p v-if="screenerError" class="text-xs text-red-400 bg-red-500/10 border border-red-500/20 rounded-lg px-3 py-2">{{ screenerError }}</p>
-              <div v-if="screenerResult" class="text-[10px] text-zinc-400 space-y-0.5">
-                <div>
-                  交易日 {{ screenerResult.asof }} · 股票池 {{ screenerResult.universe }} · B {{ screenerResult.hit_count_b ?? 0 }} · A {{ screenerResult.hit_count_a ?? 0 }} · C {{ screenerResult.hit_count_c ?? 0 }}
-                </div>
-                <div v-if="screenerResult.fill_report" class="text-zinc-500">
-                  Datahubco
-                  · 补 {{ (screenerResult.fill_report.days_fetched || []).length }} 日
-                  · 写入 {{ screenerResult.fill_report.rows ?? screenerResult.filled_rows ?? 0 }} 行
-                  · 已齐跳过 {{ (screenerResult.fill_report.days_skipped || []).length }} 日
-                  <span v-if="(screenerResult.fill_report.errors || []).length" class="text-amber-400">
-                    · 失败 {{ screenerResult.fill_report.errors.length }} 日
-                  </span>
-                </div>
-                <div v-else-if="screenerResult.filled_rows" class="text-zinc-500">入库 {{ screenerResult.filled_rows }} 行</div>
-                <div v-if="screenerResult.note" class="text-zinc-600">{{ screenerResult.note }}</div>
-              </div>
-              <div v-if="screenerLoading" class="text-xs text-zinc-500 py-4 text-center">
-                <i class="fa-solid fa-spinner animate-spin mr-1"></i>正在检查日线窗口，缺口从 Datahubco 自动补齐后分类 A / B / C…
-              </div>
-              <div v-if="hitsC.length" class="space-y-1.5">
-                <div class="flex items-center gap-2 text-[11px] text-sky-300">
-                  <span class="px-1.5 py-0.5 rounded bg-sky-500/15 border border-sky-500/20">C 趋势回踩</span>
-                  <span class="text-zinc-500">升势缩量回踩 · {{ hitsC.length }} 只 · 按风险从小到大 · 次日开盘买</span>
-                </div>
-                <div class="border border-sky-900/40 rounded-xl overflow-hidden">
-                  <table class="w-full text-[11px]">
-                    <thead class="bg-zinc-800/80 text-zinc-500">
-                      <tr>
-                        <th class="text-left px-2 py-1.5 font-medium">代码</th>
-                        <th class="text-left px-2 py-1.5 font-medium">名称</th>
-                        <th class="text-left px-2 py-1.5 font-medium">板块</th>
-                        <th class="text-right px-2 py-1.5 font-medium">收盘</th>
-                        <th class="text-right px-2 py-1.5 font-medium">MA10</th>
-                        <th class="text-right px-2 py-1.5 font-medium">止损</th>
-                        <th class="text-right px-2 py-1.5 font-medium">风险%</th>
-                        <th class="text-right px-2 py-1.5 font-medium">缩量</th>
-                        <th class="text-right px-2 py-1.5 font-medium">得分</th>
-                        <th class="text-left px-2 py-1.5 font-medium">原因</th>
-                        <th class="px-2 py-1.5"></th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      <tr
-                        v-for="h in hitsC"
-                        :key="'C-'+h.ts_code"
-                        class="border-t border-zinc-800/60 hover:bg-zinc-800/40 cursor-pointer"
-                        :class="screenerActiveCode === h.ts_code ? 'bg-sky-500/10' : ''"
-                        title="点击在行情看板查看"
-                        @click="openHitInDash(h)"
-                      >
-                        <td class="px-2 py-1.5 font-mono text-zinc-300">{{ h.ts_code }}</td>
-                        <td class="px-2 py-1.5 text-zinc-200">
-                          {{ h.name }}
-                          <span v-if="h.is_st" class="ml-1 text-[9px] text-red-400">ST</span>
-                        </td>
-                        <td class="px-2 py-1.5 text-zinc-500">{{ h.market }}</td>
-                        <td class="px-2 py-1.5 text-right tabular-nums">{{ h.close }}</td>
-                        <td class="px-2 py-1.5 text-right tabular-nums text-zinc-400">{{ h.ma10 ?? h.ma5 }}</td>
-                        <td class="px-2 py-1.5 text-right tabular-nums text-sky-300">{{ h.signal_stop }}</td>
-                        <td class="px-2 py-1.5 text-right tabular-nums text-sky-200">{{ h.risk_fraction_signal != null ? (Number(h.risk_fraction_signal) * 100).toFixed(2) : '-' }}</td>
-                        <td class="px-2 py-1.5 text-right tabular-nums text-zinc-400">{{ h.vol_pullback }}</td>
-                        <td class="px-2 py-1.5 text-right tabular-nums text-sky-300">{{ h.score }}</td>
-                        <td class="px-2 py-1.5 text-zinc-500">{{ h.reason }}</td>
-                        <td class="px-2 py-1.5 text-right">
-                          <span class="text-[10px] text-sky-400">看行情</span>
-                        </td>
-                      </tr>
-                    </tbody>
-                  </table>
-                </div>
-              </div>
-              <div v-if="hitsB.length" class="space-y-1.5">
-                <div class="flex items-center gap-2 text-[11px] text-emerald-300">
-                  <span class="px-1.5 py-0.5 rounded bg-emerald-500/15 border border-emerald-500/20">B 升势回踩</span>
-                  <span class="text-zinc-500">反转候选 · {{ hitsB.length }} 只 · 按得分排序</span>
-                </div>
-                <div class="border border-emerald-900/40 rounded-xl overflow-hidden">
-                  <table class="w-full text-[11px]">
-                    <thead class="bg-zinc-800/80 text-zinc-500">
-                      <tr>
-                        <th class="text-left px-2 py-1.5 font-medium">代码</th>
-                        <th class="text-left px-2 py-1.5 font-medium">名称</th>
-                        <th class="text-left px-2 py-1.5 font-medium">板块</th>
-                        <th class="text-right px-2 py-1.5 font-medium">收盘</th>
-                        <th class="text-right px-2 py-1.5 font-medium">MA5</th>
-                        <th class="text-right px-2 py-1.5 font-medium">低于%</th>
-                        <th class="text-right px-2 py-1.5 font-medium">涨跌%</th>
-                        <th class="text-right px-2 py-1.5 font-medium">得分</th>
-                        <th class="text-left px-2 py-1.5 font-medium">原因</th>
-                        <th class="px-2 py-1.5"></th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      <tr
-                        v-for="h in hitsB"
-                        :key="'B-'+h.ts_code"
-                        class="border-t border-zinc-800/60 hover:bg-zinc-800/40 cursor-pointer"
-                        :class="screenerActiveCode === h.ts_code ? 'bg-emerald-500/10' : ''"
-                        title="点击在行情看板查看"
-                        @click="openHitInDash(h)"
-                      >
-                        <td class="px-2 py-1.5 font-mono text-zinc-300">{{ h.ts_code }}</td>
-                        <td class="px-2 py-1.5 text-zinc-200">
-                          {{ h.name }}
-                          <span v-if="h.is_st" class="ml-1 text-[9px] text-red-400">ST</span>
-                        </td>
-                        <td class="px-2 py-1.5 text-zinc-500">{{ h.market }}</td>
-                        <td class="px-2 py-1.5 text-right tabular-nums">{{ h.close }}</td>
-                        <td class="px-2 py-1.5 text-right tabular-nums text-zinc-400">{{ h.ma5 }}</td>
-                        <td class="px-2 py-1.5 text-right tabular-nums text-emerald-400">{{ h.below_pct }}</td>
-                        <td class="px-2 py-1.5 text-right tabular-nums" :class="Number(h.pct_chg) >= 0 ? 'text-red-400' : 'text-emerald-400'">{{ h.pct_chg }}</td>
-                        <td class="px-2 py-1.5 text-right tabular-nums text-emerald-300">{{ h.score }}</td>
-                        <td class="px-2 py-1.5 text-zinc-500">{{ h.reason }}</td>
-                        <td class="px-2 py-1.5 text-right">
-                          <span class="text-[10px] text-sky-400">看行情</span>
-                        </td>
-                      </tr>
-                    </tbody>
-                  </table>
-                </div>
-              </div>
-              <div v-if="hitsA.length" class="space-y-1.5">
-                <div class="flex items-center gap-2 text-[11px] text-amber-300">
-                  <span class="px-1.5 py-0.5 rounded bg-amber-500/15 border border-amber-500/20">A 观察池</span>
-                  <span class="text-zinc-500">缩量筑底转弯 · {{ hitsA.length }} 只 · 只观察不买入</span>
-                </div>
-                <div class="border border-amber-900/40 rounded-xl overflow-hidden">
-                  <table class="w-full text-[11px]">
-                    <thead class="bg-zinc-800/80 text-zinc-500">
-                      <tr>
-                        <th class="text-left px-2 py-1.5 font-medium">代码</th>
-                        <th class="text-left px-2 py-1.5 font-medium">名称</th>
-                        <th class="text-left px-2 py-1.5 font-medium">板块</th>
-                        <th class="text-right px-2 py-1.5 font-medium">收盘</th>
-                        <th class="text-right px-2 py-1.5 font-medium">MA5</th>
-                        <th class="text-right px-2 py-1.5 font-medium">低于%</th>
-                        <th class="text-right px-2 py-1.5 font-medium">涨跌%</th>
-                        <th class="text-right px-2 py-1.5 font-medium">跌幅%</th>
-                        <th class="text-right px-2 py-1.5 font-medium">观察期</th>
-                        <th class="text-right px-2 py-1.5 font-medium">得分</th>
-                        <th class="text-left px-2 py-1.5 font-medium">原因</th>
-                        <th class="px-2 py-1.5"></th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      <tr
-                        v-for="h in hitsA"
-                        :key="'A-'+h.ts_code"
-                        class="border-t border-zinc-800/60 hover:bg-zinc-800/40 cursor-pointer"
-                        :class="screenerActiveCode === h.ts_code ? 'bg-amber-500/10' : ''"
-                        title="点击在行情看板查看"
-                        @click="openHitInDash(h)"
-                      >
-                        <td class="px-2 py-1.5 font-mono text-zinc-300">{{ h.ts_code }}</td>
-                        <td class="px-2 py-1.5 text-zinc-200">
-                          {{ h.name }}
-                          <span v-if="h.is_st" class="ml-1 text-[9px] text-red-400">ST</span>
-                        </td>
-                        <td class="px-2 py-1.5 text-zinc-500">{{ h.market }}</td>
-                        <td class="px-2 py-1.5 text-right tabular-nums">{{ h.close }}</td>
-                        <td class="px-2 py-1.5 text-right tabular-nums text-zinc-400">{{ h.ma5 }}</td>
-                        <td class="px-2 py-1.5 text-right tabular-nums text-amber-400">{{ h.below_pct }}</td>
-                        <td class="px-2 py-1.5 text-right tabular-nums" :class="Number(h.pct_chg) >= 0 ? 'text-red-400' : 'text-emerald-400'">{{ h.pct_chg }}</td>
-                        <td class="px-2 py-1.5 text-right tabular-nums text-zinc-300">{{ h.decline_days ?? '-' }}日</td>
-                        <td class="px-2 py-1.5 text-right tabular-nums text-amber-200">{{ h.expect_up_days ?? '-' }}日</td>
-                        <td class="px-2 py-1.5 text-right tabular-nums text-amber-300">{{ h.score }}</td>
-                        <td class="px-2 py-1.5 text-zinc-500">{{ h.reason }}</td>
-                        <td class="px-2 py-1.5 text-right">
-                          <span class="text-[10px] text-sky-400">看行情</span>
-                        </td>
-                      </tr>
-                    </tbody>
-                  </table>
-                </div>
-              </div>
-              <div v-else-if="screenerResult && !screenerLoading && !hitsA.length && !hitsB.length && !hitsC.length" class="text-xs text-zinc-600 py-6 text-center">
-                没有满足 A / B / C 条件的股票
-              </div>
-            </div>
-          </template>
+          <ScreenerFlowPanel
+            v-show="mainTab === 'screener'"
+            @log="(msg, level) => pushLog(msg, level as any)"
+            @asof="onScreenerAsof"
+            @activated="onScreenerActivated"
+          />
 
           <!-- 感知与参数 -->
           <template v-if="mainTab === 'setup'">
@@ -540,9 +271,40 @@
                     <input v-model.number="config.cash" type="number" class="w-full bg-zinc-800 border border-zinc-700 rounded-lg px-2.5 py-1.5 text-xs outline-none" />
                   </div>
                   <div>
+                    <label class="text-[10px] text-zinc-500 block mb-1">仓位比例%</label>
+                    <input v-model.number="config.positionPct" type="number" min="1" max="100" step="1" class="w-full bg-zinc-800 border border-zinc-700 rounded-lg px-2.5 py-1.5 text-xs outline-none" />
+                  </div>
+                  <div>
+                    <label class="text-[10px] text-zinc-500 block mb-1">最大手数（0=不限）</label>
+                    <input v-model.number="config.maxLots" type="number" min="0" step="1" class="w-full bg-zinc-800 border border-zinc-700 rounded-lg px-2.5 py-1.5 text-xs outline-none" />
+                  </div>
+                  <div>
                     <label class="text-[10px] text-zinc-500 block mb-1">波动分位窗口</label>
                     <input v-model.number="config.volWindow" type="number" class="w-full bg-zinc-800 border border-zinc-700 rounded-lg px-2.5 py-1.5 text-xs outline-none" />
                   </div>
+                  <label class="col-span-2 flex items-start gap-2 text-[10px] text-zinc-400 cursor-pointer select-none">
+                    <input v-model="config.elderLadder" type="checkbox" class="mt-0.5 rounded border-zinc-600 bg-zinc-800 text-sky-500" />
+                    <span class="leading-relaxed">
+                      高龄阶梯仓位：信号开仓后，跌 15%/25% 增持 10%/25%；涨 25%/35%/45%/60% 减仓 10%/20%/30%/40%，涨 100% 清仓。
+                      策略出场信号则全仓卖掉。中间涨跌只要没出场信号，就按阶梯操作。
+                    </span>
+                  </label>
+                  <div>
+                    <label class="text-[10px] text-zinc-500 block mb-1">佣金(万分)</label>
+                    <input v-model.number="config.commissionWan" type="number" min="0" max="10" step="0.1" class="w-full bg-zinc-800 border border-zinc-700 rounded-lg px-2.5 py-1.5 text-xs outline-none" />
+                  </div>
+                  <div>
+                    <label class="text-[10px] text-zinc-500 block mb-1">最低佣金(元)</label>
+                    <input v-model.number="config.commissionMin" type="number" min="0" max="20" step="1" class="w-full bg-zinc-800 border border-zinc-700 rounded-lg px-2.5 py-1.5 text-xs outline-none" />
+                  </div>
+                  <div>
+                    <label class="text-[10px] text-zinc-500 block mb-1">印花税(万分,仅卖出)</label>
+                    <input v-model.number="config.stampWan" type="number" min="0" max="20" step="0.1" class="w-full bg-zinc-800 border border-zinc-700 rounded-lg px-2.5 py-1.5 text-xs outline-none" />
+                  </div>
+                  <p class="col-span-2 text-[10px] text-zinc-500 leading-relaxed">
+                    首次开仓按仓位比例%（默认 30%），A 股整手 100 股。关掉阶梯则持仓不动直到策略卖出。
+                    回测默认佣金万二、最低 5 元，卖出另收印花税万五，会从现金和收益里扣除。
+                  </p>
                 </div>
                 <div class="flex flex-wrap gap-1.5 pt-1">
                   <label v-for="f in featureToggles" :key="f.id" class="flex items-center gap-1 px-2 py-1 rounded-md bg-zinc-800/80 text-[10px] text-zinc-400 cursor-pointer">
@@ -665,6 +427,186 @@
                 </div>
               </div>
             </div>
+
+            <div class="bg-zinc-900 rounded-2xl border border-zinc-800 p-4 space-y-3">
+              <div class="flex flex-wrap items-start justify-between gap-2">
+                <div>
+                  <h4 class="text-xs font-semibold text-zinc-300 flex items-center gap-2">
+                    <i class="fa-solid fa-layer-group text-amber-400"></i>
+                    跨股稳健回测
+                  </h4>
+                  <p class="mt-1 text-[11px] text-zinc-500 leading-relaxed max-w-3xl">
+                    不按后来谁涨得多挑股票。默认用回测开始后前 20 个交易日成交额选出约 100 只主板流动性股票，
+                    按代码切成寻参 / 确认两半。买卖会按沪深300当时的阶段归类：同一套信号在上升趋势和下降趋势里效果不同，只在当前阶段样本足够时才建议采用。
+                  </p>
+                </div>
+                <div class="flex flex-wrap items-center gap-2">
+                  <label class="text-[10px] text-zinc-500">股票数
+                    <input v-model.number="universeCfg.n" type="number" min="10" max="150" class="ml-1 w-16 bg-zinc-800 border border-zinc-700 rounded px-1.5 py-1 text-xs" />
+                  </label>
+                  <select v-model="universeCfg.board" class="bg-zinc-800 border border-zinc-700 rounded px-2 py-1 text-xs">
+                    <option value="main">主板流动性</option>
+                    <option value="all">库内全部（仍按成交额）</option>
+                    <option value="chinext">创业板</option>
+                    <option value="star">科创板</option>
+                  </select>
+                  <label class="flex items-center gap-1 text-[10px] text-zinc-400 cursor-pointer">
+                    <input v-model="universeCfg.search" type="checkbox" class="rounded border-zinc-600 bg-zinc-800 text-amber-500" />
+                    稳健寻参（确认半区验收）
+                  </label>
+                  <button
+                    type="button"
+                    @click="runUniverseBacktest"
+                    :disabled="universeLoading || !selectedStrategy || !config.start || !config.end"
+                    class="px-2.5 py-1 rounded-lg text-[11px] bg-amber-600/20 text-amber-200 border border-amber-500/30 hover:bg-amber-600/30 disabled:opacity-50"
+                  >
+                    <i class="fa-solid fa-flask mr-1" :class="{ 'fa-spinner animate-spin': universeLoading }"></i>
+                    {{ universeLoading ? '批量回测中…' : '跑 100 只' }}
+                  </button>
+                </div>
+              </div>
+              <p v-if="universeError" class="text-[11px] text-red-400">{{ universeError }}</p>
+              <template v-if="universeResult">
+                <p class="text-[10px] text-zinc-500">
+                  {{ universeResult.strategy_name }} · {{ universeResult.date_range?.start }} → {{ universeResult.date_range?.end }}
+                  · 池 {{ universeResult.universe_n }} · 测成 {{ universeResult.tested_n }} · 跳过 {{ universeResult.skipped_n }}
+                  · {{ universeResult.elapsed_ms }} ms
+                </p>
+                <p v-if="universeResult.note" class="text-[10px] text-amber-200/80 bg-amber-950/20 border border-amber-900/30 rounded-lg px-3 py-2">{{ universeResult.note }}</p>
+                <div class="grid grid-cols-2 md:grid-cols-4 xl:grid-cols-8 gap-2">
+                  <div v-for="m in universeSummaryCards" :key="m.key" class="bg-zinc-950 border border-zinc-800 rounded-xl px-3 py-2.5">
+                    <div class="text-[10px] text-zinc-500 mb-0.5">{{ m.label }}</div>
+                    <div :class="m.color" class="text-sm font-bold tabular-nums">{{ m.value }}</div>
+                  </div>
+                </div>
+                <div v-if="universeResult.suggested" class="rounded-xl border px-3 py-2 text-[11px]" :class="universeResult.suggested.accepted ? 'border-emerald-800 bg-emerald-950/20 text-emerald-200' : 'border-zinc-700 bg-zinc-950 text-zinc-400'">
+                  <div class="flex flex-wrap items-center justify-between gap-2">
+                    <span>{{ universeResult.suggested.note }}</span>
+                    <button
+                      v-if="universeResult.suggested.accepted"
+                      type="button"
+                      class="px-2 py-1 rounded bg-emerald-700/40 text-emerald-100 text-[10px]"
+                      @click="applySuggestedParams"
+                    >采用确认区参数</button>
+                  </div>
+                  <div class="mt-1 text-[10px] font-mono text-zinc-400">{{ JSON.stringify(universeResult.suggested.params) }}</div>
+                </div>
+                <div v-if="universeResult.signal_stats" class="space-y-2">
+                  <div class="flex flex-wrap items-center justify-between gap-2">
+                    <div class="text-xs text-zinc-300">
+                      当前阶段
+                      <span class="ml-1 px-1.5 py-0.5 rounded bg-sky-500/15 text-sky-300">{{ universeResult.signal_stats.current_regime_label }}</span>
+                      <span class="ml-2 text-[10px] text-zinc-500">沪深300 · 完整交易 {{ universeResult.signal_stats.trip_count }} 笔 · 建议来自{{ universeResult.signal_stats.advice_from }}</span>
+                    </div>
+                    <div class="flex gap-1 text-[10px]">
+                      <button type="button" class="px-2 py-0.5 rounded" :class="signalFilter === 'current' ? 'bg-sky-600/30 text-sky-200' : 'bg-zinc-800 text-zinc-500'" @click="signalFilter = 'current'">当前阶段</button>
+                      <button type="button" class="px-2 py-0.5 rounded" :class="signalFilter === 'all' ? 'bg-sky-600/30 text-sky-200' : 'bg-zinc-800 text-zinc-500'" @click="signalFilter = 'all'">全部阶段</button>
+                    </div>
+                  </div>
+                  <div v-if="universeResult.signal_stats.advice?.length" class="flex flex-wrap gap-1.5">
+                    <span
+                      v-for="a in universeResult.signal_stats.advice"
+                      :key="a.kind + a.signal"
+                      class="text-[10px] px-2 py-1 rounded border"
+                      :class="a.action === '采用' ? 'border-emerald-800 bg-emerald-950/30 text-emerald-200' : a.action === '暂停' ? 'border-red-900 bg-red-950/30 text-red-300' : a.action === '慎用' ? 'border-amber-800 bg-amber-950/30 text-amber-200' : 'border-zinc-700 bg-zinc-950 text-zinc-400'"
+                      :title="a.note"
+                    >{{ a.kind }} · {{ a.signal }} · {{ a.action }} · n={{ a.n }}</span>
+                  </div>
+                  <div class="grid grid-cols-1 lg:grid-cols-2 gap-2">
+                    <div class="bg-zinc-950 border border-zinc-800 rounded-2xl overflow-hidden">
+                      <div class="px-3 py-2 text-xs font-semibold text-zinc-400 border-b border-zinc-800">买入信号 × 阶段</div>
+                      <div class="max-h-56 overflow-auto">
+                        <table class="w-full text-xs">
+                          <thead class="sticky top-0 bg-zinc-950 text-zinc-500">
+                            <tr>
+                              <th class="text-left py-1.5 px-3">信号</th>
+                              <th class="text-left py-1.5 px-2">阶段</th>
+                              <th class="text-right py-1.5 px-2">次数</th>
+                              <th class="text-right py-1.5 px-2">胜率</th>
+                              <th class="text-right py-1.5 px-2">中位收益</th>
+                            </tr>
+                          </thead>
+                          <tbody>
+                            <tr v-for="row in filteredSignalRows(universeResult.signal_stats.entry_rows)" :key="row.signal + row.regime" class="border-b border-zinc-800/40">
+                              <td class="py-1 px-3 text-zinc-300">{{ row.signal }}</td>
+                              <td class="py-1 px-2 text-zinc-500">{{ row.regime_label }}</td>
+                              <td class="py-1 px-2 text-right tabular-nums text-zinc-400">{{ row.n }}</td>
+                              <td class="py-1 px-2 text-right tabular-nums">{{ fmtPct(row.win_rate) }}</td>
+                              <td class="py-1 px-2 text-right tabular-nums" :class="row.median_ret >= 0 ? 'text-red-400' : 'text-green-400'">{{ fmtPct(row.median_ret) }}</td>
+                            </tr>
+                          </tbody>
+                        </table>
+                      </div>
+                    </div>
+                    <div class="bg-zinc-950 border border-zinc-800 rounded-2xl overflow-hidden">
+                      <div class="px-3 py-2 text-xs font-semibold text-zinc-400 border-b border-zinc-800">卖出信号 × 阶段</div>
+                      <div class="max-h-56 overflow-auto">
+                        <table class="w-full text-xs">
+                          <thead class="sticky top-0 bg-zinc-950 text-zinc-500">
+                            <tr>
+                              <th class="text-left py-1.5 px-3">信号</th>
+                              <th class="text-left py-1.5 px-2">阶段</th>
+                              <th class="text-right py-1.5 px-2">次数</th>
+                              <th class="text-right py-1.5 px-2">中位收益</th>
+                              <th class="text-right py-1.5 px-2">卖后5日</th>
+                            </tr>
+                          </thead>
+                          <tbody>
+                            <tr v-for="row in filteredSignalRows(universeResult.signal_stats.exit_rows)" :key="row.signal + row.regime" class="border-b border-zinc-800/40">
+                              <td class="py-1 px-3 text-zinc-300">{{ row.signal }}</td>
+                              <td class="py-1 px-2 text-zinc-500">{{ row.regime_label }}</td>
+                              <td class="py-1 px-2 text-right tabular-nums text-zinc-400">{{ row.n }}</td>
+                              <td class="py-1 px-2 text-right tabular-nums" :class="row.median_ret >= 0 ? 'text-red-400' : 'text-green-400'">{{ fmtPct(row.median_ret) }}</td>
+                              <td class="py-1 px-2 text-right tabular-nums text-zinc-400">{{ row.median_after_5d == null ? '—' : fmtPct(row.median_after_5d) }}</td>
+                            </tr>
+                          </tbody>
+                        </table>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+                <div class="bg-zinc-950 border border-zinc-800 rounded-2xl overflow-hidden">
+                  <div class="px-3 py-2 text-xs font-semibold text-zinc-400 border-b border-zinc-800">按稳健卡尔玛排序 · 点击一行可切到单票回测</div>
+                  <div class="max-h-80 overflow-auto">
+                    <table class="w-full text-xs">
+                      <thead class="sticky top-0 bg-zinc-950">
+                        <tr class="border-b border-zinc-800 text-zinc-500">
+                          <th class="text-left py-2 px-3">代码</th>
+                          <th class="text-left py-2 px-2">名称</th>
+                          <th class="text-left py-2 px-2">分组</th>
+                          <th class="text-right py-2 px-2">策略收益</th>
+                          <th class="text-right py-2 px-2">回撤</th>
+                          <th class="text-right py-2 px-2">买持有</th>
+                          <th class="text-right py-2 px-2">超额</th>
+                          <th class="text-right py-2 px-2">卡尔玛</th>
+                          <th class="text-right py-2 px-2">成交</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        <tr
+                          v-for="row in universeResult.rows"
+                          :key="row.ts_code"
+                          class="border-b border-zinc-800/50 hover:bg-zinc-800/40 cursor-pointer"
+                          @click="openUniverseStock(row)"
+                        >
+                          <td class="py-1.5 px-3 font-mono text-zinc-300">{{ row.ts_code }}</td>
+                          <td class="py-1.5 px-2 text-zinc-400">{{ row.name }}</td>
+                          <td class="py-1.5 px-2">
+                            <span class="text-[10px] px-1.5 py-0.5 rounded" :class="row.split === '确认' ? 'bg-sky-500/15 text-sky-300' : 'bg-zinc-800 text-zinc-500'">{{ row.split || '—' }}</span>
+                          </td>
+                          <td class="py-1.5 px-2 text-right tabular-nums" :class="row.total_return >= 0 ? 'text-red-400' : 'text-green-400'">{{ fmtPct(row.total_return) }}</td>
+                          <td class="py-1.5 px-2 text-right tabular-nums text-amber-400">{{ fmtPct(row.max_drawdown) }}</td>
+                          <td class="py-1.5 px-2 text-right tabular-nums text-zinc-400">{{ fmtPct(row.buyhold_return) }}</td>
+                          <td class="py-1.5 px-2 text-right tabular-nums" :class="row.excess_return >= 0 ? 'text-red-400' : 'text-green-400'">{{ fmtPct(row.excess_return) }}</td>
+                          <td class="py-1.5 px-2 text-right tabular-nums text-zinc-200">{{ Number(row.calmar || 0).toFixed(2) }}</td>
+                          <td class="py-1.5 px-2 text-right tabular-nums text-zinc-500">{{ row.trade_count }}</td>
+                        </tr>
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              </template>
+            </div>
           </template>
 
           <!-- 回测结果 -->
@@ -703,15 +645,71 @@
                 </span>
                 <span v-else-if="backtestResult.walk_forward" class="text-amber-400 px-2 py-0.5 rounded bg-zinc-800">Walk-Forward 已启用</span>
                 <span class="text-zinc-600">{{ backtestResult.strategy_name }} · {{ backtestResult.ts_code }}</span>
+                <span
+                  v-if="backtestResult.options_applied?.position"
+                  class="text-sky-300 px-2 py-0.5 rounded bg-zinc-800"
+                  :title="backtestResult.options_applied.position.detail"
+                >
+                  {{ backtestResult.options_applied.position.label }}:
+                  {{ backtestResult.options_applied.position.status }}
+                </span>
+                <span
+                  v-if="backtestResult.options_applied?.fees || backtestResult.fees"
+                  class="text-amber-200 px-2 py-0.5 rounded bg-zinc-800"
+                  :title="(backtestResult.options_applied?.fees || backtestResult.fees)?.detail"
+                >
+                  {{ (backtestResult.options_applied?.fees || backtestResult.fees)?.status || '已扣佣金/印花税' }}
+                </span>
               </div>
-              <div class="grid grid-cols-2 md:grid-cols-3 xl:grid-cols-6 gap-2">
+              <div class="grid grid-cols-2 md:grid-cols-4 xl:grid-cols-8 gap-2">
                 <div v-for="m in metricCards" :key="m.key" class="bg-zinc-900 border border-zinc-800 rounded-xl px-3 py-2.5">
                   <div class="text-[10px] text-zinc-500 mb-0.5">{{ m.label }}</div>
                   <div :class="m.color" class="text-sm font-bold tabular-nums">{{ m.value }}</div>
                 </div>
               </div>
               <p v-if="backtestResult.note" class="mt-2 text-[10px] text-amber-200/80 bg-amber-950/20 border border-amber-900/30 rounded-lg px-3 py-2">{{ backtestResult.note }}</p>
-              <div ref="equityChartEl" class="h-64 bg-zinc-900 border border-zinc-800 rounded-2xl mt-2"></div>
+              <div class="mt-2 grid grid-cols-2 md:grid-cols-4 gap-2 text-[10px]">
+                <div class="bg-zinc-900 border border-zinc-800 rounded-xl px-3 py-2">
+                  <div class="text-zinc-500">初始本金</div>
+                  <div class="text-zinc-200 tabular-nums font-medium">{{ fmtMoney(backtestResult.cash) }}</div>
+                </div>
+                <div class="bg-zinc-900 border border-zinc-800 rounded-xl px-3 py-2">
+                  <div class="text-zinc-500">期末权益</div>
+                  <div class="tabular-nums font-medium" :class="(backtestResult.final_equity ?? backtestResult.cash) >= (backtestResult.cash || 0) ? 'text-red-400' : 'text-green-400'">
+                    {{ fmtMoney(backtestResult.final_equity ?? (backtestResult.cash != null && backtestResult.equity?.length ? backtestResult.cash * backtestResult.equity[backtestResult.equity.length - 1] : null)) }}
+                  </div>
+                </div>
+                <div class="bg-zinc-900 border border-zinc-800 rounded-xl px-3 py-2">
+                  <div class="text-zinc-500">区间</div>
+                  <div class="text-zinc-300 tabular-nums">{{ backtestResult.date_range?.start || '—' }} → {{ backtestResult.date_range?.end || '—' }}</div>
+                </div>
+                <div class="bg-zinc-900 border border-zinc-800 rounded-xl px-3 py-2">
+                  <div class="text-zinc-500">K线条数 / 成交</div>
+                  <div class="text-zinc-300 tabular-nums">{{ backtestResult.bars?.length || backtestResult.bar_count || 0 }} / {{ backtestResult.trades?.length || 0 }}</div>
+                </div>
+              </div>
+              <div class="mt-2 bg-zinc-900 border border-zinc-800 rounded-2xl overflow-hidden">
+                <div class="px-3 py-2 text-xs font-semibold text-zinc-400 border-b border-zinc-800 flex flex-wrap items-center justify-between gap-2">
+                  <span>回测图：K线买卖点 + 策略均线</span>
+                  <div class="flex flex-wrap items-center gap-3 text-[10px] font-normal">
+                    <label class="flex items-center gap-1 text-zinc-400 cursor-pointer select-none">
+                      <input v-model="chartExtras.vol" type="checkbox" class="rounded border-zinc-600 bg-zinc-800 text-sky-500" />
+                      成交量
+                    </label>
+                    <label class="flex items-center gap-1 text-zinc-400 cursor-pointer select-none">
+                      <input v-model="chartExtras.macd" type="checkbox" class="rounded border-zinc-600 bg-zinc-800 text-sky-500" />
+                      MACD
+                    </label>
+                    <label class="flex items-center gap-1 text-zinc-400 cursor-pointer select-none">
+                      <input v-model="chartExtras.rsi" type="checkbox" class="rounded border-zinc-600 bg-zinc-800 text-sky-500" />
+                      RSI
+                    </label>
+                    <span class="text-zinc-600">红三角买入 · 绿倒三角卖出 · 均线随策略参数</span>
+                  </div>
+                </div>
+                <div ref="equityChartEl" class="w-full" :style="{ height: backtestChartHeight + 'px' }"></div>
+                <p v-if="chartHint" class="px-3 py-2 text-[10px] text-amber-300/90 border-t border-zinc-800">{{ chartHint }}</p>
+              </div>
               <div v-if="backtestResult.walk_forward_rows?.length" class="mt-3 bg-zinc-900 border border-zinc-800 rounded-2xl overflow-hidden">
                 <div class="px-3 py-2 text-xs font-semibold text-zinc-400 border-b border-zinc-800">Walk-Forward 分段</div>
                 <table class="w-full text-xs">
@@ -721,6 +719,7 @@
                       <th class="text-right py-2 px-3">训练收益</th>
                       <th class="text-right py-2 px-3">测试收益</th>
                       <th class="text-right py-2 px-3">测试回撤</th>
+                      <th class="text-right py-2 px-3">测试费用</th>
                     </tr>
                   </thead>
                   <tbody>
@@ -729,6 +728,7 @@
                       <td class="py-1.5 px-3 text-right tabular-nums" :class="row.train_ret >= 0 ? 'text-red-400' : 'text-green-400'">{{ fmtPct(row.train_ret) }}</td>
                       <td class="py-1.5 px-3 text-right tabular-nums" :class="row.test_ret >= 0 ? 'text-red-400' : 'text-green-400'">{{ fmtPct(row.test_ret) }}</td>
                       <td class="py-1.5 px-3 text-right tabular-nums text-amber-400">{{ fmtPct(row.test_dd) }}</td>
+                      <td class="py-1.5 px-3 text-right tabular-nums text-amber-300">{{ fmtMoney(row.test_fee ?? 0) }}</td>
                     </tr>
                   </tbody>
                 </table>
@@ -744,6 +744,9 @@
                         <th class="text-right py-2 px-3">价格</th>
                         <th class="text-right py-2 px-3">数量</th>
                         <th class="text-right py-2 px-3">盈亏</th>
+                        <th class="text-right py-2 px-3">佣金</th>
+                        <th class="text-right py-2 px-3">印花税</th>
+                        <th class="text-left py-2 px-3">原因</th>
                       </tr>
                     </thead>
                     <tbody>
@@ -753,6 +756,9 @@
                         <td class="py-1.5 px-3 text-right tabular-nums">{{ t.price }}</td>
                         <td class="py-1.5 px-3 text-right tabular-nums">{{ t.size }}</td>
                         <td class="py-1.5 px-3 text-right tabular-nums" :class="(t.pnl || 0) >= 0 ? 'text-red-400' : 'text-green-400'">{{ t.pnl ?? '-' }}</td>
+                        <td class="py-1.5 px-3 text-right tabular-nums text-zinc-400">{{ t.commission ?? '-' }}</td>
+                        <td class="py-1.5 px-3 text-right tabular-nums text-zinc-400">{{ t.stamp_tax ?? '-' }}</td>
+                        <td class="py-1.5 px-3 text-zinc-500">{{ t.reason || '-' }}</td>
                       </tr>
                     </tbody>
                   </table>
@@ -835,8 +841,8 @@
 <script setup lang="ts">
 import { ref, reactive, computed, watch, nextTick, onMounted, onUnmounted } from 'vue'
 import * as echarts from 'echarts'
-import { openStockInDash } from './appNav'
 import IntradayTurningPanel from './IntradayTurningPanel.vue'
+import ScreenerFlowPanel from './ScreenerFlowPanel.vue'
 
 const MEMORY_KEY = 'strategy_analysis_memory_v1'
 
@@ -866,46 +872,6 @@ const mainTabs = [
   { id: 'logs', label: 'Agent 日志' },
 ]
 const toolboxMode = ref<'strategy' | 'screener' | 'intraday'>('strategy')
-const screenerLoading = ref(false)
-const screenerError = ref('')
-const screenerResult = ref<any>(null)
-const screenerActiveCode = ref('')
-const pipelineLoading = ref(false)
-const pipelineError = ref('')
-const pipelineResult = ref<any>(null)
-/** 用户手动改过日期后不再自动覆盖；刷新页面仍默认跟随当天 */
-const screenerAsofPinned = ref(false)
-const SCREENER_CACHE_KEY = 'strategy_screener_cache_v2'
-const screener = reactive({
-  asof: '',
-  limit: 60,
-  includeA: true,
-  includeB: true,
-  includeC: true,
-  includeMain: true,
-  includeStar: true,
-  includeChinext: true,
-  includeBse: false,
-  includeSt: false,
-})
-const hitsB = computed(() => {
-  const data = screenerResult.value
-  if (!data) return []
-  if (Array.isArray(data.hits_b)) return data.hits_b
-  return (data.hits || []).filter((h: any) => h.setup_type === 'B')
-})
-const hitsA = computed(() => {
-  const data = screenerResult.value
-  if (!data) return []
-  if (Array.isArray(data.hits_a)) return data.hits_a
-  return (data.hits || []).filter((h: any) => h.setup_type === 'A')
-})
-const hitsC = computed(() => {
-  const data = screenerResult.value
-  if (!data) return []
-  if (Array.isArray(data.hits_c)) return data.hits_c
-  return (data.hits || []).filter((h: any) => h.setup_type === 'C')
-})
 
 const cycleNodes = [
   { id: 'analyze', label: '分析' },
@@ -920,36 +886,6 @@ const catalogError = ref('')
 const selectedStrategy = ref<any>(null)
 const paramValues = reactive<Record<string, number>>({})
 
-function persistScreenerCache() {
-  try {
-    const form = { ...screener }
-    // 交易日默认跟随当天，不把 asof 钉进缓存
-    delete (form as any).asof
-    sessionStorage.setItem(SCREENER_CACHE_KEY, JSON.stringify({
-      form,
-      result: screenerResult.value,
-      active: screenerActiveCode.value,
-    }))
-  } catch { /* ignore */ }
-}
-
-function restoreScreenerCache() {
-  try {
-    const raw = sessionStorage.getItem(SCREENER_CACHE_KEY)
-    if (!raw) return false
-    const data = JSON.parse(raw)
-    if (data.form) {
-      const { asof: _ignored, ...rest } = data.form
-      Object.assign(screener, rest)
-    }
-    if (data.result) screenerResult.value = data.result
-    if (data.active) screenerActiveCode.value = data.active
-    return !!data.result
-  } catch {
-    return false
-  }
-}
-
 function selectStrategy(s: any) {
   toolboxMode.value = 'strategy'
   if (mainTab.value === 'intraday') mainTab.value = 'setup'
@@ -961,121 +897,21 @@ function selectStrategy(s: any) {
 function openScreener() {
   toolboxMode.value = 'screener'
   mainTab.value = 'screener'
-  if (!screenerAsofPinned.value) loadScreenerAsof()
+}
+
+function onScreenerActivated() {
+  toolboxMode.value = 'screener'
+  mainTab.value = 'screener'
+}
+
+function onScreenerAsof(asof: string) {
+  if (!asof) return
+  config.end = asof
 }
 
 function openIntraday() {
   toolboxMode.value = 'intraday'
   mainTab.value = 'intraday'
-}
-
-async function loadScreenerAsof() {
-  try {
-    const res = await fetch('/strategy/screener/asof')
-    const data = await res.json().catch(() => ({}))
-    if (data?.asof) screener.asof = String(data.asof).slice(0, 10)
-  } catch (_) { /* 使用手动日期 */ }
-}
-
-async function runScreener() {
-  screenerLoading.value = true
-  screenerError.value = ''
-  screenerResult.value = null
-  try {
-    const res = await fetch('/strategy/screener/setups', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        asof: screener.asof || null,
-        include_st: screener.includeSt,
-        include_main: screener.includeMain,
-        include_star: screener.includeStar,
-        include_chinext: screener.includeChinext,
-        include_bse: screener.includeBse,
-        include_cdr: false,
-        include_a: screener.includeA,
-        include_b: screener.includeB,
-        include_c: screener.includeC,
-        limit: screener.limit || 60,
-        fill: true,
-      }),
-    })
-    const data = await res.json().catch(() => ({}))
-    if (!res.ok) {
-      const detail = data.detail
-      screenerError.value = typeof detail === 'string' ? detail : (detail?.error || `HTTP ${res.status}`)
-      pushLog(`[选股] 失败: ${screenerError.value}`, 'error')
-      return
-    }
-    screenerResult.value = data
-    if (data.asof) screener.asof = String(data.asof).slice(0, 10)
-    persistScreenerCache()
-    pushLog(
-      `[选股] ${data.asof} · B${data.hit_count_b ?? 0} · A${data.hit_count_a ?? 0} · C${data.hit_count_c ?? 0} · Datahubco补${(data.fill_report?.days_fetched || []).length}日/写${data.fill_report?.rows ?? data.filled_rows ?? 0}行`,
-      'ok',
-    )
-  } catch (e: any) {
-    screenerError.value = e?.message || String(e)
-    pushLog(`[选股] 异常: ${screenerError.value}`, 'error')
-  } finally {
-    screenerLoading.value = false
-  }
-}
-
-async function runPipeline() {
-  pipelineLoading.value = true
-  pipelineError.value = ''
-  pipelineResult.value = null
-  try {
-    const res = await fetch('/strategy/pipeline/cycle', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        asof: screener.asof || null,
-        min_score: 70,
-        max_n: 50,
-        fill: true,
-        require_flow_signal: true,
-      }),
-    })
-    const data = await res.json().catch(() => ({}))
-    if (!res.ok) {
-      const detail = data.detail
-      pipelineError.value = typeof detail === 'string' ? detail : (detail?.error || `HTTP ${res.status}`)
-      pushLog(`[流水线] 失败: ${pipelineError.value}`, 'error')
-      return
-    }
-    pipelineResult.value = data
-    if (data.asof) screener.asof = String(data.asof).slice(0, 10)
-    pushLog(
-      `[流水线] 观察${data.observe?.count ?? 0} 起飞${data.takeoff?.promoted_count ?? 0} 衰竭${data.exhaustion?.exhausted_count ?? 0} 推荐池${data.recommend_active ?? 0}`,
-      'ok',
-    )
-  } catch (e: any) {
-    pipelineError.value = e?.message || String(e)
-    pushLog(`[流水线] 异常: ${pipelineError.value}`, 'error')
-  } finally {
-    pipelineLoading.value = false
-  }
-}
-
-function openHitInDash(h: any) {
-  if (!h?.ts_code) return
-  config.tsCode = h.ts_code
-  screenerActiveCode.value = h.ts_code
-  persistScreenerCache()
-  toolboxMode.value = 'screener'
-  mainTab.value = 'screener'
-  openStockInDash({
-    ts_code: h.ts_code,
-    name: h.name,
-    industry: h.industry,
-  }, 'screener')
-  pushLog(`[选股] 打开行情看板 ${h.name || ''} ${h.ts_code}`, 'ok')
-}
-
-function useScreenerHit(h: any) {
-  openHitInDash(h)
 }
 
 function strategyFitsRegime(s: any, regime: string) {
@@ -1135,12 +971,41 @@ async function loadOptions() {
   }
 }
 
+function shanghaiTodayUtc(): Date {
+  const parts = new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'Asia/Shanghai',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+  }).formatToParts(new Date())
+  const y = Number(parts.find((p) => p.type === 'year')?.value)
+  const m = Number(parts.find((p) => p.type === 'month')?.value)
+  const d = Number(parts.find((p) => p.type === 'day')?.value)
+  return new Date(Date.UTC(y, m - 1, d))
+}
+
+/** 周末回退到周五；节假日由 /strategy/screener/asof 再校正 */
+function latestWeekdayYmd(): string {
+  const dt = shanghaiTodayUtc()
+  while (dt.getUTCDay() === 0 || dt.getUTCDay() === 6) {
+    dt.setUTCDate(dt.getUTCDate() - 1)
+  }
+  return dt.toISOString().slice(0, 10)
+}
+
 const config = reactive({
   tsCode: '000001.SZ',
   benchmark: '000300.SH',
   start: '2024-01-01',
-  end: '2025-12-31',
+  end: latestWeekdayYmd(),
   cash: 1000000,
+  positionPct: 30,
+  maxLots: 0,
+  reservePct: 2,
+  elderLadder: true,
+  commissionWan: 2,
+  commissionMin: 5,
+  stampWan: 5,
   volWindow: 20,
 })
 
@@ -1171,9 +1036,41 @@ const state = reactive({
 
 const logs = ref<{ time: string; msg: string; level?: string }[]>([])
 const backtestResult = ref<any>(null)
+const universeCfg = reactive({ n: 100, board: 'main', search: false })
+const universeLoading = ref(false)
+const universeError = ref('')
+const universeResult = ref<any>(null)
+const signalFilter = ref<'current' | 'all'>('current')
+function filteredSignalRows(rows: any[] | undefined) {
+  const list = rows || []
+  if (signalFilter.value === 'all') return list
+  const cur = universeResult.value?.signal_stats?.current_regime
+  return list.filter((r) => r.regime === cur)
+}
+const universeSummaryCards = computed(() => {
+  const all = universeResult.value?.summary?.all
+  const confirm = universeResult.value?.summary?.confirm
+  if (!all) return []
+  return [
+    { key: 'n', label: '有效股票', value: String(all.n ?? 0), color: 'text-zinc-200' },
+    { key: 'pos', label: '盈利占比', value: fmtPct(all.pct_positive ?? 0), color: (all.pct_positive ?? 0) >= 0.5 ? 'text-red-400' : 'text-amber-300' },
+    { key: 'med', label: '中位收益', value: fmtPct(all.median_return ?? 0), color: (all.median_return ?? 0) >= 0 ? 'text-red-400' : 'text-green-400' },
+    { key: 'dd', label: '中位回撤', value: fmtPct(all.median_max_drawdown ?? 0), color: 'text-amber-400' },
+    { key: 'cal', label: '中位卡尔玛', value: Number(all.median_calmar ?? 0).toFixed(2), color: 'text-sky-300' },
+    { key: 'score', label: '稳健分', value: Number(all.robustness_score ?? 0).toFixed(2), color: 'text-violet-300' },
+    { key: 'cmed', label: '确认区中位收益', value: fmtPct(confirm?.median_return ?? 0), color: (confirm?.median_return ?? 0) >= 0 ? 'text-red-400' : 'text-green-400' },
+    { key: 'cdd', label: '确认区中位回撤', value: fmtPct(confirm?.median_max_drawdown ?? 0), color: 'text-amber-400' },
+  ]
+})
 const memories = ref<any[]>(loadMemories())
 const equityChartEl = ref<HTMLDivElement>()
+const chartHint = ref('')
 let equityChart: any = null
+const chartExtras = reactive({ vol: false, macd: false, rsi: false })
+const backtestChartHeight = computed(() => {
+  const extra = (chartExtras.vol ? 1 : 0) + (chartExtras.macd ? 1 : 0) + (chartExtras.rsi ? 1 : 0)
+  return 460 + extra * 128
+})
 
 const perceiveLoading = ref(false)
 const perceiveData = ref<any>(null)
@@ -1215,8 +1112,15 @@ const metricCards = computed(() => {
     { key: 'win', label: '胜率', value: fmtPct(r.win_rate), color: 'text-zinc-200' },
     { key: 'trades', label: '交易次数', value: String(r.trade_count), color: 'text-zinc-200' },
     { key: 'alpha', label: '相对基准', value: fmtPct(r.alpha), color: r.alpha >= 0 ? 'text-red-400' : 'text-green-400' },
+    { key: 'commission', label: '佣金', value: fmtMoney(r.fees?.commission_total ?? 0), color: 'text-amber-300' },
+    { key: 'stamp', label: '印花税', value: fmtMoney(r.fees?.stamp_total ?? 0), color: 'text-amber-300' },
   ]
 })
+
+function fmtMoney(v: any) {
+  if (v == null || Number.isNaN(Number(v))) return '—'
+  return Number(v).toLocaleString('zh-CN', { maximumFractionDigits: 2 })
+}
 
 function fmtPct(v: number) {
   if (v == null || Number.isNaN(v)) return '-'
@@ -1361,7 +1265,6 @@ async function loadPerceive(opts: { keepDates?: boolean; skipEnsure?: boolean } 
     }
     if (!opts.keepDates) {
       if (data.date_range?.start) config.start = data.date_range.start
-      if (data.date_range?.end) config.end = data.date_range.end
     }
     pushLog(
       `[感知] PostgreSQL · ${data.name}(${data.ts_code}) · ${data.bar_count}根 · ${data.regime?.label} · 最新${data.latest?.trade_date} 收${data.latest?.close}`,
@@ -1452,7 +1355,16 @@ async function runBacktest() {
       body: JSON.stringify({
         strategy_id: selectedStrategy.value.id,
         ts_code: config.tsCode.trim(),
-        params: { ...paramValues },
+        params: {
+          ...paramValues,
+          position_pct: paramValues.position_pct != null ? Number(paramValues.position_pct) : config.positionPct,
+          max_lots: config.maxLots,
+          reserve_pct: config.reservePct,
+          position_mode: config.elderLadder ? 'elder_ladder' : 'percent',
+          commission_rate: (Number(config.commissionWan) || 0) / 10000,
+          commission_min: config.commissionMin,
+          stamp_rate: (Number(config.stampWan) || 0) / 10000,
+        },
         start: config.start || null,
         end: config.end || null,
         cash: config.cash,
@@ -1478,12 +1390,85 @@ async function runBacktest() {
       data.lookback_ok ? 'ok' : 'error'
     )
     mainTab.value = 'backtest'
-    await nextTick(() => renderEquity())
+    await nextTick()
+    requestAnimationFrame(() => renderBacktestCharts())
     return true
   } catch (e) {
     pushLog('[回测] 失败: ' + (e && e.message ? e.message : String(e)), 'error')
     return false
   }
+}
+
+function currentStrategyParams() {
+  return {
+    ...paramValues,
+    position_pct: paramValues.position_pct != null ? Number(paramValues.position_pct) : config.positionPct,
+    max_lots: config.maxLots,
+    reserve_pct: config.reservePct,
+    position_mode: config.elderLadder ? 'elder_ladder' : 'percent',
+    commission_rate: (Number(config.commissionWan) || 0) / 10000,
+    commission_min: config.commissionMin,
+    stamp_rate: (Number(config.stampWan) || 0) / 10000,
+  }
+}
+
+async function runUniverseBacktest() {
+  if (!selectedStrategy.value) {
+    pushLog('[跨股] 请先选择策略', 'error')
+    return
+  }
+  universeLoading.value = true
+  universeError.value = ''
+  try {
+    const res = await fetch('/strategy/backtest/universe', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        strategy_id: selectedStrategy.value.id,
+        params: currentStrategyParams(),
+        start: config.start,
+        end: config.end,
+        cash: config.cash,
+        lookback_guard: lookbackGuard.value,
+        n: universeCfg.n,
+        board: universeCfg.board,
+        search: universeCfg.search,
+      }),
+    })
+    const data = await res.json().catch(() => ({}))
+    if (!res.ok) {
+      const detail = typeof data.detail === 'string' ? data.detail : (data.detail ? JSON.stringify(data.detail) : ('HTTP ' + res.status))
+      throw new Error(detail)
+    }
+    universeResult.value = data
+    const all = data.summary?.all || {}
+    pushLog(
+      `[跨股] ${data.tested_n} 只 · 中位收益 ${fmtPct(all.median_return)} · 中位回撤 ${fmtPct(all.median_max_drawdown)} · 盈利占比 ${fmtPct(all.pct_positive)} · 稳健分 ${all.robustness_score}`,
+      'ok',
+    )
+  } catch (e: any) {
+    universeError.value = e?.message || String(e)
+    pushLog('[跨股] 失败: ' + universeError.value, 'error')
+  } finally {
+    universeLoading.value = false
+  }
+}
+
+function applySuggestedParams() {
+  const p = universeResult.value?.suggested?.params
+  if (!p) return
+  for (const [k, v] of Object.entries(p)) {
+    if (v == null) continue
+    paramValues[k] = Number(v)
+  }
+  pushLog('[跨股] 已写入确认区验收通过的参数，请再跑一次单票或批量回测', 'ok')
+}
+
+async function openUniverseStock(row: any) {
+  if (!row?.ts_code) return
+  config.tsCode = row.ts_code
+  pushLog(`[跨股] 切到 ${row.ts_code} ${row.name || ''}`, 'ok')
+  await runBacktest()
 }
 
 /** 反思：POST /strategy/reflect */
@@ -1600,26 +1585,509 @@ async function runAutoAgent() {
   }
 }
 
-function renderEquity() {
-  if (!equityChartEl.value || !backtestResult.value?.equity?.length) return
-  if (!equityChart) equityChart = echarts.init(equityChartEl.value, 'dark')
-  const data = backtestResult.value.equity
-  const dates = backtestResult.value.equity_dates || data.map((_: any, i: number) => i + 1)
-  const benchRet = backtestResult.value.benchmark_return ?? 0
-  const bench = data.map((_: number, i: number) =>
-    Number((1 + (benchRet * i) / Math.max(data.length - 1, 1)).toFixed(4))
+function smaSeries(values: number[], period: number): (number | null)[] {
+  const n = Math.max(1, Math.floor(period))
+  const out: (number | null)[] = Array(values.length).fill(null)
+  let sum = 0
+  for (let i = 0; i < values.length; i++) {
+    const v = Number(values[i])
+    if (!Number.isFinite(v)) {
+      sum = 0
+      continue
+    }
+    sum += v
+    if (i >= n) {
+      const old = Number(values[i - n])
+      if (Number.isFinite(old)) sum -= old
+    }
+    if (i >= n - 1) out[i] = Number((sum / n).toFixed(4))
+  }
+  return out
+}
+
+function emaSeries(values: number[], period: number): number[] {
+  const n = Math.max(1, Math.floor(period))
+  const k = 2 / (n + 1)
+  const out: number[] = []
+  let prev: number | null = null
+  for (const raw of values) {
+    const v = Number(raw)
+    if (!Number.isFinite(v)) {
+      out.push(prev ?? 0)
+      continue
+    }
+    prev = prev == null ? v : v * k + prev * (1 - k)
+    out.push(Number(prev.toFixed(4)))
+  }
+  return out
+}
+
+function rsiSeries(values: number[], period = 14): (number | null)[] {
+  const n = Math.max(2, Math.floor(period))
+  const out: (number | null)[] = Array(values.length).fill(null)
+  let avgGain = 0
+  let avgLoss = 0
+  for (let i = 1; i < values.length; i++) {
+    const chg = Number(values[i]) - Number(values[i - 1])
+    const gain = chg > 0 ? chg : 0
+    const loss = chg < 0 ? -chg : 0
+    if (i < n) {
+      avgGain += gain
+      avgLoss += loss
+      continue
+    }
+    if (i === n) {
+      avgGain = (avgGain + gain) / n
+      avgLoss = (avgLoss + loss) / n
+    } else {
+      avgGain = (avgGain * (n - 1) + gain) / n
+      avgLoss = (avgLoss * (n - 1) + loss) / n
+    }
+    const rs = avgLoss === 0 ? (avgGain > 0 ? 100 : 0) : avgGain / avgLoss
+    out[i] = Number((100 - 100 / (1 + rs)).toFixed(2))
+  }
+  return out
+}
+
+function macdSeries(values: number[], fast = 12, slow = 26, signal = 9) {
+  const emaFast = emaSeries(values, fast)
+  const emaSlow = emaSeries(values, slow)
+  const dif = emaFast.map((a, i) => Number((a - emaSlow[i]).toFixed(4)))
+  const dea = emaSeries(dif, signal)
+  const hist = dif.map((a, i) => Number((2 * (a - dea[i])).toFixed(4)))
+  return { dif, dea, hist }
+}
+
+function rollingPrev(values: number[], period: number, mode: 'max' | 'min'): (number | null)[] {
+  const n = Math.max(1, Math.floor(period))
+  const out: (number | null)[] = Array(values.length).fill(null)
+  for (let i = n; i < values.length; i++) {
+    const slice = values.slice(i - n, i)
+    out[i] = Number((mode === 'max' ? Math.max(...slice) : Math.min(...slice)).toFixed(4))
+  }
+  return out
+}
+
+function fmtAxisAmt(v: number) {
+  if (Math.abs(v) >= 1e8) return `${(v / 1e8).toFixed(1)}亿`
+  if (Math.abs(v) >= 1e4) return `${(v / 1e4).toFixed(0)}万`
+  return String(v)
+}
+
+function strategyOverlayLines(r: any, closes: number[], highs: number[], lows: number[]) {
+  const id = String(r.strategy_id || selectedStrategy.value?.id || '')
+  const p = { ...(paramValues || {}), ...(r.params || {}) }
+  const lines: { name: string; data: (number | null)[]; color: string; dashed?: boolean }[] = []
+  if (id === 'dual_ma') {
+    const fast = Number(p.fast) || 5
+    const slow = Number(p.slow) || 20
+    lines.push({ name: `MA${fast}`, data: smaSeries(closes, fast), color: '#fbbf24' })
+    lines.push({ name: `MA${slow}`, data: smaSeries(closes, slow), color: '#c084fc' })
+  } else if (id === 'mean_reversion') {
+    const w = Number(p.window) || 20
+    lines.push({ name: `MA${w}`, data: smaSeries(closes, w), color: '#fbbf24' })
+  } else if (id === 'boll_revert') {
+    const w = Number(p.window) || 20
+    const nstd = Number(p.nstd) || 2
+    const mid = smaSeries(closes, w)
+    const upper: (number | null)[] = []
+    const lower: (number | null)[] = []
+    for (let i = 0; i < closes.length; i++) {
+      if (mid[i] == null || i < w - 1) {
+        upper.push(null)
+        lower.push(null)
+        continue
+      }
+      const slice = closes.slice(i - w + 1, i + 1)
+      const mean = mid[i] as number
+      const variance = slice.reduce((s, x) => s + (x - mean) ** 2, 0) / w
+      const sd = Math.sqrt(variance)
+      upper.push(Number((mean + nstd * sd).toFixed(4)))
+      lower.push(Number((mean - nstd * sd).toFixed(4)))
+    }
+    lines.push({ name: 'BOLL上轨', data: upper, color: '#94a3b8', dashed: true })
+    lines.push({ name: 'BOLL中轨', data: mid, color: '#eab308' })
+    lines.push({ name: 'BOLL下轨', data: lower, color: '#94a3b8', dashed: true })
+  } else if (id === 'structure_pullback') {
+    lines.push({ name: 'MA10', data: smaSeries(closes, 10), color: '#38bdf8' })
+    lines.push({ name: 'MA20', data: smaSeries(closes, 20), color: '#c084fc' })
+  } else if (id === 'ma60_shrink') {
+    lines.push({ name: 'MA5', data: smaSeries(closes, 5), color: '#fbbf24' })
+    lines.push({ name: 'MA20', data: smaSeries(closes, 20), color: '#c084fc' })
+    lines.push({ name: 'MA60', data: smaSeries(closes, 60), color: '#38bdf8' })
+  } else if (id === 'short_swing') {
+    lines.push({ name: 'MA10', data: smaSeries(closes, 10), color: '#38bdf8' })
+  } else if (id === 'vol_filter') {
+    lines.push({ name: 'MA20', data: smaSeries(closes, 20), color: '#c084fc' })
+  } else if (id === 'breakout') {
+    const entryN = Number(p.entry_n) || 20
+    const exitN = Number(p.exit_n) || 10
+    lines.push({ name: `${entryN}日高`, data: rollingPrev(highs, entryN, 'max'), color: '#f87171', dashed: true })
+    lines.push({ name: `${exitN}日低`, data: rollingPrev(lows, exitN, 'min'), color: '#4ade80', dashed: true })
+  }
+  return lines
+}
+
+function renderBacktestCharts() {
+  chartHint.value = ''
+  const r = backtestResult.value
+  if (!equityChartEl.value || !r) return
+
+  const bars: any[] = Array.isArray(r.bars) ? r.bars : []
+  const eqDates: string[] = (r.equity_dates || []).map((d: any) => String(d).slice(0, 10))
+  const cash0 = Number(r.cash) || 0
+  let equityCash: number[] = Array.isArray(r.equity_cash) ? r.equity_cash.map((x: any) => Number(x)) : []
+  if ((!equityCash.length || equityCash.every((x) => !Number.isFinite(x))) && Array.isArray(r.equity) && cash0 > 0) {
+    equityCash = r.equity.map((x: any) => Number((cash0 * Number(x)).toFixed(2)))
+  }
+
+  const dates = bars.length
+    ? bars.map((b) => String(b.date).slice(0, 10))
+    : eqDates
+  if (!dates.length) {
+    chartHint.value = '本次回测没有可绘制的日期序列（缺少 bars / equity_dates）。'
+    return
+  }
+
+  const ohlc = bars.length
+    ? bars.map((b) => [Number(b.open), Number(b.close), Number(b.low), Number(b.high)])
+    : []
+  const closes = bars.map((b) => Number(b.close))
+  const highs = bars.map((b) => Number(b.high))
+  const lows = bars.map((b) => Number(b.low))
+  const vols = bars.map((b) => Number(b.volume ?? b.vol ?? 0) || 0)
+  const overlays = ohlc.length ? strategyOverlayLines(r, closes, highs, lows) : []
+
+  const eqMap = new Map<string, number>()
+  eqDates.forEach((d, i) => {
+    if (equityCash[i] != null && Number.isFinite(equityCash[i])) eqMap.set(d, equityCash[i])
+  })
+  let lastEq = cash0 || (equityCash[0] ?? 0)
+  const equityAligned = dates.map((d) => {
+    if (eqMap.has(d)) lastEq = eqMap.get(d) as number
+    return lastEq
+  })
+
+  const trades: any[] = Array.isArray(r.trades) ? r.trades : []
+  const buyPts: any[] = []
+  const sellPts: any[] = []
+  for (const t of trades) {
+    const d = String(t.date || '').slice(0, 10)
+    const px = Number(t.price)
+    if (!d || !Number.isFinite(px)) continue
+    const size = Number(t.size) || 0
+    const item = {
+      value: [d, px],
+      size,
+      pnl: t.pnl,
+      label: `${t.side === '买入' ? '买' : '卖'}${size || ''}`,
+    }
+    if (t.side === '买入') buyPts.push(item)
+    else sellPts.push(item)
+  }
+
+  if (!ohlc.length && !equityAligned.length) {
+    chartHint.value = '回测结果缺少 K 线与本金数据，无法绘图。'
+    return
+  }
+  if (!ohlc.length) {
+    chartHint.value = '未返回 K 线 bars，仅显示本金曲线。请重新跑一次回测以加载完整图表。'
+  }
+
+  if (equityChart) {
+    equityChart.dispose()
+    equityChart = null
+  }
+  equityChart = echarts.init(equityChartEl.value, 'dark')
+
+  const hasK = ohlc.length > 0
+  const extras: string[] = []
+  if (hasK && chartExtras.vol) extras.push('vol')
+  if (hasK && chartExtras.macd) extras.push('macd')
+  if (hasK && chartExtras.rsi) extras.push('rsi')
+  const panels = hasK ? ['k', ...extras, 'eq'] : ['eq']
+  const weights: Record<string, number> = { k: 3.2, vol: 1, macd: 1.15, rsi: 1, eq: 1.35 }
+  const totalW = panels.reduce((s, p) => s + (weights[p] || 1), 0)
+  const top0 = 8
+  const bottom = 7
+  const gap = 1.4
+  const usable = 100 - top0 - bottom - gap * Math.max(0, panels.length - 1)
+  let y = top0
+  const grids = panels.map((p) => {
+    const h = usable * ((weights[p] || 1) / totalW)
+    const g = { left: 56, right: 18, top: `${y}%`, height: `${h}%` }
+    y += h + gap
+    return g
+  })
+  const axisIdx = Object.fromEntries(panels.map((p, i) => [p, i])) as Record<string, number>
+  const xIdxAll = panels.map((_, i) => i)
+  const lastPanel = panels[panels.length - 1]
+
+  const xAxis = panels.map((p, i) => ({
+    type: 'category',
+    data: dates,
+    boundaryGap: true,
+    gridIndex: i,
+    axisLabel: {
+      show: p === lastPanel,
+      color: '#71717a',
+      fontSize: 9,
+    },
+    axisTick: { show: p === lastPanel },
+    axisLine: { lineStyle: { color: '#3f3f46' } },
+    splitLine: { show: false },
+  }))
+  const yAxis = panels.map((p, i) => {
+    const moneyFmt = (v: number) => (Math.abs(v) >= 10000 ? `${(v / 10000).toFixed(1)}万` : String(v))
+    if (p === 'vol') {
+      return {
+        scale: true,
+        gridIndex: i,
+        axisLabel: { color: '#71717a', fontSize: 9, formatter: fmtAxisAmt },
+        splitLine: { lineStyle: { color: '#27272a' } },
+      }
+    }
+    if (p === 'rsi') {
+      return {
+        min: 0,
+        max: 100,
+        gridIndex: i,
+        axisLabel: { color: '#71717a', fontSize: 9 },
+        splitLine: { lineStyle: { color: '#27272a' } },
+      }
+    }
+    if (p === 'eq') {
+      return {
+        scale: true,
+        gridIndex: i,
+        axisLabel: { color: '#71717a', fontSize: 9, formatter: moneyFmt },
+        splitLine: { lineStyle: { color: '#27272a' } },
+      }
+    }
+    return {
+      scale: true,
+      gridIndex: i,
+      axisLabel: { color: '#71717a', fontSize: 9 },
+      splitLine: { lineStyle: { color: '#27272a' } },
+    }
+  })
+
+  const legendData = hasK
+    ? ['K线', ...overlays.map((o) => o.name), '买入', '卖出', '本金']
+    : ['本金']
+  if (extras.includes('vol')) legendData.push('成交量')
+  if (extras.includes('macd')) legendData.push('DIF', 'DEA', 'MACD')
+  if (extras.includes('rsi')) legendData.push('RSI')
+
+  const series: any[] = []
+  if (hasK) {
+    series.push({
+      name: 'K线',
+      type: 'candlestick',
+      data: ohlc,
+      xAxisIndex: axisIdx.k,
+      yAxisIndex: axisIdx.k,
+      itemStyle: {
+        color: '#ef4444',
+        color0: '#22c55e',
+        borderColor: '#ef4444',
+        borderColor0: '#22c55e',
+      },
+    })
+    for (const ov of overlays) {
+      series.push({
+        name: ov.name,
+        type: 'line',
+        data: ov.data,
+        xAxisIndex: axisIdx.k,
+        yAxisIndex: axisIdx.k,
+        showSymbol: false,
+        connectNulls: false,
+        lineStyle: { width: 1.2, color: ov.color, type: ov.dashed ? 'dashed' : 'solid' },
+        itemStyle: { color: ov.color },
+        z: 5,
+      })
+    }
+  }
+  series.push(
+    {
+      name: '买入',
+      type: 'scatter',
+      data: buyPts,
+      symbol: 'triangle',
+      symbolSize: 14,
+      itemStyle: { color: '#f43f5e' },
+      label: {
+        show: true,
+        position: 'bottom',
+        color: '#fda4af',
+        fontSize: 9,
+        formatter: (p: any) => p.data?.label || '买',
+      },
+      xAxisIndex: 0,
+      yAxisIndex: 0,
+      z: 10,
+    },
+    {
+      name: '卖出',
+      type: 'scatter',
+      data: sellPts,
+      symbol: 'triangle',
+      symbolRotate: 180,
+      symbolSize: 14,
+      itemStyle: { color: '#4ade80' },
+      label: {
+        show: true,
+        position: 'top',
+        color: '#86efac',
+        fontSize: 9,
+        formatter: (p: any) => p.data?.label || '卖',
+      },
+      xAxisIndex: 0,
+      yAxisIndex: 0,
+      z: 10,
+    },
+    {
+      name: '本金',
+      type: 'line',
+      data: equityAligned,
+      showSymbol: false,
+      xAxisIndex: axisIdx.eq ?? 0,
+      yAxisIndex: axisIdx.eq ?? 0,
+      lineStyle: { width: 1.8, color: '#a78bfa' },
+      areaStyle: { color: 'rgba(167,139,250,0.12)' },
+    },
   )
+
+  if (extras.includes('vol')) {
+    series.push({
+      name: '成交量',
+      type: 'bar',
+      data: vols.map((v, i) => ({
+        value: v,
+        itemStyle: {
+          color: Number(bars[i]?.close) >= Number(bars[i]?.open) ? '#ef4444' : '#22c55e',
+        },
+      })),
+      xAxisIndex: axisIdx.vol,
+      yAxisIndex: axisIdx.vol,
+      barMaxWidth: 8,
+    })
+  }
+  if (extras.includes('macd')) {
+    const macd = macdSeries(closes)
+    series.push(
+      {
+        name: 'MACD',
+        type: 'bar',
+        data: macd.hist.map((v) => ({
+          value: v,
+          itemStyle: { color: v >= 0 ? '#ef4444' : '#22c55e' },
+        })),
+        xAxisIndex: axisIdx.macd,
+        yAxisIndex: axisIdx.macd,
+        barMaxWidth: 6,
+      },
+      {
+        name: 'DIF',
+        type: 'line',
+        data: macd.dif,
+        showSymbol: false,
+        xAxisIndex: axisIdx.macd,
+        yAxisIndex: axisIdx.macd,
+        lineStyle: { width: 1, color: '#38bdf8' },
+      },
+      {
+        name: 'DEA',
+        type: 'line',
+        data: macd.dea,
+        showSymbol: false,
+        xAxisIndex: axisIdx.macd,
+        yAxisIndex: axisIdx.macd,
+        lineStyle: { width: 1, color: '#f59e0b' },
+      },
+    )
+  }
+  if (extras.includes('rsi')) {
+    series.push({
+      name: 'RSI',
+      type: 'line',
+      data: rsiSeries(closes, 14),
+      showSymbol: false,
+      xAxisIndex: axisIdx.rsi,
+      yAxisIndex: axisIdx.rsi,
+      lineStyle: { width: 1.2, color: '#fb7185' },
+      markLine: {
+        silent: true,
+        symbol: 'none',
+        lineStyle: { color: '#52525b', type: 'dashed', width: 1 },
+        data: [{ yAxis: 70 }, { yAxis: 30 }],
+        label: { color: '#71717a', fontSize: 9 },
+      },
+    })
+  }
+
   equityChart.setOption({
     backgroundColor: 'transparent',
-    grid: { left: 48, right: 16, top: 28, bottom: 28 },
-    legend: { data: ['策略', '基准'], textStyle: { color: '#a1a1aa', fontSize: 10 }, top: 4 },
-    tooltip: { trigger: 'axis' },
-    xAxis: { type: 'category', data: dates, axisLabel: { color: '#71717a', fontSize: 9 } },
-    yAxis: { type: 'value', scale: true, axisLabel: { color: '#71717a', fontSize: 9 }, splitLine: { lineStyle: { color: '#27272a' } } },
-    series: [
-      { name: '策略', type: 'line', data, showSymbol: false, lineStyle: { width: 1.5, color: '#a78bfa' } },
-      { name: '基准', type: 'line', data: bench, showSymbol: false, lineStyle: { width: 1, color: '#71717a', type: 'dashed' } },
+    animation: false,
+    legend: {
+      data: legendData,
+      textStyle: { color: '#a1a1aa', fontSize: 10 },
+      top: 2,
+      type: 'scroll',
+    },
+    tooltip: {
+      trigger: 'axis',
+      axisPointer: { type: 'cross' },
+      formatter(params: any) {
+        const arr = Array.isArray(params) ? params : [params]
+        const axis = arr[0]?.axisValue || ''
+        const lines = [`<div class="text-zinc-300">${axis}</div>`]
+        for (const p of arr) {
+          if (!p) continue
+          if (p.seriesName === 'K线') {
+            const v = p.data
+            if (Array.isArray(v) && v.length >= 4) {
+              lines.push(`开 ${v[0]} 收 ${v[1]} 低 ${v[2]} 高 ${v[3]}`)
+            }
+            continue
+          }
+          if (p.seriesName === '买入' || p.seriesName === '卖出') {
+            const size = p.data?.size
+            const pnl = p.data?.pnl
+            lines.push(`${p.marker}${p.seriesName} ${p.data?.value?.[1] ?? p.value?.[1] ?? ''} · ${size || 0}股${pnl != null ? ` · 盈亏 ${pnl}` : ''}`)
+            continue
+          }
+          if (p.seriesName === '本金') {
+            lines.push(`${p.marker}本金 ${fmtMoney(p.data)}`)
+            continue
+          }
+          if (p.seriesName === '成交量') {
+            lines.push(`${p.marker}成交量 ${fmtAxisAmt(Number(p.data?.value ?? p.data ?? 0))}`)
+            continue
+          }
+          const val = Array.isArray(p.data) ? p.data[1] : (p.data?.value ?? p.data)
+          if (val != null && val !== '') lines.push(`${p.marker}${p.seriesName} ${val}`)
+        }
+        return lines.join('<br/>')
+      },
+    },
+    axisPointer: { link: [{ xAxisIndex: 'all' }] },
+    grid: grids,
+    xAxis,
+    yAxis,
+    dataZoom: [
+      { type: 'inside', xAxisIndex: xIdxAll, start: 0, end: 100 },
+      {
+        type: 'slider',
+        xAxisIndex: xIdxAll,
+        bottom: 6,
+        height: 18,
+        borderColor: '#27272a',
+        textStyle: { color: '#71717a', fontSize: 9 },
+      },
     ],
+    series,
   }, true)
   equityChart.resize()
 }
@@ -1627,9 +2095,15 @@ function renderEquity() {
 watch(mainTab, async (t) => {
   if (t === 'backtest' && backtestResult.value) {
     await nextTick()
-    renderEquity()
+    requestAnimationFrame(() => renderBacktestCharts())
   }
 })
+
+watch(chartExtras, async () => {
+  if (mainTab.value !== 'backtest' || !backtestResult.value) return
+  await nextTick()
+  requestAnimationFrame(() => renderBacktestCharts())
+}, { deep: true })
 
 function onResize() {
   equityChart?.resize()
@@ -1638,15 +2112,8 @@ function onResize() {
 onMounted(async () => {
   window.addEventListener('resize', onResize)
   pushLog('策略分析工作台已就绪 · 可切换模式 A / B', 'ok')
-  const hadCache = restoreScreenerCache()
-  if (hadCache) {
-    toolboxMode.value = 'screener'
-    mainTab.value = 'screener'
-  }
-  // 交易日始终跟随当天会话 asof；用户点日期选择器后才会钉住
-  screenerAsofPinned.value = false
-  await Promise.all([loadCatalog(), loadOptions(), loadScreenerAsof()])
-  if (!hadCache) loadPerceive()
+  await Promise.all([loadCatalog(), loadOptions()])
+  if (toolboxMode.value !== 'screener') loadPerceive()
 })
 
 onUnmounted(() => {

@@ -7,8 +7,10 @@ GET  /strategy/perceive         - PostgreSQL 感知
 GET  /strategy/meta             - 数据覆盖
 POST /strategy/hypothesize      - 假设生成（后端）
 POST /strategy/backtest         - 回测（后端，真实日线）
+POST /strategy/backtest/universe - 跨股稳健回测（流动性选池 + 确认半区）
 POST /strategy/reflect          - 反思（后端）
-POST /strategy/screener/setups - A 观察池 / B 升势回踩选股
+GET  /strategy/screener/methods - 选股方法目录（阶段 × 流程）
+POST /strategy/screener/setups - 按方法全市场选股（兼容 A/B/C）
 POST /strategy/pipeline/cycle   - 观察池→自选50→起飞推荐→衰竭出池
 GET  /strategy/pipeline/observe - 观察池列表
 GET  /strategy/pipeline/recommend - 推荐池列表
@@ -16,7 +18,7 @@ GET  /strategy/pipeline/recommend - 推荐池列表
 
 from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel, Field
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 import asyncio
 
 from server.strategy_service import strategy_service
@@ -43,6 +45,20 @@ class BacktestRequest(BaseModel):
     walk_forward: bool = False
     benchmark: str = "000300.SH"
     limit: int = Field(800, ge=50, le=5000)
+
+
+class UniverseBacktestRequest(BaseModel):
+    strategy_id: str
+    params: Optional[Dict[str, Any]] = None
+    start: str
+    end: str
+    cash: float = Field(1_000_000, gt=0)
+    lookback_guard: bool = True
+    n: int = Field(100, ge=10, le=150)
+    board: str = "main"
+    ts_codes: Optional[List[str]] = None
+    search: bool = False
+    holdout_frac: float = Field(0.5, ge=0.2, le=0.8)
 
 
 class ReflectRequest(BaseModel):
@@ -174,6 +190,33 @@ async def backtest(body: BacktestRequest):
         raise HTTPException(status_code=500, detail=f"回测失败: {e}")
 
 
+@router.post("/backtest/universe")
+async def backtest_universe(body: UniverseBacktestRequest):
+    """按流动性选 100 只股票做稳健回测；可选小网格寻参，用确认半区验收。"""
+    try:
+        result = await asyncio.to_thread(
+            strategy_cycle_service.backtest_universe,
+            strategy_id=body.strategy_id,
+            params=body.params,
+            start=body.start,
+            end=body.end,
+            cash=body.cash,
+            lookback_guard=body.lookback_guard,
+            n=body.n,
+            board=body.board,
+            ts_codes=body.ts_codes,
+            search=body.search,
+            holdout_frac=body.holdout_frac,
+        )
+        if not result.get("ok"):
+            raise HTTPException(status_code=400, detail=result.get("error") or "批量回测失败")
+        return result
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"批量回测失败: {e}")
+
+
 @router.post("/reflect")
 async def reflect(body: ReflectRequest):
     """根据回测结果与 harness 阈值生成反思（后端）"""
@@ -208,15 +251,27 @@ class SetupScreenerRequest(BaseModel):
     include_cdr: bool = False
     include_a: bool = Field(
         True,
-        description="A 类观察池：大跌后缩量筑底、靠近20日低点、MA5走平（只观察，等起飞）",
+        description="兼容旧入口：A 类观察池。methods 有值时忽略",
     )
-    include_b: bool = Field(True, description="B 类：升势回踩 MA5（反转候选）")
+    include_b: bool = Field(True, description="兼容旧入口：B 升势回踩。methods 有值时忽略")
     include_c: bool = Field(
         True,
-        description="C 类：趋势回踩结构止损（MA10/MA20 升势缩量回踩，次日开盘买）",
+        description="兼容旧入口：C 趋势回踩。methods 有值时忽略",
+    )
+    methods: Optional[List[str]] = Field(
+        None,
+        description="方法 id 列表，如 b-ma5 / ma60-slope / crash-buy。有值时按方法加载对应窗口并扫描",
     )
     limit: int = Field(60, ge=10, le=1000)
     fill: bool = Field(True, description="窗口日线不足时自动从 Datahubco 按交易日拉全日线写入 stock_daily")
+
+
+@router.get("/screener/methods")
+async def screener_methods():
+    """选股器方法目录：上升/震荡/下降 × 入选/观察/买入/持有/卖出。"""
+    from server.screener_methods import method_catalog
+
+    return method_catalog()
 
 
 @router.get("/screener/asof")
@@ -261,6 +316,7 @@ async def screener_setups(body: SetupScreenerRequest):
             body.limit,
             body.fill,
             body.include_c,
+            body.methods,
         )
         if not result.get("ok"):
             raise HTTPException(status_code=400, detail=result.get("error") or "选股失败")
@@ -502,5 +558,80 @@ async def intraday_backtest(body: IntradayBacktestBody):
         return result
     except HTTPException:
         raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ─── 次日高低点（日频 LightGBM，ml_train_daily）─────────────────
+
+
+class NextdayHlPredictBody(BaseModel):
+    ts_code: str = Field(..., description="如 000001.SZ")
+    trade_date: Optional[str] = Field(None, description="特征日 YYYY-MM-DD；空=最近已收盘交易日")
+    auto_fill: bool = Field(
+        True,
+        description="无当日特征行时自动 fill_complete + 截面 polish",
+    )
+
+
+@router.get("/nextday-hl/status")
+async def nextday_hl_status():
+    """日频次日高低点模型是否已落盘、测试集 IC/MAE、调度器状态。"""
+    try:
+        from server.nextday_hl_service import nextday_hl_service
+        return await asyncio.to_thread(nextday_hl_service.status)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/nextday-hl/predict")
+async def nextday_hl_predict(body: NextdayHlPredictBody):
+    """
+    收盘后：若无特征行则 datahubco 补数 → LightGBM 预测次日 y_high/y_low
+    → 换算参考高低价 + 偏多/偏空建议。
+    """
+    try:
+        from server.nextday_hl_service import nextday_hl_service
+        result = await asyncio.to_thread(
+            lambda: nextday_hl_service.predict(
+                body.ts_code,
+                body.trade_date,
+                auto_fill=body.auto_fill,
+            )
+        )
+        if not result.get("ok"):
+            raise HTTPException(status_code=400, detail=result.get("error") or "预测失败")
+        return result
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/nextday-hl/scheduler")
+async def nextday_hl_scheduler_status():
+    try:
+        from server.nextday_hl_scheduler import nextday_hl_scheduler
+        return nextday_hl_scheduler.status()
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/nextday-hl/scheduler/daily-batch")
+async def nextday_hl_daily_batch(force: bool = Query(False)):
+    """手动跑一批全日市场特征灌入（可重复直到 done）。"""
+    try:
+        from server.nextday_hl_scheduler import nextday_hl_scheduler
+        return await asyncio.to_thread(nextday_hl_scheduler.run_daily_batch, force=force)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/nextday-hl/scheduler/quarterly-train")
+async def nextday_hl_quarterly_train(force: bool = Query(False)):
+    """手动触发季度全量重训（耗时长、吃内存）。"""
+    try:
+        from server.nextday_hl_scheduler import nextday_hl_scheduler
+        return await asyncio.to_thread(nextday_hl_scheduler.run_quarterly_train, force=force)
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))

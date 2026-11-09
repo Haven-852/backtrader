@@ -11,16 +11,30 @@ DELETE /chat/sessions/{id}       - 删除会话
 POST /chat/sessions/{id}/messages - 追加单条消息（技能面板等）
 """
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field, SecretStr
 from typing import List, Dict, Optional, Any
 from datetime import datetime
 
 from server.chat_service import chat_service, ChatRequest
+from server.deps import get_current_user
 from server.model_service import model_service
+from server.quota_service import QuotaExceeded, quota_service
 
 router = APIRouter(prefix="/chat", tags=["chat"])
+
+
+def _uid(user: Dict[str, Any]) -> str:
+    return str(user["id"])
+
+
+def _assert_session_owner(detail: Optional[Dict[str, Any]], user_id: str) -> None:
+    if not detail:
+        raise HTTPException(status_code=404, detail="会话不存在")
+    owner = str(detail.get("user_id") or "")
+    if owner and owner != user_id:
+        raise HTTPException(status_code=403, detail="无权访问该会话")
 
 
 # ─── 请求/响应模型 ────────────────────────────────────
@@ -132,16 +146,24 @@ class LlmTestPayload(BaseModel):
 # ─── 路由 ─────────────────────────────────────────────
 
 @router.post("/messages", response_model=MessageResponse)
-async def send_message(request: MessageRequest):
-    """发送消息（非流式）- 支持多模型；默认落库并可续聊"""
+async def send_message(request: MessageRequest, user=Depends(get_current_user)):
+    """发送消息（非流式）- 支持多模型；默认落库并可续聊。强制登录用户。"""
     try:
         from agents.conversation import conversation_store
+
+        user_id = _uid(user)
+        try:
+            quota_service.check_and_incr(user_id, "chat")
+        except QuotaExceeded as qe:
+            raise HTTPException(status_code=429, detail=str(qe)) from qe
 
         history = list(request.history or [])
         session_id = request.session_id
 
-        # 有 session 时优先用库内历史
+        # 有 session 时优先用库内历史，并校验归属
         if session_id:
+            owned = await conversation_store.get(session_id)
+            _assert_session_owner(owned, user_id)
             db_hist = await conversation_store.history_for_llm(session_id, limit=20)
             if db_hist:
                 history = db_hist
@@ -162,7 +184,7 @@ async def send_message(request: MessageRequest):
             agent_mode=request.agent_mode,
             tool_skills=request.tool_skills,
             context=ctx,
-            user_id=request.user_id,
+            user_id=user_id,
             profile_id=request.profile_id,
             api_key=_secret_text(request.api_key),
             base_url=request.base_url,
@@ -177,6 +199,11 @@ async def send_message(request: MessageRequest):
         usage = response.usage or {}
         tool_trace = usage.get("tool_trace") or []
         order_ids = usage.get("order_ids") or []
+        if tool_trace:
+            try:
+                quota_service.check_and_incr(user_id, "tool")
+            except QuotaExceeded:
+                pass  # 已完成调用，仅不再累计超额提示
 
         if request.persist:
             try:
@@ -187,7 +214,7 @@ async def send_message(request: MessageRequest):
                     model=response.model,
                     provider=response.provider,
                     tool_trace=tool_trace,
-                    user_id=request.user_id,
+                    user_id=user_id,
                 )
                 session_id = detail.get("id") or session_id
             except Exception as pe:
@@ -269,8 +296,14 @@ async def send_message(request: MessageRequest):
 
 
 @router.post("/stream")
-async def send_message_stream(request: MessageRequest):
-    """发送消息（流式 SSE）- 支持多模型切换"""
+async def send_message_stream(request: MessageRequest, user=Depends(get_current_user)):
+    """发送消息（流式 SSE）- 支持多模型切换。强制登录用户。"""
+    user_id = _uid(user)
+    try:
+        quota_service.check_and_incr(user_id, "chat")
+    except QuotaExceeded as qe:
+        raise HTTPException(status_code=429, detail=str(qe)) from qe
+
     chat_req = ChatRequest(
         query=request.query,
         model=request.model,
@@ -280,7 +313,7 @@ async def send_message_stream(request: MessageRequest):
         system_prompt=request.system_prompt,
         temperature=request.temperature,
         max_tokens=request.max_tokens,
-        user_id=request.user_id,
+        user_id=user_id,
         profile_id=request.profile_id,
         api_key=_secret_text(request.api_key),
         base_url=request.base_url,
@@ -322,24 +355,24 @@ async def get_models():
 
 
 @router.get("/llm-profiles")
-async def list_llm_profiles(user_id: str = Query(default="default")):
+async def list_llm_profiles(user=Depends(get_current_user)):
     """当前用户已保存的大模型配置 + 厂商预设。"""
     try:
         from server.llm_profile_service import llm_profile_service
 
-        return llm_profile_service.catalog(user_id)
+        return llm_profile_service.catalog(_uid(user))
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"读取模型配置失败: {e}")
 
 
 @router.post("/llm-profiles")
-async def create_llm_profile(body: LlmProfilePayload, user_id: str = Query(default="default")):
+async def create_llm_profile(body: LlmProfilePayload, user=Depends(get_current_user)):
     try:
         from server.llm_profile_service import llm_profile_service
 
         data = body.model_dump()
         data["api_key"] = _secret_text(body.api_key)
-        profile = llm_profile_service.create(data, user_id=user_id)
+        profile = llm_profile_service.create(data, user_id=_uid(user))
         return {"ok": True, "profile": profile}
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
@@ -348,7 +381,7 @@ async def create_llm_profile(body: LlmProfilePayload, user_id: str = Query(defau
 
 
 @router.patch("/llm-profiles/{profile_id}")
-async def update_llm_profile(profile_id: int, body: LlmProfilePatch, user_id: str = Query(default="default")):
+async def update_llm_profile(profile_id: int, body: LlmProfilePatch, user=Depends(get_current_user)):
     try:
         from server.llm_profile_service import llm_profile_service
 
@@ -358,7 +391,7 @@ async def update_llm_profile(profile_id: int, body: LlmProfilePatch, user_id: st
         profile = llm_profile_service.update(
             profile_id,
             data,
-            user_id=user_id,
+            user_id=_uid(user),
         )
         if not profile:
             raise HTTPException(status_code=404, detail="模型配置不存在")
@@ -372,11 +405,11 @@ async def update_llm_profile(profile_id: int, body: LlmProfilePatch, user_id: st
 
 
 @router.delete("/llm-profiles/{profile_id}")
-async def delete_llm_profile(profile_id: int, user_id: str = Query(default="default")):
+async def delete_llm_profile(profile_id: int, user=Depends(get_current_user)):
     try:
         from server.llm_profile_service import llm_profile_service
 
-        ok = llm_profile_service.delete(profile_id, user_id=user_id)
+        ok = llm_profile_service.delete(profile_id, user_id=_uid(user))
         if not ok:
             raise HTTPException(status_code=404, detail="模型配置不存在")
         return {"ok": True, "deleted": profile_id}
@@ -387,11 +420,11 @@ async def delete_llm_profile(profile_id: int, user_id: str = Query(default="defa
 
 
 @router.post("/llm-profiles/{profile_id}/activate")
-async def activate_llm_profile(profile_id: int, user_id: str = Query(default="default")):
+async def activate_llm_profile(profile_id: int, user=Depends(get_current_user)):
     try:
         from server.llm_profile_service import llm_profile_service
 
-        profile = llm_profile_service.activate(profile_id, user_id=user_id)
+        profile = llm_profile_service.activate(profile_id, user_id=_uid(user))
         if not profile:
             raise HTTPException(status_code=404, detail="模型配置不存在")
         return {"ok": True, "profile": profile}
@@ -402,11 +435,12 @@ async def activate_llm_profile(profile_id: int, user_id: str = Query(default="de
 
 
 @router.post("/llm-test")
-async def test_llm_config(body: LlmTestPayload, user_id: str = Query(default="default")):
+async def test_llm_config(body: LlmTestPayload, user=Depends(get_current_user)):
     """用表单或已保存配置探测连通性。"""
     try:
         from server.llm_profile_service import llm_profile_service
 
+        user_id = _uid(user)
         payload = body.model_dump()
         payload["api_key"] = _secret_text(body.api_key)
         if body.profile_id:
@@ -426,7 +460,7 @@ async def test_llm_config(body: LlmTestPayload, user_id: str = Query(default="de
 
 @router.get("/sessions")
 async def list_sessions(
-    user_id: str = Query(default="default"),
+    user=Depends(get_current_user),
     limit: int = Query(default=50, ge=1, le=200),
     include_archived: bool = Query(default=False),
 ):
@@ -434,7 +468,7 @@ async def list_sessions(
     try:
         from agents.conversation import conversation_store
         sessions = await conversation_store.list(
-            user_id=user_id,
+            user_id=_uid(user),
             limit=limit,
             include_archived=include_archived,
         )
@@ -444,7 +478,7 @@ async def list_sessions(
 
 
 @router.post("/sessions")
-async def create_session(request: CreateSessionRequest):
+async def create_session(request: CreateSessionRequest, user=Depends(get_current_user)):
     """新建空会话"""
     try:
         from agents.conversation import conversation_store
@@ -452,7 +486,7 @@ async def create_session(request: CreateSessionRequest):
             title=request.title,
             model=request.model,
             provider=request.provider,
-            user_id=request.user_id,
+            user_id=_uid(user),
         )
         return {"ok": True, "session": session}
     except Exception as e:
@@ -460,13 +494,12 @@ async def create_session(request: CreateSessionRequest):
 
 
 @router.get("/sessions/{session_id}")
-async def get_session(session_id: str):
+async def get_session(session_id: str, user=Depends(get_current_user)):
     """读取会话及全部消息（点击历史后继续对话）"""
     try:
         from agents.conversation import conversation_store
         detail = await conversation_store.get(session_id)
-        if not detail:
-            raise HTTPException(status_code=404, detail="会话不存在")
+        _assert_session_owner(detail, _uid(user))
         return {"ok": True, "session": detail}
     except HTTPException:
         raise
@@ -475,11 +508,13 @@ async def get_session(session_id: str):
 
 
 @router.patch("/sessions/{session_id}")
-async def update_session(session_id: str, request: UpdateSessionRequest):
+async def update_session(session_id: str, request: UpdateSessionRequest, user=Depends(get_current_user)):
     """重命名或归档会话"""
     try:
         from agents.conversation import conversation_store
         from data_layer.storage.conversation_repo import conversation_repo
+        owned = await conversation_store.get(session_id)
+        _assert_session_owner(owned, _uid(user))
         detail = await conversation_repo.update_session(
             session_id,
             title=request.title,
@@ -497,10 +532,12 @@ async def update_session(session_id: str, request: UpdateSessionRequest):
 
 
 @router.delete("/sessions/{session_id}")
-async def delete_session(session_id: str):
+async def delete_session(session_id: str, user=Depends(get_current_user)):
     """删除会话及其消息"""
     try:
         from agents.conversation import conversation_store
+        owned = await conversation_store.get(session_id)
+        _assert_session_owner(owned, _uid(user))
         ok = await conversation_store.delete(session_id)
         if not ok:
             raise HTTPException(status_code=404, detail="会话不存在")
@@ -512,13 +549,12 @@ async def delete_session(session_id: str):
 
 
 @router.post("/sessions/{session_id}/messages")
-async def append_message(session_id: str, request: AppendMessageRequest):
+async def append_message(session_id: str, request: AppendMessageRequest, user=Depends(get_current_user)):
     """向已有会话追加一条消息（技能面板结果等）"""
     try:
         from agents.conversation import conversation_store
         detail = await conversation_store.get(session_id)
-        if not detail:
-            raise HTTPException(status_code=404, detail="会话不存在")
+        _assert_session_owner(detail, _uid(user))
         msg = await conversation_store.add_message(
             session_id,
             role=request.role,
@@ -536,11 +572,14 @@ async def append_message(session_id: str, request: AppendMessageRequest):
 
 
 @router.get("/history")
-async def get_history(user_id: str = Query(default="default"), limit: int = Query(default=50, ge=1, le=200)):
+async def get_history(
+    user=Depends(get_current_user),
+    limit: int = Query(default=50, ge=1, le=200),
+):
     """兼容旧接口：等同 sessions 列表"""
     try:
         from agents.conversation import conversation_store
-        sessions = await conversation_store.list(user_id=user_id, limit=limit)
+        sessions = await conversation_store.list(user_id=_uid(user), limit=limit)
         return {"ok": True, "sessions": sessions, "count": len(sessions)}
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"获取对话历史失败: {str(e)}")

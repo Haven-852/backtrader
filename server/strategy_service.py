@@ -152,13 +152,58 @@ STRATEGY_CATALOG: List[Dict[str, Any]] = [
             "怎么赚钱：只在已经走升势的票里等缩量回踩，买的是趋势延续而不是抄底。"
             "结构低点把单笔亏损卡在约 4% 以内；涨起来后用 ATR 移动止损锁利润；"
             "趋势走坏（跌破 MA10 且放量）立刻认错。盈亏来自「小亏快砍 + 趋势反弹吃一段」，"
-            "不是靠猜涨停。回测不含佣金、印花税、涨跌停无法成交和停牌，只作参考。"
+            "不是靠猜涨停。回测已扣佣金和印花税；不含涨跌停无法成交和停牌，只作参考。"
         ),
         "params": [
             {"name": "max_holding", "label": "最长持仓日", "min": 2, "max": 10, "step": 1, "default": 5},
             {"name": "atr_multiple", "label": "移动止损 ATR 倍数", "min": 1, "max": 5, "step": 0.1, "default": 2.5},
             {"name": "trigger_r", "label": "启动移动止损的 R", "min": 1, "max": 4, "step": 0.1, "default": 2.0},
             {"name": "slippage_bps", "label": "滑点(bp)", "min": 0, "max": 50, "step": 1, "default": 5},
+        ],
+    },
+    {
+        "id": "ma60_shrink",
+        "name": "MA60均线判断买入点和卖出点",
+        "category": "短线",
+        "desc": "同一策略两套机制：价在MA60下方做折价短线；价在上方确认升势后拿主升浪，高位放量十字星再兑现。",
+        "suitable_regime": "trend_down / trend_up",
+        "suitable_regimes": ["trend_down", "trend_up", "range"],
+        "logic": (
+            "机制A（收盘价 < MA60）："
+            "缩量折价买（次日开盘）；深折价≥15%且量远超前5日则当天买；"
+            "反弹到MA20且放量则短线卖；深折价仓在站上MA5、量超前几日且收长阴时卖。"
+            "此机制下，若尚未确认升势，价格一旦远离均线并放量仍按远超规则兑现。"
+            "机制B（收盘价 > MA60，且近10日中至少8日MA60斜率为正）："
+            "关闭「远超MA60放量卖」和「远离MA5放量清仓」。"
+            "斜率刚转正当天可买；贴近MA60、站上MA5/MA20且不放量可开仓/补仓。"
+            "卖出：相对近60日成交量中位数放量，且最高价超过MA5，并相对MA60已到高位，"
+            "同时收出十字星（阳十字、阴十字都算），当天卖出。"
+            "高位十字星兑现后，在升势再次确认前不再用机制A去接主升浪后的阴跌。"
+            "A股T+1：买入当天不能卖。同一标的同时只做这一套仓位。"
+        ),
+        "profit": (
+            "怎么赚钱：均线下方低吸短线波段；均线上方确认升势后拿趋势，"
+            "不再因为加速远离均线而卖掉主升浪；高位相对60日量能放量十字星再兑现，回踩贴近均线再补。"
+            "回测已扣佣金和印花税；不含涨跌停无法成交和停牌，只作参考。"
+        ),
+        "params": [
+            {"name": "min_dev", "label": "MA60折价阈值%", "min": 1, "max": 15, "step": 0.5, "default": 3},
+            {"name": "crash_dev", "label": "深折价放量买%", "min": 8, "max": 30, "step": 1, "default": 15},
+            {"name": "long_yin_pct", "label": "长阴实体%", "min": 1, "max": 10, "step": 0.5, "default": 3},
+            {"name": "body_pct", "label": "开收盘最大差%", "min": 0.5, "max": 8, "step": 0.5, "default": 3},
+            {"name": "vol_expand", "label": "放量倍数", "min": 1.1, "max": 4, "step": 0.1, "default": 1.8},
+            {"name": "ma60_stretch", "label": "机制A远超MA60卖%", "min": 3, "max": 40, "step": 0.5, "default": 25},
+            {"name": "ma5_stretch", "label": "机制A远离MA5%", "min": 2, "max": 30, "step": 0.5, "default": 20},
+            {"name": "ma60_near", "label": "机制B贴近MA60%", "min": 0.5, "max": 5, "step": 0.5, "default": 2},
+            {"name": "add_pct", "label": "补仓比例%", "min": 5, "max": 50, "step": 1, "default": 15},
+            {"name": "max_adds", "label": "最多补仓次数", "min": 0, "max": 5, "step": 1, "default": 2},
+            {"name": "position_pct", "label": "开仓仓位%", "min": 10, "max": 100, "step": 5, "default": 100},
+            {"name": "slope_days", "label": "MA60斜率回看日", "min": 3, "max": 20, "step": 1, "default": 5},
+            {"name": "slope_window", "label": "升势确认窗口", "min": 5, "max": 20, "step": 1, "default": 10},
+            {"name": "slope_hits", "label": "窗口内斜率为正天数", "min": 5, "max": 20, "step": 1, "default": 8},
+            {"name": "ma5_doji_excess", "label": "机制B高点超MA5点数%", "min": 3, "max": 20, "step": 0.5, "default": 4},
+            {"name": "b_ma60_high", "label": "机制B高位相对MA60%", "min": 10, "max": 80, "step": 5, "default": 35},
+            {"name": "doji_body_pct", "label": "十字星实体上限%", "min": 0.3, "max": 3, "step": 0.1, "default": 1.8},
         ],
     },
 ]

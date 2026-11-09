@@ -136,6 +136,13 @@ const currentAccountLabel = computed(() => {
   return `#${account.value.id} ${account.value.name}`
 })
 
+/** 左侧账户操作抽屉：上拉展开现金/循环/监控等，避免底栏被裁切看不到 */
+const accountDrawerOpen = ref(false)
+
+function toggleAccountDrawer() {
+  accountDrawerOpen.value = !accountDrawerOpen.value
+}
+
 function todayISO() {
   const d = new Date()
   const y = d.getFullYear()
@@ -854,9 +861,9 @@ onMounted(async () => {
 
 <template>
   <div class="h-full min-h-0 flex bg-zinc-950 overflow-hidden">
-    <!-- Left: Account -->
-    <div class="w-64 flex-shrink-0 flex flex-col border-r border-zinc-800 bg-zinc-900/50">
-      <div class="px-3 py-3 border-b border-zinc-800">
+    <!-- Left: Account list + 上拉抽屉（现金/循环/监控） -->
+    <div class="relative w-64 flex-shrink-0 flex flex-col border-r border-zinc-800 bg-zinc-900/50 overflow-hidden">
+      <div class="flex-shrink-0 px-3 py-3 border-b border-zinc-800">
         <div class="text-xs font-semibold text-zinc-300 flex items-center gap-1.5">
           <i class="fa-solid fa-wallet text-emerald-400"></i> 纸面账户
         </div>
@@ -873,11 +880,11 @@ onMounted(async () => {
         </div>
       </div>
 
-      <div class="flex-1 overflow-auto p-2 space-y-1">
+      <div class="flex-1 min-h-0 overflow-auto p-2 space-y-1 pb-2">
         <div
           v-for="a in accounts"
           :key="a.id"
-          @click="accountId = a.id"
+          @click="accountId = a.id; accountDrawerOpen = true"
           :class="accountId === a.id ? 'bg-zinc-800 border-emerald-500/40' : 'border-transparent hover:bg-zinc-800/60'"
           class="group relative rounded-lg border px-2.5 py-2 cursor-pointer text-xs"
         >
@@ -897,183 +904,242 @@ onMounted(async () => {
         <div v-if="!accounts.length" class="text-[11px] text-zinc-600 px-2 py-4">暂无账户，请先开户</div>
       </div>
 
-      <div class="border-t border-zinc-800 p-3 space-y-2 text-xs">
-        <div class="flex justify-between text-zinc-400"><span>现金</span><span class="tabular-nums text-zinc-200">{{ fmtMoney(account?.cash) }}</span></div>
-        <div class="flex justify-between text-zinc-400">
-          <span>{{ sessionPhase === 'live' ? '盘中净值' : '分时净值' }}</span>
-          <span class="tabular-nums text-emerald-300">{{ fmtMoney(account?.equity) }}</span>
+      <!-- 收起态：底部摘要条 + 上箭头 -->
+      <button
+        type="button"
+        @click="toggleAccountDrawer"
+        class="flex-shrink-0 border-t border-zinc-800 bg-zinc-900/90 px-3 py-2.5 flex items-center gap-2 hover:bg-zinc-800/80 transition-colors text-left"
+        :title="accountDrawerOpen ? '收起账户面板' : '上拉查看账户信息'"
+      >
+        <div class="flex-1 min-w-0">
+          <div class="text-[10px] text-zinc-500 truncate">{{ currentAccountLabel }}</div>
+          <div class="mt-0.5 flex items-baseline gap-2 text-[11px] tabular-nums">
+            <span class="text-zinc-400">现金 <span class="text-zinc-200">{{ fmtMoney(account?.cash) }}</span></span>
+            <span :class="(stats?.total_return || 0) >= 0 ? 'text-emerald-400' : 'text-red-400'">{{ fmtPct(stats?.total_return) }}</span>
+          </div>
         </div>
-        <div v-if="markNote" class="text-[10px] text-amber-400/90 leading-snug">{{ markNote }}</div>
-        <div class="flex justify-between text-zinc-400"><span>收益</span><span class="tabular-nums" :class="(stats?.total_return || 0) >= 0 ? 'text-emerald-400' : 'text-red-400'">{{ fmtPct(stats?.total_return) }}</span></div>
-        <div class="flex gap-1.5 pt-1">
-          <button @click="settleNow" :disabled="!accountId" class="flex-1 px-2 py-1.5 rounded-md bg-zinc-800 hover:bg-zinc-700 disabled:opacity-40">结算</button>
-          <button @click="markNow" :disabled="!accountId" class="flex-1 px-2 py-1.5 rounded-md bg-zinc-800 hover:bg-zinc-700 disabled:opacity-40">盯市</button>
-          <button @click="refreshAccountPanel" class="px-2 py-1.5 rounded-md bg-zinc-800 hover:bg-zinc-700" :class="{ 'animate-pulse': loadingPanel }">
-            <i class="fa-solid fa-rotate"></i>
-          </button>
-        </div>
+        <span
+          class="w-8 h-8 rounded-full bg-zinc-800 border border-zinc-700 flex items-center justify-center text-zinc-300 shrink-0 transition-transform duration-200"
+          :class="accountDrawerOpen ? 'rotate-180' : ''"
+        >
+          <i class="fa-solid fa-chevron-up text-xs"></i>
+        </span>
+      </button>
 
-        <div class="pt-2 border-t border-zinc-800 space-y-1.5">
-          <div class="flex items-center justify-between text-[10px] text-zinc-500">
-            <span>交易循环</span>
-            <label class="flex items-center gap-1 cursor-pointer">
-              <input v-model="cycleUseLlm" type="checkbox" class="rounded border-zinc-600" />
-              LLM
-            </label>
-          </div>
-          <button
-            :disabled="cycleBusy"
-            @click="toggleScheduler"
-            :class="schedulerOn ? 'bg-amber-700/80 hover:bg-amber-600' : 'bg-blue-700/70 hover:bg-blue-600'"
-            class="w-full px-2 py-1 rounded-md text-[10px] disabled:opacity-40"
-          >{{ schedulerOn ? '关闭定时（21:00 / 盘中做T）' : '开启定时（21:00选股 · 盘中每5分钟做T）' }}</button>
-          <div v-if="schedulerStatus" class="text-[10px] text-zinc-500 leading-snug">{{ schedulerStatus }}</div>
-          <button :disabled="cycleBusy" @click="runCycle('evening-screen')" class="w-full px-2 py-1 rounded-md bg-zinc-800 hover:bg-zinc-700 text-[10px] disabled:opacity-40">① 晚间选股 A/B Top5</button>
-          <button :disabled="cycleBusy || !accountId" @click="runCycle('run-trading-day')" class="w-full px-2 py-1 rounded-md bg-emerald-700/70 hover:bg-emerald-600 text-[10px] disabled:opacity-40">② 一键日课（日切+风控+当前分时做T）</button>
-          <div class="grid grid-cols-2 gap-1">
-            <button :disabled="cycleBusy || !accountId" @click="runCycle('open-decide')" class="px-1.5 py-1 rounded-md bg-zinc-800 hover:bg-zinc-700 text-[10px] disabled:opacity-40">日切+扫一次</button>
-            <button :disabled="cycleBusy || !accountId" @click="runCycle('risk-check')" class="px-1.5 py-1 rounded-md bg-zinc-800 hover:bg-zinc-700 text-[10px] disabled:opacity-40">回撤清仓</button>
-            <button :disabled="cycleBusy || !accountId" @click="runCycle('daily-t0')" class="px-1.5 py-1 rounded-md bg-zinc-800 hover:bg-zinc-700 text-[10px] disabled:opacity-40">扫一次分时做T</button>
-            <button :disabled="cycleBusy || !accountId" @click="runCycle('weekly-review')" class="px-1.5 py-1 rounded-md bg-zinc-800 hover:bg-zinc-700 text-[10px] disabled:opacity-40">周复盘</button>
-          </div>
-          <button :disabled="cycleBusy || !accountId" @click="runCycle('afternoon-exposure')" class="w-full px-2 py-1 rounded-md bg-zinc-800 hover:bg-zinc-700 text-[10px] disabled:opacity-40">13:00仓位（概率&gt;60%满仓，否则留20%现金）</button>
-          <div v-if="cycleMsg" class="text-[10px] text-zinc-500 leading-snug">{{ cycleMsg }}</div>
-        </div>
-
-        <div class="pt-2 border-t border-zinc-800 space-y-1.5">
-          <div class="flex items-center justify-between text-[10px] text-zinc-500">
-            <span>现实自选监控</span>
-            <label class="flex items-center gap-1 cursor-pointer">
-              <input v-model="monUseLlm" type="checkbox" class="rounded border-zinc-600" />
-              LLM简报
-            </label>
-          </div>
-          <div class="text-[10px] text-zinc-600 leading-snug">自己选股监控（与虚拟持仓无关）。触发后按代码里的简报结构生成 Markdown，同时发给企业微信和 PushPlus。</div>
-          <div class="flex gap-1">
-            <input
-              v-model="monCode"
-              placeholder="代码 600519"
-              class="flex-1 min-w-0 px-1.5 py-1 rounded bg-zinc-900 border border-zinc-700 text-[10px] text-zinc-200 outline-none"
-              @keyup.enter="addMonitorSymbol"
-            />
-            <input
-              v-model.number="monCost"
-              type="number"
-              step="0.01"
-              placeholder="成本"
-              class="w-14 px-1 py-1 rounded bg-zinc-900 border border-zinc-700 text-[10px] text-zinc-200 outline-none"
-            />
-            <button :disabled="monBusy" @click="addMonitorSymbol" class="px-2 py-1 rounded-md bg-emerald-700/70 hover:bg-emerald-600 text-[10px] disabled:opacity-40">加入</button>
-          </div>
-          <input
-            v-model="monNote"
-            placeholder="备注（可选）"
-            class="w-full px-1.5 py-1 rounded bg-zinc-900 border border-zinc-700 text-[10px] text-zinc-200 outline-none"
-          />
-          <div v-if="monPool.length" class="max-h-28 overflow-y-auto space-y-0.5">
-            <div
-              v-for="p in monPool"
-              :key="p.ts_code"
-              class="flex items-center justify-between gap-1 text-[10px] bg-zinc-900/50 rounded px-1.5 py-1"
+      <!-- 上拉抽屉：账户详情 / 交易循环 / 监控（内部可滚动） -->
+      <transition
+        enter-active-class="transition duration-200 ease-out"
+        enter-from-class="translate-y-full opacity-0"
+        enter-to-class="translate-y-0 opacity-100"
+        leave-active-class="transition duration-200 ease-in"
+        leave-from-class="translate-y-0 opacity-100"
+        leave-to-class="translate-y-full opacity-0"
+      >
+        <div
+          v-if="accountDrawerOpen"
+          class="absolute inset-x-0 bottom-0 z-20 flex flex-col bg-zinc-900 border-t border-emerald-500/30 shadow-[0_-12px_40px_rgba(0,0,0,0.45)]"
+          style="top: 22%"
+        >
+          <div class="flex-shrink-0 px-3 pt-2 pb-1.5 border-b border-zinc-800 flex items-center gap-2">
+            <button
+              type="button"
+              @click="accountDrawerOpen = false"
+              class="w-8 h-8 rounded-full bg-zinc-800 border border-zinc-700 flex items-center justify-center text-zinc-300 hover:text-white hover:border-zinc-500"
+              title="向下收起"
             >
-              <span class="truncate text-zinc-300">
-                <span class="font-mono">{{ p.ts_code }}</span>
-                <span class="text-zinc-500 ml-1">{{ p.name }}</span>
-                <span v-if="p.cost_basis" class="text-zinc-600 ml-1">成本{{ p.cost_basis }}</span>
-              </span>
-              <button @click="removeMonitorSymbol(p.ts_code)" class="text-zinc-600 hover:text-red-400 shrink-0">×</button>
+              <i class="fa-solid fa-chevron-down text-xs"></i>
+            </button>
+            <div class="flex-1 min-w-0">
+              <div class="text-xs font-semibold text-zinc-200 truncate">账户操作</div>
+              <div class="text-[10px] text-zinc-500 truncate">{{ currentAccountLabel }} · 上下滑动查看</div>
+            </div>
+            <button
+              type="button"
+              @click="refreshAccountPanel"
+              class="px-2 py-1.5 rounded-md bg-zinc-800 hover:bg-zinc-700 text-zinc-400"
+              :class="{ 'animate-pulse': loadingPanel }"
+              title="刷新"
+            >
+              <i class="fa-solid fa-rotate text-xs"></i>
+            </button>
+          </div>
+
+          <div class="flex-1 min-h-0 overflow-y-auto overscroll-contain p-3 space-y-2 text-xs">
+            <div class="flex justify-between text-zinc-400"><span>现金</span><span class="tabular-nums text-zinc-200">{{ fmtMoney(account?.cash) }}</span></div>
+            <div class="flex justify-between text-zinc-400">
+              <span>{{ sessionPhase === 'live' ? '盘中净值' : '分时净值' }}</span>
+              <span class="tabular-nums text-emerald-300">{{ fmtMoney(account?.equity) }}</span>
+            </div>
+            <div v-if="markNote" class="text-[10px] text-amber-400/90 leading-snug">{{ markNote }}</div>
+            <div class="flex justify-between text-zinc-400"><span>收益</span><span class="tabular-nums" :class="(stats?.total_return || 0) >= 0 ? 'text-emerald-400' : 'text-red-400'">{{ fmtPct(stats?.total_return) }}</span></div>
+            <div class="flex gap-1.5 pt-1">
+              <button @click="settleNow" :disabled="!accountId" class="flex-1 px-2 py-1.5 rounded-md bg-zinc-800 hover:bg-zinc-700 disabled:opacity-40">结算</button>
+              <button @click="markNow" :disabled="!accountId" class="flex-1 px-2 py-1.5 rounded-md bg-zinc-800 hover:bg-zinc-700 disabled:opacity-40">盯市</button>
+            </div>
+
+            <div class="pt-2 border-t border-zinc-800 space-y-1.5">
+              <div class="flex items-center justify-between text-[10px] text-zinc-500">
+                <span>交易循环</span>
+                <label class="flex items-center gap-1 cursor-pointer">
+                  <input v-model="cycleUseLlm" type="checkbox" class="rounded border-zinc-600" />
+                  LLM
+                </label>
+              </div>
+              <button
+                :disabled="cycleBusy"
+                @click="toggleScheduler"
+                :class="schedulerOn ? 'bg-amber-700/80 hover:bg-amber-600' : 'bg-blue-700/70 hover:bg-blue-600'"
+                class="w-full px-2 py-1 rounded-md text-[10px] disabled:opacity-40"
+              >{{ schedulerOn ? '关闭定时（21:00 / 盘中做T）' : '开启定时（21:00选股 · 盘中每5分钟做T）' }}</button>
+              <div v-if="schedulerStatus" class="text-[10px] text-zinc-500 leading-snug">{{ schedulerStatus }}</div>
+              <button :disabled="cycleBusy" @click="runCycle('evening-screen')" class="w-full px-2 py-1 rounded-md bg-zinc-800 hover:bg-zinc-700 text-[10px] disabled:opacity-40">① 晚间选股 A/B Top5</button>
+              <button :disabled="cycleBusy || !accountId" @click="runCycle('run-trading-day')" class="w-full px-2 py-1 rounded-md bg-emerald-700/70 hover:bg-emerald-600 text-[10px] disabled:opacity-40">② 一键日课（日切+风控+当前分时做T）</button>
+              <div class="grid grid-cols-2 gap-1">
+                <button :disabled="cycleBusy || !accountId" @click="runCycle('open-decide')" class="px-1.5 py-1 rounded-md bg-zinc-800 hover:bg-zinc-700 text-[10px] disabled:opacity-40">日切+扫一次</button>
+                <button :disabled="cycleBusy || !accountId" @click="runCycle('risk-check')" class="px-1.5 py-1 rounded-md bg-zinc-800 hover:bg-zinc-700 text-[10px] disabled:opacity-40">回撤清仓</button>
+                <button :disabled="cycleBusy || !accountId" @click="runCycle('daily-t0')" class="px-1.5 py-1 rounded-md bg-zinc-800 hover:bg-zinc-700 text-[10px] disabled:opacity-40">扫一次分时做T</button>
+                <button :disabled="cycleBusy || !accountId" @click="runCycle('weekly-review')" class="px-1.5 py-1 rounded-md bg-zinc-800 hover:bg-zinc-700 text-[10px] disabled:opacity-40">周复盘</button>
+              </div>
+              <button :disabled="cycleBusy || !accountId" @click="runCycle('afternoon-exposure')" class="w-full px-2 py-1 rounded-md bg-zinc-800 hover:bg-zinc-700 text-[10px] disabled:opacity-40">13:00仓位（概率&gt;60%满仓，否则留20%现金）</button>
+              <div v-if="cycleMsg" class="text-[10px] text-zinc-500 leading-snug">{{ cycleMsg }}</div>
+            </div>
+
+            <div class="pt-2 border-t border-zinc-800 space-y-1.5">
+              <div class="flex items-center justify-between text-[10px] text-zinc-500">
+                <span>现实自选监控</span>
+                <label class="flex items-center gap-1 cursor-pointer">
+                  <input v-model="monUseLlm" type="checkbox" class="rounded border-zinc-600" />
+                  LLM简报
+                </label>
+              </div>
+              <div class="text-[10px] text-zinc-600 leading-snug">自己选股监控（与虚拟持仓无关）。触发后按代码里的简报结构生成 Markdown，同时发给企业微信和 PushPlus。</div>
+              <div class="flex gap-1">
+                <input
+                  v-model="monCode"
+                  placeholder="代码 600519"
+                  class="flex-1 min-w-0 px-1.5 py-1 rounded bg-zinc-900 border border-zinc-700 text-[10px] text-zinc-200 outline-none"
+                  @keyup.enter="addMonitorSymbol"
+                />
+                <input
+                  v-model.number="monCost"
+                  type="number"
+                  step="0.01"
+                  placeholder="成本"
+                  class="w-14 px-1 py-1 rounded bg-zinc-900 border border-zinc-700 text-[10px] text-zinc-200 outline-none"
+                />
+                <button :disabled="monBusy" @click="addMonitorSymbol" class="px-2 py-1 rounded-md bg-emerald-700/70 hover:bg-emerald-600 text-[10px] disabled:opacity-40">加入</button>
+              </div>
+              <input
+                v-model="monNote"
+                placeholder="备注（可选）"
+                class="w-full px-1.5 py-1 rounded bg-zinc-900 border border-zinc-700 text-[10px] text-zinc-200 outline-none"
+              />
+              <div v-if="monPool.length" class="max-h-28 overflow-y-auto space-y-0.5">
+                <div
+                  v-for="p in monPool"
+                  :key="p.ts_code"
+                  class="flex items-center justify-between gap-1 text-[10px] bg-zinc-900/50 rounded px-1.5 py-1"
+                >
+                  <span class="truncate text-zinc-300">
+                    <span class="font-mono">{{ p.ts_code }}</span>
+                    <span class="text-zinc-500 ml-1">{{ p.name }}</span>
+                    <span v-if="p.cost_basis" class="text-zinc-600 ml-1">成本{{ p.cost_basis }}</span>
+                  </span>
+                  <button @click="removeMonitorSymbol(p.ts_code)" class="text-zinc-600 hover:text-red-400 shrink-0">×</button>
+                </div>
+              </div>
+              <div v-else class="text-[10px] text-zinc-600">监控池为空，请添加你现实持仓的股票</div>
+              <button
+                :disabled="monBusy"
+                @click="toggleMonitorAuto"
+                :class="monAutoOn ? 'bg-amber-700/80 hover:bg-amber-600' : 'bg-teal-700/70 hover:bg-teal-600'"
+                class="w-full px-2 py-1 rounded-md text-[10px] disabled:opacity-40"
+              >{{ monAutoOn ? '关闭自动监控（盘中 LLM 简报）' : '开启自动监控（盘中扫描 → Markdown 推送）' }}</button>
+              <div class="grid grid-cols-2 gap-1 text-[10px]">
+                <label class="flex items-center justify-between gap-1 bg-zinc-900/50 rounded px-1.5 py-1">
+                  <span class="text-zinc-500">大跌%</span>
+                  <input v-model.number="monDropPct" type="number" step="0.5" class="w-14 bg-transparent text-right text-zinc-200 outline-none" />
+                </label>
+                <label class="flex items-center justify-between gap-1 bg-zinc-900/50 rounded px-1.5 py-1">
+                  <span class="text-zinc-500">大涨%</span>
+                  <input v-model.number="monRisePct" type="number" step="0.5" class="w-14 bg-transparent text-right text-zinc-200 outline-none" />
+                </label>
+                <label class="flex items-center justify-between gap-1 bg-zinc-900/50 rounded px-1.5 py-1">
+                  <span class="text-zinc-500">回撤%</span>
+                  <input v-model.number="monPullPct" type="number" step="0.5" class="w-14 bg-transparent text-right text-zinc-200 outline-none" />
+                </label>
+                <label class="flex items-center justify-between gap-1 bg-zinc-900/50 rounded px-1.5 py-1">
+                  <span class="text-zinc-500">冷却分</span>
+                  <input v-model.number="monCooldown" type="number" step="5" min="1" class="w-14 bg-transparent text-right text-zinc-200 outline-none" />
+                </label>
+                <label class="flex items-center justify-between gap-1 bg-zinc-900/50 rounded px-1.5 py-1">
+                  <span class="text-zinc-500">成本止损%</span>
+                  <input v-model.number="monStopPct" type="number" step="0.5" class="w-14 bg-transparent text-right text-zinc-200 outline-none" />
+                </label>
+                <label class="flex items-center justify-between gap-1 bg-zinc-900/50 rounded px-1.5 py-1">
+                  <span class="text-zinc-500">成本止盈%</span>
+                  <input v-model.number="monTakePct" type="number" step="0.5" class="w-14 bg-transparent text-right text-zinc-200 outline-none" />
+                </label>
+              </div>
+              <div class="grid grid-cols-3 gap-1">
+                <button :disabled="monBusy" @click="saveMonitorThresholds" class="px-1.5 py-1 rounded-md bg-zinc-800 hover:bg-zinc-700 text-[10px] disabled:opacity-40">保存</button>
+                <button :disabled="monBusy || !monPool.length" @click="runMonitorScan(false)" class="px-1.5 py-1 rounded-md bg-zinc-800 hover:bg-zinc-700 text-[10px] disabled:opacity-40">立即扫描</button>
+                <button :disabled="monBusy || !monPool.length" @click="runMonitorScan(true)" class="px-1.5 py-1 rounded-md bg-zinc-800 hover:bg-zinc-700 text-[10px] disabled:opacity-40">强制日报</button>
+              </div>
+              <div v-if="monMsg" class="text-[10px] text-zinc-500 leading-snug">{{ monMsg }}</div>
+            </div>
+
+            <div class="pt-2 border-t border-zinc-800 space-y-1.5 pb-4">
+              <div class="flex items-center justify-between text-[10px] text-zinc-500">
+                <span>虚拟账户告警</span>
+                <span class="text-zinc-600">{{ (alertChannels.filter(c => c.configured).map(c => c.name).join(' · ')) || '未配置通道' }}</span>
+              </div>
+              <button
+                :disabled="alertBusy"
+                @click="toggleAlertAuto"
+                :class="alertAutoOn ? 'bg-amber-700/80 hover:bg-amber-600' : 'bg-violet-700/70 hover:bg-violet-600'"
+                class="w-full px-2 py-1 rounded-md text-[10px] disabled:opacity-40"
+              >{{ alertAutoOn ? '关闭自动告警（盘中随定时器扫描）' : '开启自动告警（盘中扫描 · 微信推送）' }}</button>
+              <div class="grid grid-cols-2 gap-1 text-[10px]">
+                <label class="flex items-center justify-between gap-1 bg-zinc-900/50 rounded px-1.5 py-1">
+                  <span class="text-zinc-500">止损%</span>
+                  <input v-model.number="alertStopPct" type="number" step="0.5" class="w-14 bg-transparent text-right text-zinc-200 outline-none" />
+                </label>
+                <label class="flex items-center justify-between gap-1 bg-zinc-900/50 rounded px-1.5 py-1">
+                  <span class="text-zinc-500">止盈%</span>
+                  <input v-model.number="alertTakePct" type="number" step="0.5" class="w-14 bg-transparent text-right text-zinc-200 outline-none" />
+                </label>
+                <label class="flex items-center justify-between gap-1 bg-zinc-900/50 rounded px-1.5 py-1">
+                  <span class="text-zinc-500">回撤%</span>
+                  <input v-model.number="alertPullPct" type="number" step="0.5" class="w-14 bg-transparent text-right text-zinc-200 outline-none" />
+                </label>
+                <label class="flex items-center justify-between gap-1 bg-zinc-900/50 rounded px-1.5 py-1">
+                  <span class="text-zinc-500">冷却分</span>
+                  <input v-model.number="alertCooldown" type="number" step="5" min="1" class="w-14 bg-transparent text-right text-zinc-200 outline-none" />
+                </label>
+                <label class="flex items-center justify-between gap-1 bg-zinc-900/50 rounded px-1.5 py-1">
+                  <span class="text-zinc-500">大跌%</span>
+                  <input v-model.number="alertDropPct" type="number" step="0.5" class="w-14 bg-transparent text-right text-zinc-200 outline-none" />
+                </label>
+                <label class="flex items-center justify-between gap-1 bg-zinc-900/50 rounded px-1.5 py-1">
+                  <span class="text-zinc-500">大涨%</span>
+                  <input v-model.number="alertRisePct" type="number" step="0.5" class="w-14 bg-transparent text-right text-zinc-200 outline-none" />
+                </label>
+              </div>
+              <label class="flex items-center gap-1.5 text-[10px] text-zinc-500 cursor-pointer">
+                <input v-model="alertAutoSell" type="checkbox" class="rounded border-zinc-600" />
+                止损时自动卖出（默认关，仅提醒）
+              </label>
+              <div class="grid grid-cols-3 gap-1">
+                <button :disabled="alertBusy" @click="saveAlertThresholds" class="px-1.5 py-1 rounded-md bg-zinc-800 hover:bg-zinc-700 text-[10px] disabled:opacity-40">保存阈值</button>
+                <button :disabled="alertBusy || !accountId" @click="runAlertScan" class="px-1.5 py-1 rounded-md bg-zinc-800 hover:bg-zinc-700 text-[10px] disabled:opacity-40">立即扫描</button>
+                <button :disabled="alertBusy" @click="testAlertNotify" class="px-1.5 py-1 rounded-md bg-zinc-800 hover:bg-zinc-700 text-[10px] disabled:opacity-40">测试推送</button>
+              </div>
+              <div v-if="alertMsg" class="text-[10px] text-zinc-500 leading-snug">{{ alertMsg }}</div>
             </div>
           </div>
-          <div v-else class="text-[10px] text-zinc-600">监控池为空，请添加你现实持仓的股票</div>
-          <button
-            :disabled="monBusy"
-            @click="toggleMonitorAuto"
-            :class="monAutoOn ? 'bg-amber-700/80 hover:bg-amber-600' : 'bg-teal-700/70 hover:bg-teal-600'"
-            class="w-full px-2 py-1 rounded-md text-[10px] disabled:opacity-40"
-          >{{ monAutoOn ? '关闭自动监控（盘中 LLM 简报）' : '开启自动监控（盘中扫描 → Markdown 推送）' }}</button>
-          <div class="grid grid-cols-2 gap-1 text-[10px]">
-            <label class="flex items-center justify-between gap-1 bg-zinc-900/50 rounded px-1.5 py-1">
-              <span class="text-zinc-500">大跌%</span>
-              <input v-model.number="monDropPct" type="number" step="0.5" class="w-14 bg-transparent text-right text-zinc-200 outline-none" />
-            </label>
-            <label class="flex items-center justify-between gap-1 bg-zinc-900/50 rounded px-1.5 py-1">
-              <span class="text-zinc-500">大涨%</span>
-              <input v-model.number="monRisePct" type="number" step="0.5" class="w-14 bg-transparent text-right text-zinc-200 outline-none" />
-            </label>
-            <label class="flex items-center justify-between gap-1 bg-zinc-900/50 rounded px-1.5 py-1">
-              <span class="text-zinc-500">回撤%</span>
-              <input v-model.number="monPullPct" type="number" step="0.5" class="w-14 bg-transparent text-right text-zinc-200 outline-none" />
-            </label>
-            <label class="flex items-center justify-between gap-1 bg-zinc-900/50 rounded px-1.5 py-1">
-              <span class="text-zinc-500">冷却分</span>
-              <input v-model.number="monCooldown" type="number" step="5" min="1" class="w-14 bg-transparent text-right text-zinc-200 outline-none" />
-            </label>
-            <label class="flex items-center justify-between gap-1 bg-zinc-900/50 rounded px-1.5 py-1">
-              <span class="text-zinc-500">成本止损%</span>
-              <input v-model.number="monStopPct" type="number" step="0.5" class="w-14 bg-transparent text-right text-zinc-200 outline-none" />
-            </label>
-            <label class="flex items-center justify-between gap-1 bg-zinc-900/50 rounded px-1.5 py-1">
-              <span class="text-zinc-500">成本止盈%</span>
-              <input v-model.number="monTakePct" type="number" step="0.5" class="w-14 bg-transparent text-right text-zinc-200 outline-none" />
-            </label>
-          </div>
-          <div class="grid grid-cols-3 gap-1">
-            <button :disabled="monBusy" @click="saveMonitorThresholds" class="px-1.5 py-1 rounded-md bg-zinc-800 hover:bg-zinc-700 text-[10px] disabled:opacity-40">保存</button>
-            <button :disabled="monBusy || !monPool.length" @click="runMonitorScan(false)" class="px-1.5 py-1 rounded-md bg-zinc-800 hover:bg-zinc-700 text-[10px] disabled:opacity-40">立即扫描</button>
-            <button :disabled="monBusy || !monPool.length" @click="runMonitorScan(true)" class="px-1.5 py-1 rounded-md bg-zinc-800 hover:bg-zinc-700 text-[10px] disabled:opacity-40">强制日报</button>
-          </div>
-          <div v-if="monMsg" class="text-[10px] text-zinc-500 leading-snug">{{ monMsg }}</div>
         </div>
-
-        <div class="pt-2 border-t border-zinc-800 space-y-1.5">
-          <div class="flex items-center justify-between text-[10px] text-zinc-500">
-            <span>虚拟账户告警</span>
-            <span class="text-zinc-600">{{ (alertChannels.filter(c => c.configured).map(c => c.name).join(' · ')) || '未配置通道' }}</span>
-          </div>
-          <button
-            :disabled="alertBusy"
-            @click="toggleAlertAuto"
-            :class="alertAutoOn ? 'bg-amber-700/80 hover:bg-amber-600' : 'bg-violet-700/70 hover:bg-violet-600'"
-            class="w-full px-2 py-1 rounded-md text-[10px] disabled:opacity-40"
-          >{{ alertAutoOn ? '关闭自动告警（盘中随定时器扫描）' : '开启自动告警（盘中扫描 · 微信推送）' }}</button>
-          <div class="grid grid-cols-2 gap-1 text-[10px]">
-            <label class="flex items-center justify-between gap-1 bg-zinc-900/50 rounded px-1.5 py-1">
-              <span class="text-zinc-500">止损%</span>
-              <input v-model.number="alertStopPct" type="number" step="0.5" class="w-14 bg-transparent text-right text-zinc-200 outline-none" />
-            </label>
-            <label class="flex items-center justify-between gap-1 bg-zinc-900/50 rounded px-1.5 py-1">
-              <span class="text-zinc-500">止盈%</span>
-              <input v-model.number="alertTakePct" type="number" step="0.5" class="w-14 bg-transparent text-right text-zinc-200 outline-none" />
-            </label>
-            <label class="flex items-center justify-between gap-1 bg-zinc-900/50 rounded px-1.5 py-1">
-              <span class="text-zinc-500">回撤%</span>
-              <input v-model.number="alertPullPct" type="number" step="0.5" class="w-14 bg-transparent text-right text-zinc-200 outline-none" />
-            </label>
-            <label class="flex items-center justify-between gap-1 bg-zinc-900/50 rounded px-1.5 py-1">
-              <span class="text-zinc-500">冷却分</span>
-              <input v-model.number="alertCooldown" type="number" step="5" min="1" class="w-14 bg-transparent text-right text-zinc-200 outline-none" />
-            </label>
-            <label class="flex items-center justify-between gap-1 bg-zinc-900/50 rounded px-1.5 py-1">
-              <span class="text-zinc-500">大跌%</span>
-              <input v-model.number="alertDropPct" type="number" step="0.5" class="w-14 bg-transparent text-right text-zinc-200 outline-none" />
-            </label>
-            <label class="flex items-center justify-between gap-1 bg-zinc-900/50 rounded px-1.5 py-1">
-              <span class="text-zinc-500">大涨%</span>
-              <input v-model.number="alertRisePct" type="number" step="0.5" class="w-14 bg-transparent text-right text-zinc-200 outline-none" />
-            </label>
-          </div>
-          <label class="flex items-center gap-1.5 text-[10px] text-zinc-500 cursor-pointer">
-            <input v-model="alertAutoSell" type="checkbox" class="rounded border-zinc-600" />
-            止损时自动卖出（默认关，仅提醒）
-          </label>
-          <div class="grid grid-cols-3 gap-1">
-            <button :disabled="alertBusy" @click="saveAlertThresholds" class="px-1.5 py-1 rounded-md bg-zinc-800 hover:bg-zinc-700 text-[10px] disabled:opacity-40">保存阈值</button>
-            <button :disabled="alertBusy || !accountId" @click="runAlertScan" class="px-1.5 py-1 rounded-md bg-zinc-800 hover:bg-zinc-700 text-[10px] disabled:opacity-40">立即扫描</button>
-            <button :disabled="alertBusy" @click="testAlertNotify" class="px-1.5 py-1 rounded-md bg-zinc-800 hover:bg-zinc-700 text-[10px] disabled:opacity-40">测试推送</button>
-          </div>
-          <div v-if="alertMsg" class="text-[10px] text-zinc-500 leading-snug">{{ alertMsg }}</div>
-        </div>
-      </div>
+      </transition>
     </div>
 
     <!-- Center: Agent chat -->

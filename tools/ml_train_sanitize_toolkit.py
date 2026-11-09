@@ -36,6 +36,9 @@ _WARMUP_BARS = 60
 _BATCH_PROGRESS_FILE = (
     Path(__file__).resolve().parents[1] / "data" / "ml_train_sanitize_batch_progress.json"
 )
+_CROSS_SECTION_PROGRESS_FILE = (
+    Path(__file__).resolve().parents[1] / "data" / "ml_train_cross_section_progress.json"
+)
 
 
 def _parse_iso_date(v: Any) -> Optional[date]:
@@ -77,8 +80,12 @@ PROBLEMS: List[Dict[str, str]] = [
             "stock_rank_industry 等列全市场只有约 1 只股票有值。"
             "LightGBM 会把「谁被填过」当成特征，或整列当缺失，截面信息学不到。"
         ),
-        "fix": "用表内当日截面重算分位、涨跌家数、行业广度，不打远端 API。",
-        "action": "fill_cross_section",
+        "fix": (
+            "用表内当日截面重算分位、涨跌家数、行业广度，不打远端 API。"
+            "大表必须用 fill_cross_section_batched（每批若干交易日、只补 NULL、可续跑）；"
+            "勿用 sql_toolkit 发整表 UPDATE。"
+        ),
+        "action": "fill_cross_section_batched",
     },
     {
         "id": "P03_WARMUP_OR_NULL_ROLLING",
@@ -185,12 +192,20 @@ class MlTrainSanitizeToolkit:
                 "clamp_ohlc",
                 "fix_close_location",
                 "broadcast_market",
-                "fill_cross_section",
+                "fill_cross_section_batched",
                 "fill_gaps",
                 "mark_session",
                 "fix_labels",
                 "mark_train_ready",
             ],
+            "cross_section_note": (
+                "截面写入请用 action=fill_cross_section_batched，"
+                "参数 dates_per_batch=5、max_batches=20、null_only=true；"
+                "status=paused 时同参再调续跑。fill_cross_section 默认也走分批。"
+                "ml_train_daily 是 Timescale 超表：禁止 IN/JOIN 临时表过滤日期"
+                "（会全 chunk 顺序扫描超时）；必须用 trade_date = ANY(dates)。"
+                "表上已有 trade_date 索引，缺索引不是根因。"
+            ),
         }
 
     def ensure_schema(self) -> Dict[str, Any]:
@@ -458,8 +473,22 @@ class MlTrainSanitizeToolkit:
             updated["industry"] = int(r2.rowcount) if r2.rowcount is not None and r2.rowcount >= 0 else 0
         return {"ok": True, "action": "broadcast_market", "updated": updated}
 
-    def fill_cross_section(self) -> Dict[str, Any]:
-        """用本表当日截面补分位 / 涨跌家数 / 行业广度。"""
+    def fill_cross_section(self, **kwargs: Any) -> Dict[str, Any]:
+        """
+        用本表当日截面补分位 / 涨跌家数 / 行业广度。
+
+        默认走按日分批（只补 NULL），避免千万级表一次 UPDATE 打满 statement_timeout。
+        传 one_shot=true 才走旧的全表一次写（仅小表适用）。
+        """
+        one_shot = kwargs.get("one_shot")
+        if isinstance(one_shot, str):
+            one_shot = one_shot.strip().lower() in ("1", "true", "yes", "y")
+        if one_shot:
+            return self._fill_cross_section_one_shot()
+        return self.fill_cross_section_batched(**kwargs)
+
+    def _fill_cross_section_one_shot(self) -> Dict[str, Any]:
+        """旧路径：全表一次算+写。大表几乎必定超时，仅调试用。"""
         with self.engine.begin() as conn:
             conn.execute(sa_text("SET LOCAL statement_timeout = '600s'"))
             conn.execute(sa_text("DROP TABLE IF EXISTS _ml_xs_day"))
@@ -520,10 +549,371 @@ class MlTrainSanitizeToolkit:
         return {
             "ok": True,
             "action": "fill_cross_section",
+            "mode": "one_shot",
             "updated_day_stats": int(r_day.rowcount) if r_day.rowcount is not None and r_day.rowcount >= 0 else None,
             "updated_industry": int(r_ind.rowcount) if r_ind.rowcount is not None and r_ind.rowcount >= 0 else None,
             "updated_stock_rank": int(r_rank.rowcount) if r_rank.rowcount is not None and r_rank.rowcount >= 0 else None,
         }
+
+    def _load_cross_section_progress(self) -> Dict[str, Any]:
+        path = _CROSS_SECTION_PROGRESS_FILE
+        if not path.exists():
+            return {}
+        try:
+            raw = json.loads(path.read_text(encoding="utf-8"))
+            return raw if isinstance(raw, dict) else {}
+        except Exception as e:
+            logger.warning("读取截面分批进度失败: %s", e)
+            return {}
+
+    def _save_cross_section_progress(self, data: Dict[str, Any]) -> None:
+        path = _CROSS_SECTION_PROGRESS_FILE
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            json.dumps(data, ensure_ascii=False, indent=2, default=str),
+            encoding="utf-8",
+        )
+
+    def _pending_cross_section_dates(
+        self,
+        *,
+        null_only: bool = True,
+        after: Optional[date] = None,
+        limit_dates: Optional[int] = None,
+    ) -> List[date]:
+        """
+        需要补截面的交易日列表（升序）。
+
+        Timescale 超表上禁止 GROUP BY 全表扫 NULL；改为按日游标 + 等值索引探测：
+        MIN(trade_date) WHERE trade_date > cur，再 EXISTS 判断该日是否还有空截面。
+        """
+        need = int(limit_dates) if limit_dates not in (None, "") else 10_000
+        need = max(1, need)
+        out: List[date] = []
+        cur = after
+        with self.engine.connect() as conn:
+            conn.execute(sa_text("SET statement_timeout = '60s'"))
+            # 防止死循环：最多探测 need*20 个交易日
+            for _ in range(max(need * 20, need)):
+                if len(out) >= need:
+                    break
+                nxt = conn.execute(
+                    sa_text(
+                        "SELECT MIN(trade_date) FROM ml_train_daily WHERE trade_date > :c"
+                        if cur is not None
+                        else "SELECT MIN(trade_date) FROM ml_train_daily"
+                    ),
+                    {"c": cur} if cur is not None else {},
+                ).scalar()
+                d = _parse_iso_date(nxt)
+                if not d:
+                    break
+                cur = d
+                if null_only:
+                    has_null = conn.execute(
+                        sa_text(
+                            """
+                            SELECT 1
+                            FROM ml_train_daily
+                            WHERE trade_date = :d
+                              AND (
+                                   stock_rank_industry IS NULL
+                                OR industry_rank_ret_5 IS NULL
+                                OR market_adv_decl_ratio IS NULL
+                              )
+                            LIMIT 1
+                            """
+                        ),
+                        {"d": d},
+                    ).first()
+                    if not has_null:
+                        continue
+                out.append(d)
+        return out
+
+    def _fill_cross_section_date_batch(
+        self,
+        dates: Sequence[date],
+        *,
+        null_only: bool = True,
+    ) -> Dict[str, Any]:
+        """
+        对给定交易日集合算截面并写回；每批独立事务。
+
+        关键：ml_train_daily 是 Timescale 超表。JOIN/IN 临时表会触发 parallel seq scan
+        扫全部分区；必须用 trade_date = ANY(:dates) 或等值，才能走 chunk 排除 + 日期索引。
+        """
+        if not dates:
+            return {"ok": True, "dates": 0, "updated_day": 0, "updated_industry": 0, "updated_rank": 0}
+        date_list = list(dates)
+        with self.engine.begin() as conn:
+            conn.execute(sa_text("SET LOCAL statement_timeout = '180s'"))
+            conn.execute(sa_text("SET LOCAL lock_timeout = '30s'"))
+            conn.execute(sa_text("DROP TABLE IF EXISTS _ml_xs_day"))
+            conn.execute(sa_text("DROP TABLE IF EXISTS _ml_xs_ind"))
+            conn.execute(sa_text("DROP TABLE IF EXISTS _ml_xs_rank"))
+
+            # 1) 市场涨跌家数
+            conn.execute(
+                sa_text(
+                    """
+                    CREATE TEMP TABLE _ml_xs_day AS
+                    SELECT trade_date,
+                           SUM(CASE WHEN ret_1 > 0 THEN 1 ELSE 0 END)::double precision
+                             / NULLIF(SUM(CASE WHEN ret_1 < 0 THEN 1 ELSE 0 END), 0)
+                             AS market_adv_decl_ratio,
+                           SUM(CASE WHEN ret_1 >= 0.095 THEN 1 ELSE 0 END)::int AS market_limit_up_count,
+                           SUM(CASE WHEN ret_1 <= -0.095 THEN 1 ELSE 0 END)::int AS market_limit_down_count
+                    FROM ml_train_daily
+                    WHERE trade_date = ANY(:dates)
+                    GROUP BY trade_date
+                    """
+                ),
+                {"dates": date_list},
+            )
+            # 2) 行业广度 + 行业收益分位（先聚合再窗口，仍只碰 ANY 切片）
+            conn.execute(
+                sa_text(
+                    """
+                    CREATE TEMP TABLE _ml_xs_ind AS
+                    SELECT trade_date, industry_code, industry_breadth,
+                           PERCENT_RANK() OVER (
+                             PARTITION BY trade_date ORDER BY avg_ret_5
+                           ) AS industry_rank_ret_5
+                    FROM (
+                      SELECT trade_date,
+                             COALESCE(industry_code, '') AS industry_code,
+                             AVG(CASE WHEN ret_1 > 0 THEN 1.0 ELSE 0.0 END) AS industry_breadth,
+                             AVG(ret_5) AS avg_ret_5
+                      FROM ml_train_daily
+                      WHERE trade_date = ANY(:dates)
+                      GROUP BY trade_date, COALESCE(industry_code, '')
+                    ) s
+                    """
+                ),
+                {"dates": date_list},
+            )
+            # 3) 个股行业内分位
+            conn.execute(
+                sa_text(
+                    """
+                    CREATE TEMP TABLE _ml_xs_rank AS
+                    SELECT symbol, trade_date,
+                           PERCENT_RANK() OVER (
+                             PARTITION BY trade_date, COALESCE(industry_code, '')
+                             ORDER BY ret_1
+                           ) AS rk
+                    FROM ml_train_daily
+                    WHERE trade_date = ANY(:dates)
+                      AND ret_1 IS NOT NULL
+                    """
+                ),
+                {"dates": date_list},
+            )
+            conn.execute(sa_text("CREATE INDEX ON _ml_xs_day (trade_date)"))
+            conn.execute(sa_text("CREATE INDEX ON _ml_xs_ind (trade_date, industry_code)"))
+            conn.execute(sa_text("CREATE INDEX ON _ml_xs_rank (symbol, trade_date)"))
+
+            null_day = " AND t.market_adv_decl_ratio IS NULL" if null_only else ""
+            null_ind = (
+                " AND (t.industry_breadth IS NULL OR t.industry_rank_ret_5 IS NULL)"
+                if null_only
+                else ""
+            )
+            null_rank = " AND t.stock_rank_industry IS NULL" if null_only else ""
+
+            # UPDATE 同样带 ANY，强制 chunk exclusion，避免超表全扫
+            r_day = conn.execute(
+                sa_text(
+                    f"""
+                    UPDATE ml_train_daily t SET
+                      market_adv_decl_ratio = d.market_adv_decl_ratio,
+                      market_limit_up_count = d.market_limit_up_count,
+                      market_limit_down_count = d.market_limit_down_count
+                    FROM _ml_xs_day d
+                    WHERE t.trade_date = d.trade_date
+                      AND t.trade_date = ANY(:dates)
+                    {null_day}
+                    """
+                ),
+                {"dates": date_list},
+            )
+            r_ind = conn.execute(
+                sa_text(
+                    f"""
+                    UPDATE ml_train_daily t SET
+                      industry_breadth = i.industry_breadth,
+                      industry_rank_ret_5 = i.industry_rank_ret_5
+                    FROM _ml_xs_ind i
+                    WHERE t.trade_date = i.trade_date
+                      AND COALESCE(t.industry_code, '') = i.industry_code
+                      AND t.trade_date = ANY(:dates)
+                    {null_ind}
+                    """
+                ),
+                {"dates": date_list},
+            )
+            r_rank = conn.execute(
+                sa_text(
+                    f"""
+                    UPDATE ml_train_daily t SET
+                      stock_rank_industry = r.rk
+                    FROM _ml_xs_rank r
+                    WHERE t.symbol = r.symbol
+                      AND t.trade_date = r.trade_date
+                      AND t.trade_date = ANY(:dates)
+                    {null_rank}
+                    """
+                ),
+                {"dates": date_list},
+            )
+        return {
+            "ok": True,
+            "dates": len(date_list),
+            "date_from": date_list[0].isoformat(),
+            "date_to": date_list[-1].isoformat(),
+            "updated_day": int(r_day.rowcount) if r_day.rowcount is not None and r_day.rowcount >= 0 else None,
+            "updated_industry": int(r_ind.rowcount) if r_ind.rowcount is not None and r_ind.rowcount >= 0 else None,
+            "updated_rank": int(r_rank.rowcount) if r_rank.rowcount is not None and r_rank.rowcount >= 0 else None,
+            "plan_hint": "timescale: trade_date = ANY(:dates) for chunk exclusion",
+        }
+
+    def fill_cross_section_batched(
+        self,
+        *,
+        dates_per_batch: int = 5,
+        null_only: bool = True,
+        max_batches: Optional[int] = None,
+        reset: bool = False,
+        auto_cap_batches: bool = True,
+        **_kwargs: Any,
+    ) -> Dict[str, Any]:
+        """
+        按交易日分批补截面（方案 A+C）：
+        - 每批默认 5 个交易日，单批约 2 万行，避开 statement_timeout；
+        - null_only 时只写仍为空的行，可断点续跑；
+        - 进度落 data/ml_train_cross_section_progress.json；
+        - 对话默认 auto_cap_batches：未传 max_batches 时封顶 20；
+        - 离线 CLI 传 auto_cap_batches=false 可一次跑完。
+        """
+        self.ensure_schema()
+        batch_days = max(1, int(dates_per_batch or 5))
+        if isinstance(null_only, str):
+            null_only = null_only.strip().lower() not in ("0", "false", "no", "n", "off")
+        if isinstance(reset, str):
+            reset = reset.strip().lower() in ("1", "true", "yes", "y")
+        if isinstance(auto_cap_batches, str):
+            auto_cap_batches = auto_cap_batches.strip().lower() not in ("0", "false", "no", "n", "off")
+
+        progress = {} if reset else self._load_cross_section_progress()
+        after = _parse_iso_date(progress.get("last_trade_date")) if progress else None
+
+        auto_capped = False
+        if max_batches is None and auto_cap_batches:
+            max_batches = 20
+            auto_capped = True
+        fetch_dates = (int(max_batches) * batch_days + batch_days) if max_batches is not None else None
+        pending = self._pending_cross_section_dates(
+            null_only=bool(null_only),
+            after=after,
+            limit_dates=fetch_dates,
+        )
+
+        started = time.time()
+        batch_no = int(progress.get("batch_no") or 0)
+        batches_this_run = 0
+        start_batch_no = batch_no
+        total_updated = {
+            "day": int(progress.get("updated_day_total") or 0),
+            "industry": int(progress.get("updated_industry_total") or 0),
+            "rank": int(progress.get("updated_rank_total") or 0),
+        }
+        recent: List[Dict[str, Any]] = list(progress.get("batches") or [])
+        status = "completed" if not pending else "running"
+        last_date: Optional[date] = after
+        i = 0
+        while i < len(pending):
+            if max_batches is not None and batches_this_run >= int(max_batches):
+                status = "paused"
+                break
+            chunk = pending[i : i + batch_days]
+            i += batch_days
+            t0 = time.time()
+            try:
+                rec = self._fill_cross_section_date_batch(chunk, null_only=bool(null_only))
+            except Exception as e:
+                status = "error"
+                err = {
+                    "ok": False,
+                    "action": "fill_cross_section_batched",
+                    "status": "error",
+                    "error": str(e),
+                    "last_trade_date": last_date.isoformat() if last_date else None,
+                    "batch_no": batch_no,
+                    "hint": "已写入进度；修好后同参再跑即可续跑",
+                }
+                self._save_cross_section_progress({**err, "batches": recent[-20:]})
+                logger.exception("fill_cross_section_batched 失败 batch=%s", batch_no + 1)
+                return err
+            batch_no += 1
+            batches_this_run += 1
+            last_date = chunk[-1]
+            total_updated["day"] += int(rec.get("updated_day") or 0)
+            total_updated["industry"] += int(rec.get("updated_industry") or 0)
+            total_updated["rank"] += int(rec.get("updated_rank") or 0)
+            elapsed = round(time.time() - t0, 2)
+            item = {**rec, "batch": batch_no, "elapsed_s": elapsed}
+            recent.append(item)
+            self._save_cross_section_progress({
+                "status": "running",
+                "batch_no": batch_no,
+                "dates_per_batch": batch_days,
+                "null_only": bool(null_only),
+                "last_trade_date": last_date.isoformat(),
+                "pending_left_estimate": max(0, len(pending) - i),
+                "updated_day_total": total_updated["day"],
+                "updated_industry_total": total_updated["industry"],
+                "updated_rank_total": total_updated["rank"],
+                "updated_at": datetime.now().isoformat(timespec="seconds"),
+                "last_batch": item,
+                "batches": recent[-20:],
+            })
+            print(
+                f"[cross_section] batch={batch_no} days={rec.get('date_from')}..{rec.get('date_to')} "
+                f"rank={rec.get('updated_rank')} {elapsed:.1f}s left~{max(0, len(pending) - i)}",
+                flush=True,
+            )
+            gc.collect()
+
+        if status == "running" and i >= len(pending):
+            status = "completed"
+
+        summary = {
+            "ok": status in ("completed", "paused"),
+            "action": "fill_cross_section_batched",
+            "mode": "batched",
+            "status": status,
+            "batch_no": batch_no,
+            "dates_per_batch": batch_days,
+            "null_only": bool(null_only),
+            "last_trade_date": last_date.isoformat() if last_date else None,
+            "pending_left_estimate": max(0, len(pending) - i),
+            "updated_day_total": total_updated["day"],
+            "updated_industry_total": total_updated["industry"],
+            "updated_rank_total": total_updated["rank"],
+            "elapsed_s": round(time.time() - started, 1),
+            "batches_this_run": batches_this_run,
+            "start_batch_no": start_batch_no,
+            "auto_capped": auto_capped,
+            "recent_batches": recent[-8:],
+            "progress_file": str(_CROSS_SECTION_PROGRESS_FILE),
+            "note": (
+                "status=paused 时同参再调即可续跑；"
+                "全量离线：python tools/_run_fill_cross_section.py"
+            ),
+        }
+        self._save_cross_section_progress({**summary, "batches": recent[-20:]})
+        return summary
 
     def _trade_calendar(self) -> List[date]:
         sql = """
@@ -1434,7 +1824,40 @@ class MlTrainSanitizeToolkit:
             return self.broadcast_market()
         if action in ("fill_cross_section", "cross_section"):
             self.ensure_schema()
-            return self.fill_cross_section()
+            return self.fill_cross_section(**kwargs)
+        if action in (
+            "fill_cross_section_batched",
+            "cross_section_batched",
+            "fill_xs_batched",
+        ):
+            self.ensure_schema()
+            max_b = kwargs.get("max_batches")
+            reset_raw = kwargs.get("reset")
+            if isinstance(reset_raw, bool):
+                reset_flag = reset_raw
+            else:
+                reset_flag = str(reset_raw or "").strip().lower() in ("1", "true", "yes", "y")
+            null_raw = kwargs.get("null_only")
+            if null_raw is None or null_raw == "":
+                null_flag = True
+            elif isinstance(null_raw, bool):
+                null_flag = null_raw
+            else:
+                null_flag = str(null_raw).strip().lower() not in ("0", "false", "no", "n", "off")
+            auto_cap_raw = kwargs.get("auto_cap_batches")
+            if auto_cap_raw is None or auto_cap_raw == "":
+                auto_cap_flag = True
+            elif isinstance(auto_cap_raw, bool):
+                auto_cap_flag = auto_cap_raw
+            else:
+                auto_cap_flag = str(auto_cap_raw).strip().lower() not in ("0", "false", "no", "n", "off")
+            return self.fill_cross_section_batched(
+                dates_per_batch=int(kwargs.get("dates_per_batch") or 5),
+                null_only=null_flag,
+                max_batches=int(max_b) if max_b not in (None, "") else None,
+                reset=reset_flag,
+                auto_cap_batches=auto_cap_flag,
+            )
         if action in ("fill_gaps", "gaps"):
             self.ensure_schema()
             dry = kwargs.get("dry_run")
@@ -1506,8 +1929,8 @@ class MlTrainSanitizeToolkit:
             "error": (
                 "action 应为 catalog / audit / ensure_schema / clamp_ohlc / "
                 "fix_close_location / broadcast_market / fill_cross_section / "
-                "fill_gaps / mark_session / fix_labels / mark_train_ready / "
-                "fix / fix_batches"
+                "fill_cross_section_batched / fill_gaps / mark_session / fix_labels / "
+                "mark_train_ready / fix / fix_batches"
             ),
         }
 

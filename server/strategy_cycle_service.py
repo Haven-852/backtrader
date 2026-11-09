@@ -13,8 +13,32 @@ from typing import Any, Dict, List, Optional, Tuple
 import numpy as np
 import pandas as pd
 
+from server.a_share_fees import (
+    DEFAULT_COMMISSION_MIN,
+    DEFAULT_COMMISSION_RATE,
+    DEFAULT_STAMP_RATE,
+    affordable_buy_shares,
+    calc_fees,
+    fee_summary,
+)
 from server.dash_service import calc_ma, calc_ema, calc_rsi, calc_macd, calc_bollinger
+from server.elder_ladder import plan_ladder_actions, round_lot
 from server.strategy_service import strategy_service
+from server.structure_pullback import lot_shares
+from server.universe_backtest import (
+    after_return,
+    build_param_grid,
+    daily_regime_map,
+    decorate_row,
+    name_map,
+    pair_round_trips,
+    pick_liquid_universe,
+    read_bars_batch,
+    sanitize_codes,
+    split_holdout,
+    summarize_rows,
+    summarize_signal_trips,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -155,40 +179,21 @@ class StrategyCycleService:
             return {"ok": False, "error": f"未知策略: {strategy_id}"}
 
         params = self._merge_params(strat, params or {})
+        if strategy_id == "ma60_shrink":
+            params["position_mode"] = "percent"
         df = strategy_service._read_bars(ts_code, start=start, end=end, limit=limit)
-        if df.empty or len(df) < 30:
-            return {
-                "ok": False,
-                "error": f"标的 {ts_code} 可用日线不足（需≥30），请检查代码或日期",
-            }
-
+        min_bars = 80 if strategy_id == "ma60_shrink" else 30
         if lookback_guard:
-            # 防止用到未来：信号在当日收盘生成，次日开盘成交（用次日 open）
             exec_price = "next_open"
         else:
-            exec_price = "same_close"  # 演示用，存在前视
+            exec_price = "same_close"
 
-        if strategy_id == "structure_pullback":
-            from server.structure_pullback import backtest as sp_backtest, trades_to_sim_result
-
-            dates = [str(d)[:10] for d in df["trade_date"].tolist()]
-            trades = sp_backtest(
-                df,
-                max_holding=int(params.get("max_holding", 5)),
-                atr_multiple=float(params.get("atr_multiple", 2.5)),
-                trigger_r=float(params.get("trigger_r", 2.0)),
-                slippage_bps=float(params.get("slippage_bps", 5)),
-            )
-            result = trades_to_sim_result(trades, cash, dates)
-        else:
-            signals = self._generate_signals(strategy_id, df, params)
-            result = self._simulate(
-                df,
-                signals,
-                cash=cash,
-                exec_price=exec_price,
-                params=params,
-            )
+        result = self._run_on_df(strategy_id, df, params, cash, exec_price)
+        if not result:
+            return {
+                "ok": False,
+                "error": f"标的 {ts_code} 可用日线不足（需≥{min_bars}），请检查代码或日期",
+            }
 
         # 基准简单 buy&hold
         bench_ret = 0.0
@@ -202,6 +207,8 @@ class StrategyCycleService:
         if walk_forward:
             if strategy_id == "structure_pullback":
                 walk_rows = self._walk_forward_structure(df, params, cash)
+            elif strategy_id == "ma60_shrink":
+                walk_rows = self._walk_forward_ma60(df, params, cash, exec_price)
             else:
                 walk_rows = self._walk_forward(df, strategy_id, params, cash, exec_price)
 
@@ -231,7 +238,54 @@ class StrategyCycleService:
                     else "仅整段回测"
                 ),
             },
+            "position": {
+                "position_pct": float(params.get("position_pct", 30) or 30),
+                "max_lots": int(params.get("max_lots") or 0),
+                "reserve_pct": float(params.get("reserve_pct", 2) or 2),
+                "lot_size": 100,
+                "label": "仓位",
+                "status": (
+                    f"{float(params.get('position_pct', 30) or 30):g}%"
+                    + (
+                        f" · 最多{int(params.get('max_lots') or 0)}手"
+                        if int(params.get("max_lots") or 0) > 0
+                        else ""
+                    )
+                    + (
+                        " · 高龄阶梯"
+                        if str(params.get("position_mode") or "elder_ladder") == "elder_ladder"
+                        else ""
+                    )
+                ),
+                "mode": str(params.get("position_mode") or "elder_ladder"),
+                "detail": (
+                    "信号开仓后按高龄秘籍加减仓；策略出场信号则全仓卖出。"
+                    if str(params.get("position_mode") or "elder_ladder") == "elder_ladder"
+                    else "按当时总资产比例开仓，A股整手100股；不足一手则跳过。"
+                ),
+            },
+            "fees": fee_summary(params),
         }
+
+        # K 线供前端标注买卖点（与权益日期对齐）
+        bars: List[Dict[str, Any]] = []
+        vol_col = "vol" if "vol" in df.columns else ("volume" if "volume" in df.columns else None)
+        for _, row in df.iterrows():
+            vol_v = None
+            if vol_col is not None:
+                raw_v = row[vol_col]
+                if pd.notna(raw_v):
+                    vol_v = float(raw_v)
+            bars.append(
+                {
+                    "date": str(row["trade_date"])[:10],
+                    "open": round(float(row["open"]), 4),
+                    "high": round(float(row["high"]), 4),
+                    "low": round(float(row["low"]), 4),
+                    "close": round(float(row["close"]), 4),
+                    "volume": vol_v,
+                }
+            )
 
         return {
             "ok": True,
@@ -242,10 +296,12 @@ class StrategyCycleService:
             "ts_code": ts_code,
             "benchmark": benchmark,
             "date_range": {
-                "start": str(df["trade_date"].iloc[0]),
-                "end": str(df["trade_date"].iloc[-1]),
+                "start": str(df["trade_date"].iloc[0])[:10],
+                "end": str(df["trade_date"].iloc[-1])[:10],
             },
             "bar_count": int(len(df)),
+            "cash": float(result.get("cash") or cash),
+            "final_equity": result.get("final_equity"),
             "total_return": result["total_return"],
             "max_drawdown": result["max_drawdown"],
             "sharpe": result["sharpe"],
@@ -254,7 +310,11 @@ class StrategyCycleService:
             "alpha": round(alpha, 4),
             "benchmark_return": round(bench_ret, 4),
             "equity": result["equity"],
+            "equity_cash": result.get("equity_cash") or [
+                round(float(cash) * float(x), 2) for x in (result.get("equity") or [])
+            ],
             "equity_dates": result["equity_dates"],
+            "bars": bars,
             "trades": result["trades"],
             "lookback_ok": lookback_guard,
             "exec_price": exec_price,
@@ -262,12 +322,284 @@ class StrategyCycleService:
             "walk_forward_rows": walk_rows,
             "options_applied": options_applied,
             "params": params,
+            "fees": result.get("fees") or {},
             "note": (
                 "趋势回踩：收盘信号、次日开盘买、T+1 才能卖；"
-                "不含佣金/印花税/涨跌停无法成交/停牌。填充模型为初步近似。"
+                "不含涨跌停无法成交/停牌。填充模型为初步近似。"
                 if strategy_id == "structure_pullback"
-                else None
+                else (
+                    "MA60均线分两套机制。价<MA60：折价短线，远超/放量可卖。"
+                    "价>MA60且近10日有8日斜率为正：关闭远超均线卖出，趋势持有，"
+                    "回踩贴近MA60可补；放量且最高价超MA5达10个点并收高位十字星则当天卖。"
+                    "不含涨跌停/停牌。"
+                    if strategy_id == "ma60_shrink"
+                    else "图中本金曲线 = 现金 + 持仓市值（按当日收盘计价）；买卖点标注成交价与股数。"
+                )
+            )
+            + (
+                f" 仓位按总资产 {float(params.get('position_pct', 30) or 30):g}% 开仓；"
+                "持仓后按高龄秘籍加减仓，策略出场则全清。"
+                if str(params.get("position_mode") or "elder_ladder") == "elder_ladder"
+                else f" 仓位按总资产 {float(params.get('position_pct', 30) or 30):g}% 开仓（整手）。"
+            )
+            + " 已扣佣金与印花税。",
+        }
+
+    @staticmethod
+    def _prepare_ohlcv(df: pd.DataFrame) -> pd.DataFrame:
+        if df is None or df.empty:
+            return pd.DataFrame()
+        g = df.copy()
+        if "volume" not in g.columns and "vol" in g.columns:
+            g["volume"] = pd.to_numeric(g["vol"], errors="coerce")
+        return g
+
+    @staticmethod
+    def _buyhold_return(df: pd.DataFrame) -> float:
+        if df is None or len(df) < 2:
+            return 0.0
+        c0 = float(df["close"].iloc[0] or 0)
+        c1 = float(df["close"].iloc[-1] or 0)
+        if c0 <= 0:
+            return 0.0
+        return float(c1 / c0 - 1)
+
+    def _run_on_df(
+        self,
+        strategy_id: str,
+        df: pd.DataFrame,
+        params: Dict[str, Any],
+        cash: float,
+        exec_price: str,
+    ) -> Optional[Dict[str, Any]]:
+        min_bars = 80 if strategy_id == "ma60_shrink" else 30
+        g = self._prepare_ohlcv(df)
+        if g.empty or len(g) < min_bars:
+            return None
+        if strategy_id == "structure_pullback":
+            from server.structure_pullback import backtest as sp_backtest, trades_to_sim_result
+
+            dates = [str(d)[:10] for d in g["trade_date"].tolist()]
+            trades = sp_backtest(
+                g,
+                max_holding=int(params.get("max_holding", 5)),
+                atr_multiple=float(params.get("atr_multiple", 2.5)),
+                trigger_r=float(params.get("trigger_r", 2.0)),
+                slippage_bps=float(params.get("slippage_bps", 5)),
+            )
+            result = trades_to_sim_result(trades, cash, dates, params=params)
+        elif strategy_id == "ma60_shrink":
+            from server.ma60_shrink_strategy import simulate as ma60_simulate
+
+            result = ma60_simulate(g, cash=cash, params=params, exec_price=exec_price)
+        else:
+            signals = self._generate_signals(strategy_id, g, params)
+            result = self._simulate(
+                g,
+                signals,
+                cash=cash,
+                exec_price=exec_price,
+                params=params,
+            )
+        result["buyhold_return"] = round(self._buyhold_return(g), 4)
+        return result
+
+    def backtest_universe(
+        self,
+        strategy_id: str,
+        params: Optional[Dict[str, Any]] = None,
+        start: Optional[str] = None,
+        end: Optional[str] = None,
+        cash: float = 1_000_000,
+        lookback_guard: bool = True,
+        n: int = 100,
+        board: str = "main",
+        ts_codes: Optional[List[str]] = None,
+        search: bool = False,
+        holdout_frac: float = 0.5,
+    ) -> Dict[str, Any]:
+        import time
+
+        t0 = time.perf_counter()
+        strat = strategy_service.get_strategy(strategy_id)
+        if not strat:
+            return {"ok": False, "error": f"未知策略: {strategy_id}"}
+        if not start or not end:
+            return {"ok": False, "error": "请填写开始和结束日期"}
+        if not strategy_service.engine:
+            return {"ok": False, "error": "PostgreSQL 未连接"}
+
+        params = self._merge_params(strat, params or {})
+        if strategy_id == "ma60_shrink":
+            params["position_mode"] = "percent"
+        exec_price = "next_open" if lookback_guard else "same_close"
+        min_bars = 80 if strategy_id == "ma60_shrink" else 30
+
+        universe = sanitize_codes(ts_codes or [])
+        meta: List[Dict[str, Any]] = []
+        if universe:
+            names = name_map(strategy_service.engine, universe)
+            meta = [{"ts_code": c, "name": names.get(c, c), "industry": ""} for c in universe]
+            source = "custom"
+        else:
+            meta = pick_liquid_universe(strategy_service.engine, start, end, n=n, board=board)
+            universe = [m["ts_code"] for m in meta]
+            source = "liquid_start"
+
+        if not universe:
+            return {
+                "ok": False,
+                "error": "股票池为空：库内该区间日线不足，或主板成交额选池没有结果",
+            }
+
+        bars_map = read_bars_batch(strategy_service.engine, universe, start, end)
+        names = {m["ts_code"]: m.get("name") or m["ts_code"] for m in meta}
+
+        idx_df = strategy_service._read_bars("000300.SH", start=start, end=end, limit=900)
+        regime_map = daily_regime_map(idx_df) if not idx_df.empty else {}
+        current_regime = "unknown"
+        if regime_map:
+            last_day = str(idx_df["trade_date"].iloc[-1])[:10]
+            current_regime = regime_map.get(last_day, "unknown")
+
+        collected_trips: List[Dict[str, Any]] = []
+
+        def run_params(
+            p: Dict[str, Any],
+            codes: Optional[List[str]] = None,
+            collect_trips: bool = False,
+        ) -> List[Dict[str, Any]]:
+            rows: List[Dict[str, Any]] = []
+            for code in (codes or universe):
+                df = bars_map.get(code)
+                if df is None or len(df) < min_bars:
+                    rows.append(
+                        {
+                            "ts_code": code,
+                            "name": names.get(code, code),
+                            "skipped": True,
+                            "reason": f"日线不足{min_bars}",
+                            "total_return": 0.0,
+                            "max_drawdown": 0.0,
+                            "trade_count": 0,
+                        }
+                    )
+                    continue
+                result = self._run_on_df(strategy_id, df, p, cash, exec_price)
+                if not result:
+                    rows.append(
+                        {
+                            "ts_code": code,
+                            "name": names.get(code, code),
+                            "skipped": True,
+                            "reason": "模拟失败",
+                            "total_return": 0.0,
+                            "max_drawdown": 0.0,
+                            "trade_count": 0,
+                        }
+                    )
+                    continue
+                if collect_trips:
+                    for trip in pair_round_trips(result.get("trades") or []):
+                        trip["ts_code"] = code
+                        trip["regime"] = regime_map.get(trip.get("entry_date") or "", "unknown")
+                        trip["after_sell_5d"] = after_return(df, trip.get("exit_date") or "", 5)
+                        collected_trips.append(trip)
+                rows.append(decorate_row(code, names.get(code, code), result))
+            return rows
+
+        current_rows = run_params(params, collect_trips=True)
+        active = [r for r in current_rows if not r.get("skipped")]
+        tune_rows, confirm_rows = split_holdout(active, holdout_frac)
+        tune_codes = {r["ts_code"] for r in tune_rows}
+        confirm_codes = {r["ts_code"] for r in confirm_rows}
+        for r in current_rows:
+            if r["ts_code"] in tune_codes:
+                r["split"] = "寻参"
+            elif r["ts_code"] in confirm_codes:
+                r["split"] = "确认"
+
+        current_summary = {
+            "all": summarize_rows(active),
+            "tune": summarize_rows(tune_rows),
+            "confirm": summarize_rows(confirm_rows),
+        }
+
+        suggested = None
+        search_tried = 0
+        if search and len(active) >= 8:
+            grid = build_param_grid(strategy_id, params)
+            best_score = current_summary["tune"]["robustness_score"]
+            best_params = params
+            best_tune = current_summary["tune"]
+            best_confirm = None
+            tune_list = [c for c in universe if c in tune_codes]
+            confirm_list = [c for c in universe if c in confirm_codes]
+            for cand in grid:
+                search_tried += 1
+                cand_tune = [r for r in run_params(cand, tune_list) if not r.get("skipped")]
+                sc = summarize_rows(cand_tune)
+                if sc["robustness_score"] > best_score:
+                    best_score = sc["robustness_score"]
+                    best_params = cand
+                    best_tune = sc
+                    best_confirm = summarize_rows(
+                        [r for r in run_params(cand, confirm_list) if not r.get("skipped")]
+                    )
+            if best_params is not params and best_confirm is not None:
+                confirm_better = best_confirm["robustness_score"] >= current_summary["confirm"]["robustness_score"]
+                suggested = {
+                    "accepted": bool(confirm_better),
+                    "params": {
+                        k: best_params.get(k)
+                        for k in (
+                            "vol_expand", "b_ma60_high", "ma5_doji_excess", "slope_hits",
+                            "position_pct", "fast", "slow", "min_dev", "crash_dev",
+                            "ma60_stretch", "ma5_stretch", "doji_body_pct",
+                        )
+                        if k in best_params
+                    },
+                    "tune": best_tune,
+                    "confirm": best_confirm,
+                    "note": (
+                        "确认半区也更好，可以考虑换成这组参数。"
+                        if confirm_better
+                        else "寻参半区更好，但确认半区没有变好，视为过拟合，不建议改参数。"
+                    ),
+                }
+
+        ranked = sorted(active, key=lambda r: float(r.get("calmar") or 0.0), reverse=True)
+        tune_trips = [t for t in collected_trips if t.get("ts_code") in tune_codes]
+        signal_base = summarize_signal_trips(collected_trips, current_regime)
+        advice_src = tune_trips if len(tune_trips) >= 8 else collected_trips
+        signal_base["advice"] = summarize_signal_trips(advice_src, current_regime)["advice"]
+        signal_base["advice_from"] = "寻参半区" if advice_src is tune_trips else "全部样本"
+        signal_base["index"] = "000300.SH"
+        elapsed_ms = int((time.perf_counter() - t0) * 1000)
+        return {
+            "ok": True,
+            "strategy_id": strategy_id,
+            "strategy_name": strat["name"],
+            "universe_source": source,
+            "universe_n": len(universe),
+            "tested_n": len(active),
+            "skipped_n": len(current_rows) - len(active),
+            "board": board,
+            "date_range": {"start": start, "end": end},
+            "lookback_ok": lookback_guard,
+            "exec_price": exec_price,
+            "params": params,
+            "summary": current_summary,
+            "suggested": suggested,
+            "search_tried": search_tried,
+            "rows": ranked,
+            "signal_stats": signal_base,
+            "note": (
+                "股票池按回测开始后前20个交易日成交额选，不是按后来谁涨得多。"
+                "按代码切成寻参/确认两半；看中位收益、盈利占比和中位回撤，不要只看最赚钱的那一只。"
+                "信号有效性按沪深300当日阶段归类（均线只用到当天），建议来自寻参半区；样本不足的格子只观察、不作为交易依据。"
             ),
+            "elapsed_ms": elapsed_ms,
         }
 
     def _merge_params(self, strat: Dict[str, Any], override: Dict[str, Any]) -> Dict[str, Any]:
@@ -278,6 +610,9 @@ class StrategyCycleService:
         for k, v in override.items():
             if k not in out:
                 out[k] = v
+        out.setdefault("commission_rate", DEFAULT_COMMISSION_RATE)
+        out.setdefault("commission_min", DEFAULT_COMMISSION_MIN)
+        out.setdefault("stamp_rate", DEFAULT_STAMP_RATE)
         return out
 
     def _generate_signals(self, strategy_id: str, df: pd.DataFrame, params: Dict[str, Any]) -> pd.Series:
@@ -436,13 +771,84 @@ class StrategyCycleService:
         signal = target_pos.fillna(0.0).values
 
         equity = []
+        equity_cash = []
         equity_dates = []
         trades: List[Dict[str, Any]] = []
         position = 0.0  # 股数
         cash_left = float(cash)
         entry_price = 0.0
+        ref_px = 0.0
+        initial_shares = 0.0
+        fired_add: set = set()
+        fired_sell: set = set()
         wins = 0
         closed = 0
+        use_ladder = str(params.get("position_mode") or "elder_ladder") == "elder_ladder"
+        commission_total = 0.0
+        stamp_total = 0.0
+
+        def _fill(side: str, qty: float, px: float, day: str, reason: str) -> None:
+            nonlocal position, cash_left, entry_price, wins, closed, commission_total, stamp_total
+            qty = float(qty)
+            if qty < 1:
+                return
+            commission = 0.0
+            stamp = 0.0
+            if side == "买入":
+                affordable = float(affordable_buy_shares(cash_left, px, params))
+                qty = min(qty, affordable)
+                qty = float(round_lot(qty))
+                if qty < 100:
+                    return
+                amount = qty * px
+                commission, stamp = calc_fees("买入", amount, params)
+                if amount + commission > cash_left + 1e-6:
+                    qty = float(affordable_buy_shares(cash_left, px, params))
+                    if qty < 100:
+                        return
+                    amount = qty * px
+                    commission, stamp = calc_fees("买入", amount, params)
+                if position <= 0:
+                    entry_price = px
+                else:
+                    entry_price = (entry_price * position + px * qty) / (position + qty)
+                cash_left -= amount + commission
+                position += qty
+                pnl = None
+            else:
+                qty = min(qty, position)
+                if use_ladder and reason != "策略信号清仓" and reason != "上涨100%清仓":
+                    qty = float(round_lot(qty))
+                if qty < 1:
+                    return
+                amount = qty * px
+                commission, stamp = calc_fees("卖出", amount, params)
+                cash_left += amount - commission - stamp
+                pnl = ((px - entry_price) * qty if entry_price > 0 else 0.0) - commission - stamp
+                closed += 1
+                if pnl > 0:
+                    wins += 1
+                position -= qty
+                if position < 1:
+                    position = 0.0
+                    entry_price = 0.0
+            commission_total += commission
+            stamp_total += stamp
+            trades.append(
+                {
+                    "date": day,
+                    "side": side,
+                    "price": round(float(px), 4),
+                    "size": int(abs(qty)),
+                    "pnl": None if pnl is None else round(float(pnl), 2),
+                    "reason": reason,
+                    "commission": round(float(commission), 2),
+                    "stamp_tax": round(float(stamp), 2),
+                    "fee": round(float(commission + stamp), 2),
+                    "cash_after": round(float(cash_left), 2),
+                    "position_after": int(position),
+                }
+            )
 
         # 信号在 i 日收盘产生，在 i+1 日执行
         for i in range(len(df)):
@@ -454,42 +860,47 @@ class StrategyCycleService:
 
             if px <= 0 or np.isnan(px):
                 px = float(close[i]) if close[i] > 0 else 1.0
+            day = str(dates[i])[:10]
 
-            target_shares = 0.0
-            if desired > 0.5:
-                # 满仓（整手近似）
-                target_shares = (cash_left + position * px) * 0.98 / px
-                target_shares = np.floor(target_shares / 100) * 100
-
-            delta = target_shares - position
-            if abs(delta) >= 100:
-                side = "买入" if delta > 0 else "卖出"
-                cost = delta * px
-                cash_left -= cost
-                if delta < 0 and entry_price > 0:
-                    pnl = (px - entry_price) * abs(delta)
-                    closed += 1
-                    if pnl > 0:
-                        wins += 1
-                else:
-                    pnl = None
-                    entry_price = px
-                position = target_shares
-                if position <= 0:
-                    entry_price = 0.0
-                trades.append(
-                    {
-                        "date": dates[i],
-                        "side": side,
-                        "price": round(px, 4),
-                        "size": int(abs(delta)),
-                        "pnl": None if pnl is None else round(float(pnl), 2),
-                    }
+            if desired <= 0.5:
+                if position >= 1:
+                    _fill("卖出", position, px, day, "策略信号清仓")
+                    initial_shares = 0.0
+                    ref_px = 0.0
+                    fired_add.clear()
+                    fired_sell.clear()
+            elif position < 100:
+                equity_now = cash_left + position * px
+                wanted = float(lot_shares(equity_now, px, params, cash_left=cash_left))
+                if wanted >= 100:
+                    _fill("买入", wanted, px, day, "策略开仓")
+                    initial_shares = position
+                    ref_px = px
+                    fired_add.clear()
+                    fired_sell.clear()
+            elif use_ladder:
+                actions, fired_add, fired_sell = plan_ladder_actions(
+                    position=position,
+                    initial_shares=initial_shares or position,
+                    ref_px=ref_px or entry_price or px,
+                    px=px,
+                    fired_add=fired_add,
+                    fired_sell=fired_sell,
                 )
+                for act in actions:
+                    _fill(act["side"], act["qty"], px, day, act["reason"])
+                    if position < 1:
+                        initial_shares = 0.0
+                        ref_px = 0.0
+                        fired_add.clear()
+                        fired_sell.clear()
+                        break
+            # percent 模式：已持仓且信号仍在，维持仓位不变
 
             nav = cash_left + position * float(close[i])
             equity.append(round(nav / cash, 6))
-            equity_dates.append(dates[i])
+            equity_cash.append(round(nav, 2))
+            equity_dates.append(str(dates[i])[:10])
 
         eq = np.array(equity, dtype=float)
         if len(eq) < 2:
@@ -499,9 +910,17 @@ class StrategyCycleService:
                 "sharpe": 0.0,
                 "win_rate": 0.0,
                 "trade_count": 0,
+                "cash": float(cash),
                 "equity": [],
+                "equity_cash": [],
                 "equity_dates": [],
                 "trades": [],
+                "fees": {
+                    **fee_summary(params),
+                    "commission_total": 0.0,
+                    "stamp_total": 0.0,
+                    "fee_total": 0.0,
+                },
             }
 
         total_return = float(eq[-1] / eq[0] - 1)
@@ -516,8 +935,9 @@ class StrategyCycleService:
             sharpe = 0.0
         win_rate = float(wins / closed) if closed else 0.0
 
-        # 权益曲线降采样到约 120 点，便于前端展示
-        equity_out, dates_out = self._downsample(equity, equity_dates, 120)
+        # 前端要画完整 K 线对齐曲线：最多保留 800 点（与 bars 上限一致）
+        equity_out, dates_out = self._downsample(equity, equity_dates, 800)
+        cash_out, _ = self._downsample(equity_cash, equity_dates, 800)
 
         return {
             "total_return": round(total_return, 4),
@@ -525,9 +945,18 @@ class StrategyCycleService:
             "sharpe": round(sharpe, 2),
             "win_rate": round(win_rate, 4),
             "trade_count": len(trades),
+            "cash": float(cash),
+            "final_equity": round(float(equity_cash[-1]), 2) if equity_cash else float(cash),
             "equity": equity_out,
+            "equity_cash": cash_out,
             "equity_dates": dates_out,
-            "trades": trades[-30:],  # 最近 30 笔
+            "trades": trades[-200:],
+            "fees": {
+                **fee_summary(params),
+                "commission_total": round(commission_total, 2),
+                "stamp_total": round(stamp_total, 2),
+                "fee_total": round(commission_total + stamp_total, 2),
+            },
         }
 
     @staticmethod
@@ -563,16 +992,23 @@ class StrategyCycleService:
             # train 段粗略收益
             train_df = df.iloc[max(0, train_end - chunk) : train_end].reset_index(drop=True)
             train_ret = 0.0
+            train_fees: Dict[str, Any] = {}
             if len(train_df) >= 20:
                 tsig = self._generate_signals(strategy_id, train_df, params)
                 tsim = self._simulate(train_df, tsig, cash=cash, exec_price=exec_price, params=params)
                 train_ret = tsim["total_return"]
+                train_fees = tsim.get("fees") or {}
+            test_fees = sim.get("fees") or {}
             rows.append(
                 {
                     "fold": f + 1,
                     "train_ret": train_ret,
                     "test_ret": sim["total_return"],
                     "test_dd": sim["max_drawdown"],
+                    "train_fee": train_fees.get("fee_total", 0.0),
+                    "test_fee": test_fees.get("fee_total", 0.0),
+                    "test_commission": test_fees.get("commission_total", 0.0),
+                    "test_stamp": test_fees.get("stamp_total", 0.0),
                 }
             )
         return rows
@@ -605,9 +1041,10 @@ class StrategyCycleService:
                 trigger_r=float(params.get("trigger_r", 2.0)),
                 slippage_bps=float(params.get("slippage_bps", 5)),
             )
-            sim = trades_to_sim_result(test_trades, cash, test_dates)
+            sim = trades_to_sim_result(test_trades, cash, test_dates, params=params)
             train_df = df.iloc[max(0, train_end - chunk) : train_end].reset_index(drop=True)
             train_ret = 0.0
+            train_fees: Dict[str, Any] = {}
             if len(train_df) >= 30:
                 train_dates = [str(d)[:10] for d in train_df["trade_date"].tolist()]
                 train_trades = sp_backtest(
@@ -617,14 +1054,64 @@ class StrategyCycleService:
                     trigger_r=float(params.get("trigger_r", 2.0)),
                     slippage_bps=float(params.get("slippage_bps", 5)),
                 )
-                tsim = trades_to_sim_result(train_trades, cash, train_dates)
+                tsim = trades_to_sim_result(train_trades, cash, train_dates, params=params)
                 train_ret = tsim["total_return"]
+                train_fees = tsim.get("fees") or {}
+            test_fees = sim.get("fees") or {}
             rows.append(
                 {
                     "fold": f + 1,
                     "train_ret": train_ret,
                     "test_ret": sim["total_return"],
                     "test_dd": sim["max_drawdown"],
+                    "train_fee": train_fees.get("fee_total", 0.0),
+                    "test_fee": test_fees.get("fee_total", 0.0),
+                    "test_commission": test_fees.get("commission_total", 0.0),
+                    "test_stamp": test_fees.get("stamp_total", 0.0),
+                }
+            )
+        return rows
+
+    def _walk_forward_ma60(
+        self,
+        df: pd.DataFrame,
+        params: Dict[str, Any],
+        cash: float,
+        exec_price: str,
+        folds: int = 3,
+    ) -> List[Dict[str, Any]]:
+        from server.ma60_shrink_strategy import MIN_BARS, simulate as ma60_simulate
+
+        n = len(df)
+        if n < MIN_BARS * 2:
+            return []
+        chunk = n // (folds + 1)
+        rows = []
+        for f in range(folds):
+            train_end = chunk * (f + 1)
+            test_end = min(n, train_end + chunk)
+            test_df = df.iloc[train_end:test_end].reset_index(drop=True)
+            if len(test_df) < MIN_BARS:
+                continue
+            sim = ma60_simulate(test_df, cash=cash, params=params, exec_price=exec_price)
+            train_df = df.iloc[max(0, train_end - chunk) : train_end].reset_index(drop=True)
+            train_ret = 0.0
+            train_fees: Dict[str, Any] = {}
+            if len(train_df) >= MIN_BARS:
+                tsim = ma60_simulate(train_df, cash=cash, params=params, exec_price=exec_price)
+                train_ret = tsim["total_return"]
+                train_fees = tsim.get("fees") or {}
+            test_fees = sim.get("fees") or {}
+            rows.append(
+                {
+                    "fold": f + 1,
+                    "train_ret": train_ret,
+                    "test_ret": sim["total_return"],
+                    "test_dd": sim["max_drawdown"],
+                    "train_fee": train_fees.get("fee_total", 0.0),
+                    "test_fee": test_fees.get("fee_total", 0.0),
+                    "test_commission": test_fees.get("commission_total", 0.0),
+                    "test_stamp": test_fees.get("stamp_total", 0.0),
                 }
             )
         return rows

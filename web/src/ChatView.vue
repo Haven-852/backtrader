@@ -399,10 +399,29 @@ interface ChatSession {
   created_at?: string
 }
 
+const LAST_SESSION_KEY = 'aiquant_last_chat_session'
+
 const sessions = ref<ChatSession[]>([])
 const sessionsLoading = ref(false)
 const currentSessionId = ref<string | null>(null)
 const currentSessionTitle = ref('新对话')
+
+function rememberSession(id: string | null) {
+  try {
+    if (id) localStorage.setItem(LAST_SESSION_KEY, id)
+    else localStorage.removeItem(LAST_SESSION_KEY)
+  } catch {
+    /* ignore */
+  }
+}
+
+function readLastSessionId(): string | null {
+  try {
+    return localStorage.getItem(LAST_SESSION_KEY)
+  } catch {
+    return null
+  }
+}
 
 // ─── Skill Panel ─────────────────────────────────────
 const skills = ref<Skill[]>([])
@@ -513,6 +532,7 @@ async function openSession(sessionId: string) {
     const session = res.data.session
     if (!session) return
     currentSessionId.value = session.id
+    rememberSession(session.id)
     currentSessionTitle.value = session.title || '对话'
     if (session.model) selectedModel.value = session.model
     const loaded = (session.messages || []).map((m: any) => ({
@@ -546,6 +566,7 @@ async function deleteSession(sessionId: string) {
 
 function startNewChat() {
   currentSessionId.value = null
+  rememberSession(null)
   currentSessionTitle.value = '新对话'
   messages.value = []
   onMountedInit()
@@ -581,6 +602,7 @@ async function sendMessage() {
     })
     if (res.data.session_id) {
       currentSessionId.value = res.data.session_id
+      rememberSession(res.data.session_id)
       if (!currentSessionTitle.value || currentSessionTitle.value === '新对话') {
         currentSessionTitle.value = msg.length > 40 ? msg.slice(0, 39) + '…' : msg
       }
@@ -755,9 +777,18 @@ function onMountedInit() {
 **💡 提示**：左侧可查看并继续历史对话；发送消息后自动写入 PostgreSQL。右侧「技能面板」可直接查库与跑工具。`)
 }
 
-onMounted(() => {
+onMounted(async () => {
   loadSkills()
-  loadSessions()
-  onMountedInit()
+  await loadSessions()
+  // 页面被浏览器丢弃/刷新后，恢复上次会话，避免又变回欢迎语空对话
+  const lastId = readLastSessionId()
+  const fallbackId = sessions.value[0]?.id || null
+  const restoreId =
+    (lastId && sessions.value.some((s) => s.id === lastId) ? lastId : null) || fallbackId
+  if (restoreId) {
+    await openSession(restoreId)
+  } else {
+    onMountedInit()
+  }
 })
 </script>

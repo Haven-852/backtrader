@@ -66,6 +66,7 @@ app.add_middleware(
 # ─── 注册路由模块 ─────────────────────────────────────
 # 分层：routers（路由层）→ server（服务层）→ data_layer（数据层）
 
+from routers.auth_router import router as auth_router
 from routers.chat_router import router as chat_router
 from routers.model_router import router as model_router
 from routers.system_router import router as system_router
@@ -79,6 +80,7 @@ from routers.knowledge_router import router as knowledge_router
 from routers.data_router import router as data_router
 
 app.include_router(system_router)          # /, /health, /agents
+app.include_router(auth_router)            # /auth/*
 app.include_router(chat_router)            # /chat/*
 app.include_router(model_router)           # /models/*
 app.include_router(dash_router)            # /dash/*
@@ -130,10 +132,15 @@ async def startup_event():
         from server.custom_table_service import custom_table_service
         custom_table_service.ensure()
         logger.info("用户自定义表登记 (user_custom_table) 已就绪")
+        from server.auth_service import auth_service
+        from server.quota_service import quota_service
+        auth_service.ensure()
+        quota_service.ensure()
+        logger.info("账号与配额表 (app_user / app_subscription / app_usage_daily) 已就绪")
     except Exception as e:
         logger.warning(f"PostgreSQL 市场数据管理器初始化失败: {e}")
 
-    logger.info(f"已注册路由: /, /health, /agents, /chat/*, /models/*, /dash/* (含 etf-board), /storage/*, /skills/*, /market/*")
+    logger.info(f"已注册路由: /, /health, /auth/*, /agents, /chat/*, /models/*, /dash/* (含 etf-board), /storage/*, /skills/*, /market/*")
     logger.info(f"可用模型: {len(models)} 个 ({sum(1 for m in models if m.get('available'))} 个已配置)")
     logger.info(f"可用提供商: {[p['id'] for p in providers]}")
     logger.info("=" * 60)
@@ -155,6 +162,16 @@ async def startup_event():
     except Exception as e:
         logger.warning(f"纸面交易定时器启动失败: {e}")
 
+    try:
+        from server.nextday_hl_scheduler import nextday_hl_scheduler
+        if nextday_hl_scheduler.enabled():
+            nextday_hl_scheduler.start()
+            logger.info("次日高低点调度器已启动（日更特征 + 季度重训）")
+        else:
+            logger.info("次日高低点调度器未启用（NEXTDAY_HL_SCHEDULER_ENABLED!=true）")
+    except Exception as e:
+        logger.warning(f"次日高低点调度器启动失败: {e}")
+
 
 @app.on_event("shutdown")
 async def shutdown_event():
@@ -170,6 +187,11 @@ async def shutdown_event():
     try:
         from server.paper_scheduler import paper_scheduler
         await paper_scheduler.stop()
+    except Exception:
+        pass
+    try:
+        from server.nextday_hl_scheduler import nextday_hl_scheduler
+        await nextday_hl_scheduler.stop()
     except Exception:
         pass
 

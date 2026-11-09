@@ -25,7 +25,16 @@ from data_layer.collectors.datahubco.selective import (
     selective_fetcher,
 )
 from data_layer.db_manager import storage_manager
+from server.ma60_shrink_strategy import add_features as add_ma60_features
+from server.screener_methods import (
+    METHOD_BY_ID,
+    classify_method,
+    max_lookback_bars,
+    needs_ma60,
+    resolve_methods,
+)
 from server.structure_pullback import classify_last as classify_structure_pullback
+from server.universe_backtest import daily_regime_map
 
 logger = logging.getLogger(__name__)
 
@@ -118,6 +127,9 @@ class ScreenerService:
             )
             """,
             "ALTER TABLE strategy_screener_hit ADD COLUMN IF NOT EXISTS setup_type VARCHAR(8)",
+            "ALTER TABLE strategy_screener_hit ALTER COLUMN setup_type TYPE VARCHAR(32)",
+            "ALTER TABLE strategy_screener_hit ALTER COLUMN label TYPE VARCHAR(64)",
+            "ALTER TABLE strategy_screener_hit ADD COLUMN IF NOT EXISTS method_id VARCHAR(32)",
             "ALTER TABLE strategy_screener_hit ADD COLUMN IF NOT EXISTS score NUMERIC(8,2)",
             "ALTER TABLE strategy_screener_hit ADD COLUMN IF NOT EXISTS label VARCHAR(32)",
             "ALTER TABLE strategy_screener_hit ADD COLUMN IF NOT EXISTS pct_chg NUMERIC(12,4)",
@@ -559,17 +571,16 @@ class ScreenerService:
             and vol <= 1.0 * vol_ma
         )
 
-    def _classify_one(self, g: pd.DataFrame, asof: date) -> Optional[Dict[str, Any]]:
-        """判断单只股票 D0=asof 属于 A 观察池、B 升势回踩，或抛弃。"""
+    def _prep_short(self, g: pd.DataFrame, asof: date) -> Optional[pd.DataFrame]:
         g = g.sort_values("trade_date").copy()
         for col in ("open", "high", "low", "close", "vol"):
-            g[col] = pd.to_numeric(g[col], errors="coerce")
+            if col in g.columns:
+                g[col] = pd.to_numeric(g[col], errors="coerce")
         if len(g) < LOOKBACK_B:
             return None
         g["ma5"] = g["close"].rolling(MA_PERIOD, min_periods=MA_PERIOD).mean()
         g["vol_ma5"] = g["vol"].rolling(MA_PERIOD, min_periods=MA_PERIOD).mean()
         g["vol_ma20"] = g["vol"].rolling(20, min_periods=10).mean()
-
         last = g.iloc[-1]
         try:
             last_day = pd.Timestamp(last["trade_date"]).date()
@@ -581,8 +592,13 @@ class ScreenerService:
             last["open"], last["high"], last["low"], last["close"], last["vol"], last["ma5"], last["vol_ma5"]
         ):
             return None
+        return g
 
-        # ── B：仍用近 15 日 ──
+    def _classify_b(self, g: pd.DataFrame, asof: date) -> Optional[Dict[str, Any]]:
+        """升势回踩 MA5（原 B）。"""
+        g = self._prep_short(g, asof)
+        if g is None:
+            return None
         g15 = g.tail(LOOKBACK_B)
         o = g15["open"].to_numpy(dtype="float64")
         h = g15["high"].to_numpy(dtype="float64")
@@ -602,7 +618,6 @@ class ScreenerService:
         pct0 = c[-1] / c[-2] - 1.0
         below = (ma[-1] - c[-1]) / ma[-1]
 
-        # 放量下跌：直接抛弃
         if (
             pct0 <= -0.02
             and c[-1] < o[-1]
@@ -622,7 +637,6 @@ class ScreenerService:
         uptrend_votes = int(ret_pre >= 0.05) + int(bool(ma_up)) + int(above_pre >= 8)
         is_uptrend = uptrend_votes >= 2
 
-        # B：升势回踩 MA5（可推荐）
         if is_uptrend and c[-1] < ma[-1] and self._finite(ma[-2], ma[-3], c[-2], c[-3]):
             one_day = c[-2] >= ma[-2]
             two_day = c[-2] < ma[-2] and c[-3] >= ma[-3]
@@ -648,9 +662,25 @@ class ScreenerService:
                         "below_pct": round(float(below * 100), 3),
                         "pct_chg": round(float(pct0 * 100), 3),
                     }
+        return None
 
-        # ── A：观察池（转弯/筑底，非买入）──
+    def _classify_a(self, g: pd.DataFrame, asof: date) -> Optional[Dict[str, Any]]:
+        """缩量筑底观察（原 A），不经过 B 优先拦截。"""
+        g = self._prep_short(g, asof)
+        if g is None:
+            return None
+        last = g.iloc[-1]
+        pct0 = float(last["close"]) / float(g.iloc[-2]["close"]) - 1.0 if float(g.iloc[-2]["close"]) else 0.0
+        ma5 = float(last["ma5"])
+        below = (ma5 - float(last["close"])) / ma5 if ma5 else 0.0
         return self._classify_observe_pool(g, pct0=float(pct0), below=float(below))
+
+    def _classify_one(self, g: pd.DataFrame, asof: date) -> Optional[Dict[str, Any]]:
+        """判断单只股票 D0=asof 属于 A 观察池、B 升势回踩，或抛弃。"""
+        b_hit = self._classify_b(g, asof)
+        if b_hit:
+            return b_hit
+        return self._classify_a(g, asof)
 
     def _classify_observe_pool(
         self,
@@ -875,6 +905,129 @@ class ScreenerService:
             return pd.DataFrame()
         return pd.DataFrame(picked).reset_index(drop=True)
 
+    def _load_bars(self, asof: date, universe: List[Dict[str, Any]], lookback_bars: int) -> pd.DataFrame:
+        if not universe:
+            return pd.DataFrame()
+        lookback = asof - timedelta(days=max(int(lookback_bars), 20) * 3)
+        raw = pd.read_sql(
+            sa_text(
+                "SELECT ts_code, trade_date, open, high, low, close, vol "
+                "FROM stock_daily WHERE trade_date BETWEEN :s AND :e"
+            ),
+            self.engine,
+            params={"s": lookback, "e": asof},
+        )
+        if raw.empty:
+            return raw
+        info_codes = {u["ts_code"] for u in universe}
+        raw = raw[raw["ts_code"].astype(str).str.upper().isin(info_codes)].copy()
+        if raw.empty:
+            return raw
+        raw["ts_code"] = raw["ts_code"].astype(str).str.upper()
+        raw["trade_date"] = pd.to_datetime(raw["trade_date"]).dt.date
+        return raw
+
+    def _market_regime(self, asof: date) -> Dict[str, Any]:
+        out: Dict[str, Any] = {"ts_code": "000300.SH", "regime": "unknown", "asof": asof.isoformat()}
+        try:
+            df = pd.read_sql(
+                sa_text(
+                    "SELECT trade_date, close FROM index_daily "
+                    "WHERE ts_code = '000300.SH' AND trade_date <= :e "
+                    "ORDER BY trade_date DESC LIMIT 180"
+                ),
+                self.engine,
+                params={"e": asof},
+            )
+        except Exception as e:
+            out["error"] = str(e)
+            return out
+        if df is None or df.empty:
+            return out
+        df = df.sort_values("trade_date")
+        mapping = daily_regime_map(df)
+        key = asof.isoformat()
+        out["regime"] = mapping.get(key) or mapping.get(str(df["trade_date"].iloc[-1])[:10]) or "unknown"
+        names = {"trend_up": "上升期", "trend_down": "下降期", "range": "震荡期", "high_vol": "高波动", "unknown": "未知"}
+        out["name"] = names.get(out["regime"], out["regime"])
+        return out
+
+    def _screen_methods(
+        self,
+        asof: date,
+        universe: List[Dict[str, Any]],
+        method_ids: List[str],
+        limit: int,
+        lookback_bars: int,
+    ) -> pd.DataFrame:
+        if not universe or not method_ids:
+            return pd.DataFrame()
+        raw = self._load_bars(asof, universe, lookback_bars)
+        if raw.empty:
+            return pd.DataFrame()
+        info = {u["ts_code"]: u for u in universe}
+        use_ma60 = needs_ma60(method_ids)
+        buckets: Dict[str, List[Dict[str, Any]]] = {mid: [] for mid in method_ids}
+
+        for code, g in raw.groupby("ts_code", sort=False):
+            meta = info.get(str(code)) or {}
+            g = g.sort_values("trade_date")
+            feat60 = None
+            if use_ma60 and len(g) >= 60:
+                try:
+                    feat60 = add_ma60_features(g)
+                except Exception:
+                    feat60 = None
+
+            def _pack(classified: Dict[str, Any]) -> Dict[str, Any]:
+                packed = {
+                    "ts_code": str(code),
+                    "name": meta.get("name") or str(code),
+                    "market": meta.get("market") or "",
+                    "industry": meta.get("industry") or "",
+                    "is_st": bool(meta.get("is_st")),
+                    "trade_date": asof.isoformat(),
+                    **classified,
+                }
+                return packed
+
+            for mid in method_ids:
+                hit = classify_method(
+                    mid,
+                    g,
+                    asof,
+                    feat60=feat60,
+                    classify_b=self._classify_b,
+                    classify_a=self._classify_a,
+                )
+                if hit:
+                    buckets[mid].append(_pack(hit))
+
+        picked: List[Dict[str, Any]] = []
+        n_types = max(1, len(method_ids))
+        share = max(1, int(limit) // n_types)
+        leftover = int(limit)
+        takes: Dict[str, int] = {}
+        for mid in method_ids:
+            rows = buckets[mid]
+            rows.sort(key=lambda r: float(r.get("score") or 0), reverse=True)
+            take = min(len(rows), share)
+            takes[mid] = take
+            leftover -= take
+        if leftover > 0:
+            for mid in method_ids:
+                extra = min(len(buckets[mid]) - takes[mid], leftover)
+                if extra > 0:
+                    takes[mid] += extra
+                    leftover -= extra
+                if leftover <= 0:
+                    break
+        for mid in method_ids:
+            picked.extend(buckets[mid][: takes[mid]])
+        if not picked:
+            return pd.DataFrame()
+        return pd.DataFrame(picked).reset_index(drop=True)
+
     def _save_run(
         self,
         asof: date,
@@ -911,10 +1064,15 @@ class ScreenerService:
                             "industry": r.get("industry"),
                             "is_st": bool(r.get("is_st")),
                             "trade_date": r["trade_date"],
-                            "close": _none_if_na(r["close"]),
-                            "ma5": _none_if_na(r["ma5"]),
-                            "below_pct": _none_if_na(r["below_pct"]),
+                            "close": _none_if_na(r["close"]) if "close" in r else None,
+                            "ma5": _none_if_na(r["ma5"]) if "ma5" in r else None,
+                            "below_pct": _none_if_na(r["below_pct"]) if "below_pct" in r else None,
                             "setup_type": r.get("setup_type"),
+                            "method_id": (
+                                None
+                                if ("method_id" in r and pd.isna(r.get("method_id")))
+                                else (r.get("method_id") or r.get("setup_type"))
+                            ),
                             "score": _none_if_na(r["score"]) if "score" in r else None,
                             "label": r.get("label"),
                             "pct_chg": _none_if_na(r["pct_chg"]) if "pct_chg" in r else None,
@@ -927,20 +1085,105 @@ class ScreenerService:
                     sa_text(
                         "INSERT INTO strategy_screener_hit "
                         "(run_id, ts_code, name, market, industry, is_st, trade_date, "
-                        "close, ma5, below_pct, setup_type, score, label, pct_chg, reason, "
+                        "close, ma5, below_pct, setup_type, method_id, score, label, pct_chg, reason, "
                         "decline_days, expect_up_days) "
                         "VALUES (:run_id, :ts_code, :name, :market, :industry, :is_st, :trade_date, "
-                        ":close, :ma5, :below_pct, :setup_type, :score, :label, :pct_chg, :reason, "
+                        ":close, :ma5, :below_pct, :setup_type, :method_id, :score, :label, :pct_chg, :reason, "
                         ":decline_days, :expect_up_days) "
                         "ON CONFLICT (run_id, ts_code, setup_type) DO UPDATE SET "
                         "close = EXCLUDED.close, ma5 = EXCLUDED.ma5, below_pct = EXCLUDED.below_pct, "
-                        "score = EXCLUDED.score, "
+                        "score = EXCLUDED.score, method_id = EXCLUDED.method_id, "
                         "label = EXCLUDED.label, pct_chg = EXCLUDED.pct_chg, reason = EXCLUDED.reason, "
                         "decline_days = EXCLUDED.decline_days, expect_up_days = EXCLUDED.expect_up_days"
                     ),
                     rows,
                 )
         return int(run_id)
+
+    def _record_from_row(self, r: pd.Series) -> Dict[str, Any]:
+        def _num(key: str, ndigits: int = 4):
+            if key not in r:
+                return None
+            v = r[key]
+            if v is None or (isinstance(v, float) and pd.isna(v)):
+                return None
+            if isinstance(v, (list, dict, bool)):
+                return v
+            try:
+                return round(float(v), ndigits)
+            except (TypeError, ValueError):
+                return v
+
+        def _int(key: str):
+            if key not in r:
+                return None
+            v = r[key]
+            if v is None or isinstance(v, (list, dict)):
+                return None
+            try:
+                if pd.isna(v):
+                    return None
+            except (TypeError, ValueError):
+                pass
+            try:
+                return int(v)
+            except (TypeError, ValueError):
+                return None
+
+        method_id = r["method_id"] if "method_id" in r and pd.notna(r["method_id"]) else r.get("setup_type")
+        spec = METHOD_BY_ID.get(str(method_id) or "", {})
+
+        def _list(key: str, default: List[Any]) -> List[Any]:
+            if key not in r:
+                return default
+            v = r[key]
+            if isinstance(v, list):
+                return v
+            if v is None:
+                return default
+            try:
+                if pd.isna(v):
+                    return default
+            except (TypeError, ValueError):
+                pass
+            try:
+                return list(v)
+            except Exception:
+                return default
+
+        return {
+            "ts_code": str(r["ts_code"]),
+            "name": r["name"],
+            "market": r["market"],
+            "industry": r["industry"],
+            "is_st": bool(r["is_st"]),
+            "trade_date": r["trade_date"],
+            "setup_type": r["setup_type"],
+            "method_id": method_id,
+            "label": r["label"] if "label" in r else spec.get("name"),
+            "reason": r["reason"] if "reason" in r else "",
+            "score": _num("score", 2),
+            "close": _num("close"),
+            "ma5": _num("ma5"),
+            "ma20": _num("ma20"),
+            "ma60": _num("ma60"),
+            "below_pct": _num("below_pct", 3),
+            "pct_chg": _num("pct_chg", 3),
+            "decline_days": _int("decline_days"),
+            "expect_up_days": _int("expect_up_days"),
+            "ma10": _num("ma10"),
+            "atr14": _num("atr14"),
+            "structure_low": _num("structure_low"),
+            "signal_stop": _num("signal_stop"),
+            "risk_fraction_signal": _num("risk_fraction_signal", 5),
+            "vol_pullback": _num("vol_pullback"),
+            "buyable": bool(r["buyable"]) if "buyable" in r and pd.notna(r["buyable"]) else bool(spec.get("buyable")),
+            "steps": _list("steps", list(spec.get("steps") or [])),
+            "regimes": _list("regimes", list(spec.get("regimes") or [])),
+            "stock_regime": r["stock_regime"] if "stock_regime" in r and pd.notna(r.get("stock_regime")) else None,
+            "elder_band": r["elder_band"] if "elder_band" in r and pd.notna(r.get("elder_band")) else None,
+            "vol_20": _num("vol_20", 5),
+        }
 
     def screen_setups(
         self,
@@ -956,11 +1199,13 @@ class ScreenerService:
         limit: int = 60,
         fill: bool = True,
         include_c: bool = False,
+        methods: Optional[List[str]] = None,
     ) -> Dict[str, Any]:
         if not self.engine:
             return {"ok": False, "error": "PostgreSQL 未连接"}
-        if not include_a and not include_b and not include_c:
-            return {"ok": False, "error": "请至少选择 A 观察池、B 升势回踩或 C 趋势回踩"}
+        method_ids = resolve_methods(methods, include_a, include_b, include_c)
+        if not method_ids:
+            return {"ok": False, "error": "请至少选择一种选股方法"}
         self._ensure_tables()
         self.selective.ensure_trade_cal()
         ctx = self.selective.session_context()
@@ -972,6 +1217,8 @@ class ScreenerService:
                 return {"ok": False, "error": "asof 日期无效"}
         asof_d = min(asof_d, ctx["asof_date"])
         limit = max(10, min(int(limit or 60), 1000))
+        lookback = max_lookback_bars(method_ids)
+        use_methods_api = methods is not None
 
         filters = {
             "include_st": include_st,
@@ -983,14 +1230,15 @@ class ScreenerService:
             "include_a": include_a,
             "include_b": include_b,
             "include_c": include_c,
-            "lookback": LOOKBACK_BARS,
+            "methods": method_ids,
+            "lookback": lookback,
         }
         basic_n = self._ensure_stock_basic()
         universe = self._universe_codes(filters)
         if not universe:
             return {"ok": False, "error": "股票池为空，请检查过滤条件或证券主档"}
 
-        days = self._session_days(asof_d, FILL_BARS)
+        days = self._session_days(asof_d, lookback)
         fill_report: Dict[str, Any] = {
             "source": "datahubco",
             "rows": 0,
@@ -1004,65 +1252,58 @@ class ScreenerService:
             fill_report["enabled"] = True
         filled = int(fill_report.get("rows") or 0)
 
-        hits = self._screen_setups(asof_d, universe, include_a, include_b, limit, include_c=include_c)
+        if use_methods_api:
+            hits = self._screen_methods(asof_d, universe, method_ids, limit, lookback)
+        else:
+            hits = self._screen_setups(
+                asof_d,
+                universe,
+                include_a,
+                include_b,
+                limit,
+                include_c=include_c,
+            )
         run_id = self._save_run(asof_d, {**filters, "fill": fill_report}, hits, filled)
         records: List[Dict[str, Any]] = []
         if not hits.empty:
             for _, r in hits.iterrows():
-                records.append(
-                    {
-                        "ts_code": str(r["ts_code"]),
-                        "name": r["name"],
-                        "market": r["market"],
-                        "industry": r["industry"],
-                        "is_st": bool(r["is_st"]),
-                        "trade_date": r["trade_date"],
-                        "setup_type": r["setup_type"],
-                        "label": r["label"],
-                        "reason": r["reason"],
-                        "score": None if pd.isna(r["score"]) else round(float(r["score"]), 2),
-                        "close": None if pd.isna(r["close"]) else round(float(r["close"]), 4),
-                        "ma5": None if pd.isna(r["ma5"]) else round(float(r["ma5"]), 4),
-                        "below_pct": None if pd.isna(r["below_pct"]) else round(float(r["below_pct"]), 3),
-                        "pct_chg": None if pd.isna(r["pct_chg"]) else round(float(r["pct_chg"]), 3),
-                        "decline_days": None if "decline_days" not in r or pd.isna(r["decline_days"]) else int(r["decline_days"]),
-                        "expect_up_days": None if "expect_up_days" not in r or pd.isna(r["expect_up_days"]) else int(r["expect_up_days"]),
-                        "ma10": None if "ma10" not in r or pd.isna(r["ma10"]) else round(float(r["ma10"]), 4),
-                        "ma20": None if "ma20" not in r or pd.isna(r["ma20"]) else round(float(r["ma20"]), 4),
-                        "atr14": None if "atr14" not in r or pd.isna(r["atr14"]) else round(float(r["atr14"]), 4),
-                        "structure_low": None if "structure_low" not in r or pd.isna(r["structure_low"]) else round(float(r["structure_low"]), 4),
-                        "signal_stop": None if "signal_stop" not in r or pd.isna(r["signal_stop"]) else round(float(r["signal_stop"]), 4),
-                        "risk_fraction_signal": None if "risk_fraction_signal" not in r or pd.isna(r["risk_fraction_signal"]) else round(float(r["risk_fraction_signal"]), 5),
-                        "vol_pullback": None if "vol_pullback" not in r or pd.isna(r["vol_pullback"]) else round(float(r["vol_pullback"]), 4),
-                    }
-                )
-        hits_b = [x for x in records if x["setup_type"] == "B"]
-        hits_a = [x for x in records if x["setup_type"] == "A"]
-        hits_c = [x for x in records if x["setup_type"] == "C"]
+                records.append(self._record_from_row(r))
+        hits_b = [x for x in records if x.get("setup_type") == "B" or x.get("method_id") == "b-ma5"]
+        hits_a = [x for x in records if x.get("setup_type") == "A" or x.get("method_id") == "base-watch"]
+        hits_c = [x for x in records if x.get("setup_type") == "C" or x.get("method_id") == "c-struct"]
+        hits_by_method: Dict[str, List[Dict[str, Any]]] = {mid: [] for mid in method_ids}
+        for x in records:
+            mid = str(x.get("method_id") or x.get("setup_type") or "")
+            hits_by_method.setdefault(mid, []).append(x)
+        market = self._market_regime(asof_d)
         fill_errors = fill_report.get("errors") or []
-        note = (
-            "A=观察池（大跌后缩量筑底，只观察不买入）；"
-            "B=升势回踩 MA5 可推荐；"
-            "C=趋势回踩结构止损：MA10>MA20 升势里缩量回踩 MA10，"
-            "收盘出信号、次日开盘买，止损在近10日结构低点，T+1 后才能卖，最多持 5 日。"
-        )
+        names = "、".join(METHOD_BY_ID[m]["name"] for m in method_ids if m in METHOD_BY_ID)
+        note = f"方法 {names} · 加载近 {lookback} 个交易日全市场日线。"
         if fill:
             fetched_n = len(fill_report.get("days_fetched") or [])
             if fetched_n:
                 note += f" 已从 Datahubco 补齐 {fetched_n} 个交易日、写入 {filled} 行。"
             elif fill_report.get("days_skipped"):
-                note += f" 近 {FILL_BARS} 日窗口日线已齐，无需补拉。"
+                note += f" 近 {lookback} 日窗口日线已齐，无需补拉。"
             if fill_errors:
                 note += " 部分交易日补数失败，请看 fill_report.errors。"
             if fill_report.get("asof_enough") is False:
                 note += " 所选交易日覆盖仍不足，分类结果可能偏少。"
+        method_needs = [
+            {"id": m, "name": METHOD_BY_ID[m]["name"], "lookback_bars": METHOD_BY_ID[m]["lookback_bars"], "need": METHOD_BY_ID[m]["need"]}
+            for m in method_ids
+            if m in METHOD_BY_ID
+        ]
         return {
             "ok": True,
             "run_id": run_id,
             "asof": asof_d.isoformat(),
-            "lookback": LOOKBACK_BARS,
+            "lookback": lookback,
             "ma_period": MA_PERIOD,
             "filters": filters,
+            "methods": method_ids,
+            "method_needs": method_needs,
+            "market_regime": market,
             "universe": len(universe),
             "stock_basic": basic_n,
             "window": [d.isoformat() for d in days],
@@ -1072,10 +1313,12 @@ class ScreenerService:
             "hit_count_b": len(hits_b),
             "hit_count_a": len(hits_a),
             "hit_count_c": len(hits_c),
+            "hit_count_by_method": {k: len(v) for k, v in hits_by_method.items()},
             "hits": records,
             "hits_b": hits_b,
             "hits_a": hits_a,
             "hits_c": hits_c,
+            "hits_by_method": hits_by_method,
             "source": "datahubco",
             "table": "stock_daily",
             "note": note,

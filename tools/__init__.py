@@ -611,16 +611,21 @@ SKILL_REGISTRY: Dict[str, Dict[str, Any]] = {
                     "检查并修复 ml_train_daily：把 y_high/y_low 改成「次日高低/当日收盘」；"
                     "用表内截面补行业分位和涨跌家数；一字/停牌写入 session_flag 供 LightGBM 学习；"
                     "停牌日补占位行保证连续；train_ready=1 才可训练。"
-                    "先 action=catalog 看问题清单，再 audit 看数量，最后 fix。"
+                    "截面大表请用 action=fill_cross_section_batched（dates_per_batch=5, max_batches=20, null_only=true），"
+                    "不要用 sql_toolkit 写 UPDATE。先 catalog → audit → 分批截面。"
                 ),
                 "params": [
-                    {"name": "action", "label": "动作", "type": "text", "required": False, "placeholder": "catalog|audit|fix"},
+                    {"name": "action", "label": "动作", "type": "text", "required": False, "placeholder": "catalog|audit|fill_cross_section_batched|fix"},
                     {"name": "limit", "label": "行数/股票数", "type": "number", "required": False, "placeholder": "fix 时≤500=前N行；fill_gaps=股票数"},
                     {"name": "limit_rows", "label": "修复行数", "type": "number", "required": False, "placeholder": "如 200，只修前N行"},
                     {"name": "from_row", "label": "起始行", "type": "number", "required": False, "placeholder": "0"},
                     {"name": "offset", "label": "偏移", "type": "number", "required": False, "placeholder": "0"},
                     {"name": "skip_gaps", "label": "跳过补停牌", "type": "text", "required": False, "placeholder": "fix 时填 true 可先不插停牌行"},
                     {"name": "dry_run", "label": "只统计缺口", "type": "text", "required": False, "placeholder": "fill_gaps 时 true=不写入"},
+                    {"name": "dates_per_batch", "label": "每批交易日", "type": "number", "required": False, "placeholder": "截面分批默认5"},
+                    {"name": "max_batches", "label": "本轮批数", "type": "number", "required": False, "placeholder": "对话建议20"},
+                    {"name": "null_only", "label": "只补NULL", "type": "text", "required": False, "placeholder": "默认true"},
+                    {"name": "reset", "label": "重置进度", "type": "text", "required": False, "placeholder": "true=从头跑截面"},
                 ],
                 "returns": "active_problems / train_ready_rows / steps",
                 "openai_parameters": {
@@ -636,6 +641,7 @@ SKILL_REGISTRY: Dict[str, Dict[str, Any]] = {
                                 "fix_close_location",
                                 "broadcast_market",
                                 "fill_cross_section",
+                                "fill_cross_section_batched",
                                 "fill_gaps",
                                 "mark_session",
                                 "fix_labels",
@@ -646,8 +652,10 @@ SKILL_REGISTRY: Dict[str, Dict[str, Any]] = {
                             ],
                             "description": (
                                 "catalog=问题与解决办法；audit=全表计数；"
-                                "fix=按顺序执行全部本地修复；也可单步 clamp_ohlc/"
-                                "fill_cross_section/fill_gaps/mark_session/fix_labels"
+                                "fix=按顺序执行全部本地修复；"
+                                "fill_cross_section / fill_cross_section_batched="
+                                "按日分批补截面（只补 NULL，可断点续跑）；"
+                                "对话内务必带 max_batches，勿用 sql_toolkit 发 UPDATE"
                             ),
                             "default": "audit",
                         },
@@ -677,6 +685,25 @@ SKILL_REGISTRY: Dict[str, Dict[str, Any]] = {
                         "dry_run": {
                             "type": "boolean",
                             "description": "fill_gaps 只统计不写入",
+                            "default": False,
+                        },
+                        "dates_per_batch": {
+                            "type": "integer",
+                            "description": "截面分批：每批交易日数，默认 5",
+                            "default": 5,
+                        },
+                        "max_batches": {
+                            "type": "integer",
+                            "description": "截面/fix_batches 本轮最多批数；对话建议 10~20，离线可省略",
+                        },
+                        "null_only": {
+                            "type": "boolean",
+                            "description": "截面分批只更新仍为 NULL 的行（默认 true，可断点续跑）",
+                            "default": True,
+                        },
+                        "reset": {
+                            "type": "boolean",
+                            "description": "截面/fix_batches 忽略进度文件从头开始",
                             "default": False,
                         },
                     },
@@ -1910,7 +1937,7 @@ def build_agent_system_prompt(
 2f. **批量拉取今日全部主板分时（训练 LightGBM）**：调用 `datahubco_data__fill_mainboard_mins`。先 `action=status` 看覆盖；`action=fill` 用 `limit`/`offset` 分批写入 Redis+PG；完成后 `action=index` 取 codes，按 `intraday:{{ts_code}}:{{ymd}}` 读 Redis bars。禁止编造分时。
 2f2. **全市场股票清单**：先 `datahubco_data__fill_market_universe` `action=fill`，写入 `ref_market_universe`（约 5575 只，含 board_type）并同步 `ref_stock_basic`；`action=status` 验收。
 2g. **采集 ml_train_daily 训练特征**：先 `datahubco_data__fill_ml_train_daily` `action=check_env`；通过后用 `fill_complete`（如 ts_code=000001.SZ, start_date=2016-01-04）：次日标签、表内截面、停牌占位、`train_ready`（P01–P11）。全市场 `fill_batch`+`limit`/`offset`（从 `ref_market_universe` 读池，批末自动 polish）。训练过滤 `train_ready=1`。禁止一次加载全市场进内存。`board_type` 为主板/科创板/创业板/北交所/ST。
-2h. **修复 ml_train_daily 训练质量**：`datahubco_data__sanitize_ml_train_daily`。先 `catalog` 看问题与办法，再 `audit`，最后 `fix`。`y_high`/`y_low` 必须是次日高低相对当日收盘；一字/停牌用 `session_flag` 学习，不要删这些行。训练过滤 `train_ready=1`。
+2h. **修复 ml_train_daily 训练质量**：`datahubco_data__sanitize_ml_train_daily`。先 `catalog` 看问题与办法，再 `audit`。截面空洞用 `fill_cross_section_batched`（`dates_per_batch=5`、`max_batches=20`、`null_only=true`），`paused` 后同参续跑；勿用 `sql_toolkit` 写库。`y_high`/`y_low` 必须是次日高低相对当日收盘；一字/停牌用 `session_flag`；训练过滤 `train_ready=1`。
 2a. **期货主连 / 行情中心价格**：`futures_market__get_quotes` / `futures_market__ensure_and_get`；缺数或日期不对 → `futures_market__sync_quotes`。禁止编造期货价格。
 2b. 龙虎榜/席位/大宗/两融/北向/资金流；利润表/资产负债/现金流/财务指标/主营构成/审计/分红/快报/披露日程/预告/十大股东；指数主档/周月线/估值/行业分类/权重；基金主档/净值/分红/持仓/复权；限售解禁/质押/增减持/筹码/研报/同花顺概念成分/可转债/期货主档；每日指标/复权/涨跌停价/涨跌停榜/停复牌/新股：`datahubco_data__get_fund_data`；个股二级/三级板块资金：`datahubco_data__get_stock_sector_moneyflow`。
 2c. 用户要生成今日市场记忆、今日行情复盘并准备写入知识库时，调用 `kb_market__today`（知识库-市场记忆-今日）。用工具返回的事实写给用户看。禁止编造涨停家数和成交额。禁止声称已经写入知识库，写入由用户点击「填入市场记忆」完成。

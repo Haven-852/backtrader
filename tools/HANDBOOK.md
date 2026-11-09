@@ -16,6 +16,7 @@
    - **写入训练表 ml_train_daily** → `datahubco_data__fill_ml_train_daily`：先 `check_env`，再 `fill_complete`（单票）或 `fill_batch`+`limit`/`offset`（从 `ref_market_universe` 读池）。采集遵守 P01–P11。训练只用 `train_ready=1`。不要一次拉全市场进内存。  
    - **用户自定义表** → 存储层「AI 建表」或 `sql_toolkit__create_custom_table`；表名 `u_*`，建好后 `list-tables` / `query-exec` 可用。存储层预览先 50 行，滚动继续加载。  
    - **训练表体检与修复** → `datahubco_data__sanitize_ml_train_daily`：先 `catalog` 看问题与办法，再 `audit` 看数量，最后 `fix`。会把 y_high/y_low 改成次日高低/当日收盘，补截面，标记一字/停牌，插入停牌占位行使序列连续。训练只用 `train_ready=1`。  
+   - **截面千万行回写** → 不要用 `sql_toolkit`（只读）。用同一技能的 `fill_cross_section` / `fill_cross_section_batched`（每批 5 日、只补 NULL、可续跑）；对话带 `max_batches=20`，全量跑 `python tools/_run_fill_cross_section.py`。  
    - **期货主连报价 / 行情中心**（黄金原油橡胶股指等）→ **futures-market**（`get-quotes` / `ensure-and-get` / `sync-quotes`）。缺数或日期不对先补数入库，不要编造价格。  
    - 某一天整批东财二级/一级/三级行业行情缺失 → `datahubco_data__fill_sector_gap`（`trade_date`，`level` 默认东财二级行业）。不要逐只用 `get-bars` 代替，也不要编造涨跌幅。
    - 某一个东财板块缺少一段历史行情、上涨家数或回测用的市场环境 → `datahubco_data__fill_sector_history`（`ts_code`、`start_date`、`end_date`）。只调用这一次，不要逐日补，也不要编造涨跌幅。
@@ -133,7 +134,7 @@ ST 按简称含 ST 判断；停牌优先 `ref_suspend_d`（类型 S），当日�
 1. `action=catalog` → 问题清单与对应修复
 2. `action=audit` → 全表计数（截面空值、一字板、标签是否仍是当日公式）
 3. `action=fix` → 本地按序修复（改标签、补截面、标一字/停牌、插停牌占位行、打 train_ready）
-4. 单步：`fix_labels` / `fill_cross_section` / `mark_session` / `fill_gaps` / `mark_train_ready`
+4. 单步：`fix_labels` / `fill_cross_section_batched`（大表截面） / `mark_session` / `fill_gaps` / `mark_train_ready`
 5. `session_flag`∈正常 / 一字涨停 / 一字跌停 / 平盘一字 / 停牌，作为 LightGBM 特征，不要丢掉这些行
 
 ---

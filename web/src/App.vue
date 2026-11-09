@@ -1,5 +1,16 @@
 <template>
-  <div class="h-screen bg-zinc-950 text-zinc-100 flex overflow-hidden">
+  <!-- 单一根节点，避免 HMR/编译在多根 v-if 链上误报缺闭合标签 -->
+  <div class="h-screen overflow-hidden">
+  <div v-if="!bootstrapped" class="h-full bg-[#14110c] text-[#b0a693] flex items-center justify-center gap-2 text-sm">
+    <i class="fa-solid fa-spinner animate-spin"></i> 加载中…
+  </div>
+
+  <div v-else-if="!isLoggedIn" class="h-full overflow-auto bg-[#14110c]">
+    <LandingView v-if="guestView === 'landing'" @get-started="guestView = 'auth'" />
+    <LoginView v-else @back="guestView = 'landing'" />
+  </div>
+
+  <div v-else class="h-full bg-zinc-950 text-zinc-100 flex overflow-hidden">
     <!-- Sidebar -->
     <div class="w-64 bg-zinc-900 border-r border-zinc-800 flex flex-col">
       <div class="p-5 border-b border-zinc-800 flex items-center gap-3">
@@ -106,7 +117,15 @@
 
       </div>
 
-      <div class="p-5 border-t border-zinc-800 text-xs text-zinc-600">
+      <div class="p-5 border-t border-zinc-800 text-xs text-zinc-600 space-y-2">
+        <div v-if="isLoggedIn" class="text-zinc-400">
+          <div class="truncate" :title="user?.email">{{ user?.display_name || user?.email }}</div>
+          <div class="text-[10px] text-zinc-600 mt-0.5">
+            {{ subscription?.is_pro || user?.role === 'admin' ? 'Pro' : 'Free' }}
+            <span v-if="quota"> · 对话 {{ quota.used.chat }}/{{ quota.limits.chat }}</span>
+          </div>
+          <button type="button" class="mt-2 text-[11px] text-zinc-500 hover:text-zinc-300" @click="onLogout">退出登录</button>
+        </div>
         <div class="mb-1">v3.0 · Yuxi 风格架构</div>
         <div>web → routers → server → data</div>
       </div>
@@ -604,10 +623,11 @@
       </div>
     </div>
   </div>
+  </div>
 </template>
 
 <script setup lang="ts">
-import { ref, computed, onMounted, watch } from 'vue'
+import { ref, computed, onMounted, onBeforeUnmount, watch } from 'vue'
 import axios from 'axios'
 import ChatView from './ChatView.vue'
 import DashView from './DashView.vue'
@@ -615,7 +635,33 @@ import MarketDashView from './MarketDashView.vue'
 import StrategyView from './StrategyView.vue'
 import PaperTradeView from './PaperTradeView.vue'
 import KnowledgeView from './KnowledgeView.vue'
+import LoginView from './LoginView.vue'
+import LandingView from './LandingView.vue'
 import { currentTab } from './appNav'
+import { useAuth } from './authStore'
+
+const {
+  user,
+  subscription,
+  quota,
+  bootstrapped,
+  isLoggedIn,
+  bootstrapAuth,
+  logout,
+} = useAuth()
+
+const guestView = ref<'landing' | 'auth'>('landing')
+
+function onLogout() {
+  logout()
+  // 保留 currentTab（已写入 localStorage），重新登录后回到离开前的页签
+  guestView.value = 'landing'
+}
+
+function onUnauthorized() {
+  logout()
+  guestView.value = 'auth'
+}
 
 const tabTitles = ['大模型对话', '行情看板', '存储层状态', '行情中心', '策略分析', '模拟交易', '知识库']
 const tabSubtitles = ['DeepSeek · GPT · Claude', 'K线 · MA · MACD · RSI', '连通测试 · 训练表 · 数据预览', '全市场 · 30张表', '模式A/B · 回测 · 记忆', '纸面账户 · 感知决策执行', '今日认知 · 交易复盘']
@@ -1063,10 +1109,22 @@ function formatCell(val: any): string {
 }
 
 watch(currentTab, (tab) => {
-  if (tab === 2) loadLlmTests()
+  if (tab === 2 && isLoggedIn.value) loadLlmTests()
+})
+
+watch(isLoggedIn, async (ok) => {
+  if (ok) await Promise.all([loadStorageStatus(), loadItems(), loadLlmTests()])
 })
 
 onMounted(async () => {
-  await Promise.all([loadStorageStatus(), loadItems(), loadLlmTests()])
+  window.addEventListener('aiquant:unauthorized', onUnauthorized)
+  await bootstrapAuth()
+  if (isLoggedIn.value) {
+    await Promise.all([loadStorageStatus(), loadItems(), loadLlmTests()])
+  }
+})
+
+onBeforeUnmount(() => {
+  window.removeEventListener('aiquant:unauthorized', onUnauthorized)
 })
 </script>

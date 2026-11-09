@@ -88,7 +88,9 @@ if ($env:BACKEND_RELOAD -eq "1") {
         "--reload-dir", $BackendDir,
         "--reload-dir", (Join-Path $ProjectRoot "routers"),
         "--reload-dir", (Join-Path $ProjectRoot "server"),
-        "--reload-dir", (Join-Path $ProjectRoot "data_layer")
+        "--reload-dir", (Join-Path $ProjectRoot "data_layer"),
+        # 对话技能 / sanitize 分批等均在 tools/，漏掉会导致改了工具却不进 schema
+        "--reload-dir", (Join-Path $ProjectRoot "tools")
     )
 }
 & $PythonExe -m uvicorn main:app `

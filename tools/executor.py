@@ -380,6 +380,7 @@ async def _exec_datahubco(toolkit, tool_id: str, payload: Dict[str, Any]) -> Dic
     if tool_id in ("sanitize-ml-train-daily", "sanitize_ml_train_daily"):
         from tools.ml_train_sanitize_toolkit import ml_train_sanitize_toolkit
 
+        # 透传对话/面板全部参数，避免漏掉 dates_per_batch / null_only 等新字段
         return await ml_train_sanitize_toolkit.run_async(
             action=str(payload.get("action") or "audit"),
             limit=payload.get("limit"),
@@ -391,6 +392,10 @@ async def _exec_datahubco(toolkit, tool_id: str, payload: Dict[str, Any]) -> Dic
             fill_gaps_after=payload.get("fill_gaps_after"),
             max_batches=payload.get("max_batches"),
             reset=payload.get("reset"),
+            dates_per_batch=payload.get("dates_per_batch"),
+            null_only=payload.get("null_only"),
+            one_shot=payload.get("one_shot"),
+            auto_cap_batches=payload.get("auto_cap_batches"),
         )
 
     if tool_id in ("fill-market-universe", "fill_market_universe"):

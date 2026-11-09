@@ -13,6 +13,8 @@ from typing import Any, Dict, List, Optional
 import numpy as np
 import pandas as pd
 
+from server.a_share_fees import affordable_buy_shares, calc_fees, fee_summary
+
 MA10 = 10
 MA20 = 20
 ATR_N = 14
@@ -24,6 +26,43 @@ GAP_CHASE = 1.01
 
 def _num(s: pd.Series) -> pd.Series:
     return pd.to_numeric(s, errors="coerce")
+
+
+def lot_shares(
+    equity: float,
+    px: float,
+    params: Optional[Dict[str, Any]] = None,
+    cash_left: Optional[float] = None,
+) -> int:
+    """A 股整手仓位：按总资产比例下单，不足一手则不开。
+
+    position_pct 默认 30，避免回测里不是全仓就是 100 股。
+    max_lots 为 0 表示不限制手数。
+    """
+    p = params or {}
+    try:
+        pct = float(p.get("position_pct", 30) or 30)
+    except (TypeError, ValueError):
+        pct = 30.0
+    pct = min(max(pct, 0.0), 100.0) / 100.0
+    try:
+        reserve = float(p.get("reserve_pct", 2) or 0)
+    except (TypeError, ValueError):
+        reserve = 2.0
+    reserve = min(max(reserve, 0.0), 50.0) / 100.0
+    try:
+        max_lots = int(p.get("max_lots") or 0)
+    except (TypeError, ValueError):
+        max_lots = 0
+    px = max(float(px or 0), 1e-6)
+    budget = max(0.0, float(equity or 0)) * pct
+    if cash_left is not None:
+        spendable = max(0.0, float(cash_left)) * (1.0 - reserve)
+        budget = min(budget, spendable)
+    shares = int(np.floor(budget / px / 100.0) * 100)
+    if max_lots > 0:
+        shares = min(shares, max_lots * 100)
+    return shares if shares >= 100 else 0
 
 
 def add_features(g: pd.DataFrame) -> pd.DataFrame:
@@ -230,61 +269,99 @@ def backtest(
     return pd.DataFrame(trades)
 
 
-def trades_to_sim_result(trades: pd.DataFrame, cash: float, dates: List[str]) -> Dict[str, Any]:
+def trades_to_sim_result(
+    trades: pd.DataFrame,
+    cash: float,
+    dates: List[str],
+    params: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
     """把逐笔交易转成策略分析回测面板要用的权益曲线。"""
     if trades is None or trades.empty:
         eq = [1.0] * max(1, len(dates))
+        cash_curve = [float(cash)] * max(1, len(dates))
         return {
             "total_return": 0.0,
             "max_drawdown": 0.0,
             "sharpe": 0.0,
             "win_rate": 0.0,
             "trade_count": 0,
-            "equity": eq[:120],
-            "equity_dates": dates[:120],
+            "cash": float(cash),
+            "final_equity": float(cash),
+            "equity": eq[:800],
+            "equity_cash": cash_curve[:800],
+            "equity_dates": [str(d)[:10] for d in dates[:800]],
             "trades": [],
+            "fees": {
+                **fee_summary(params),
+                "commission_total": 0.0,
+                "stamp_total": 0.0,
+                "fee_total": 0.0,
+            },
         }
 
-    nav = float(cash)
+    cash_left = float(cash)
     curve_map: Dict[str, float] = {}
     ui_trades: List[Dict[str, Any]] = []
     wins = 0
+    commission_total = 0.0
+    stamp_total = 0.0
     for _, t in trades.iterrows():
-        ret = float(t["gross_return_before_fees"])
-        pnl = nav * ret
-        nav *= 1.0 + ret
-        if ret > 0:
+        entry_px = float(t["entry_price"])
+        exit_px = float(t["exit_price"])
+        size = lot_shares(cash_left, entry_px, params, cash_left=cash_left)
+        size = min(size, affordable_buy_shares(cash_left, entry_px, params))
+        if size < 100:
+            continue
+        buy_amt = size * entry_px
+        buy_comm, buy_stamp = calc_fees("买入", buy_amt, params)
+        cash_left -= buy_amt + buy_comm
+        sell_amt = size * exit_px
+        sell_comm, sell_stamp = calc_fees("卖出", sell_amt, params)
+        cash_left += sell_amt - sell_comm - sell_stamp
+        pnl = sell_amt - buy_amt - buy_comm - sell_comm - sell_stamp
+        commission_total += buy_comm + sell_comm
+        stamp_total += buy_stamp + sell_stamp
+        if pnl > 0:
             wins += 1
         entry_d = str(t["entry_date"])[:10]
         exit_d = str(t["exit_date"])[:10]
-        curve_map[exit_d] = nav / cash
+        curve_map[exit_d] = cash_left / float(cash) if cash else 1.0
         ui_trades.append(
             {
                 "date": entry_d,
                 "side": "买入",
-                "price": float(t["entry_price"]),
-                "size": 100,
+                "price": entry_px,
+                "size": size,
                 "pnl": None,
+                "reason": "策略开仓",
+                "commission": round(float(buy_comm), 2),
+                "stamp_tax": round(float(buy_stamp), 2),
+                "fee": round(float(buy_comm + buy_stamp), 2),
             }
         )
         ui_trades.append(
             {
                 "date": exit_d,
                 "side": "卖出",
-                "price": float(t["exit_price"]),
-                "size": 100,
+                "price": exit_px,
+                "size": size,
                 "pnl": round(pnl, 2),
                 "reason": t.get("exit_reason"),
+                "commission": round(float(sell_comm), 2),
+                "stamp_tax": round(float(sell_stamp), 2),
+                "fee": round(float(sell_comm + sell_stamp), 2),
             }
         )
 
     equity: List[float] = []
+    equity_cash: List[float] = []
     last = 1.0
     for d in dates:
         key = str(d)[:10]
         if key in curve_map:
             last = curve_map[key]
         equity.append(round(last, 6))
+        equity_cash.append(round(float(cash) * last, 2))
 
     eq = np.array(equity, dtype=float)
     total_return = float(eq[-1] / eq[0] - 1) if len(eq) else 0.0
@@ -297,20 +374,31 @@ def trades_to_sim_result(trades: pd.DataFrame, cash: float, dates: List[str]) ->
         sharpe = float(rets.mean() / rets.std() * (252 ** 0.5))
     else:
         sharpe = 0.0
-    n = len(trades)
-    if len(equity) > 120:
-        idx = np.linspace(0, len(equity) - 1, 120).astype(int)
+    n = max(0, len(ui_trades) // 2)
+    if len(equity) > 800:
+        idx = np.linspace(0, len(equity) - 1, 800).astype(int)
         equity_out = [equity[i] for i in idx]
+        cash_out = [equity_cash[i] for i in idx]
         dates_out = [str(dates[i])[:10] for i in idx]
     else:
-        equity_out, dates_out = equity, [str(d)[:10] for d in dates]
+        equity_out, cash_out = equity, equity_cash
+        dates_out = [str(d)[:10] for d in dates]
     return {
         "total_return": round(total_return, 4),
         "max_drawdown": round(max_drawdown, 4),
         "sharpe": round(sharpe, 2),
         "win_rate": round(wins / n, 4) if n else 0.0,
         "trade_count": n,
+        "cash": float(cash),
+        "final_equity": round(float(equity_cash[-1]), 2) if equity_cash else float(cash),
         "equity": equity_out,
+        "equity_cash": cash_out,
         "equity_dates": dates_out,
-        "trades": ui_trades[-30:],
+        "trades": ui_trades[-200:],
+        "fees": {
+            **fee_summary(params),
+            "commission_total": round(commission_total, 2),
+            "stamp_total": round(stamp_total, 2),
+            "fee_total": round(commission_total + stamp_total, 2),
+        },
     }
